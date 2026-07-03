@@ -1,0 +1,36 @@
+risk:
+  min_liquidity_sol: 10.0
+  max_top10_holder_pct: 50.0
+  max_creator_holding_pct: 10.0
+  min_age_minutes: 5
+  min_unique_buyers: 20
+  require_mint_authority_revoked: true
+  require_freeze_authority_revoked: true
+
+position:
+  max_single_position_sol: 0.5
+  max_portfolio_sol: 5.0
+  max_open_positions: 5
+  default_slippage_bps: 300
+  max_slippage_bps: 500
+
+exits:
+  tp_levels:
+    - { multiple: 2.0,  sell_pct: 0.25 }
+    - { multiple: 5.0,  sell_pct: 0.25 }
+    - { multiple: 10.0, sell_pct: 0.25 }
+    - { multiple: 20.0, sell_pct: 0.25 }
+  stop_loss_pct: 0.50
+  time_stop_minutes: 120
+  trail_stop_pct: 0.30
+
+execution:
+  mode: paper
+  rpc_provider: helius
+  priority_fee_lamports: 10000
+  tx_retry_count: 3
+  tx_confirm_timeout_s: 30
+
+monitoring:
+  heartbeat_interval_s: 60
+  log_level: INFO
