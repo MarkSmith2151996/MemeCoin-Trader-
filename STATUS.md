@@ -22,7 +22,7 @@ Default execution mode: paper trading
 - `src/execution/` defines the execution adapter contract plus paper and live adapter implementations.
 - `src/signals/` defines async signal-source contracts; `whale_tracker.py` polls Helius enhanced address transactions and `pump_fun.py` now buffers websocket events, falls back to HTTP polling, and normalizes pump.fun payloads into `Signal` objects.
 - `src/strategy/` contains decision, portfolio, position, and exit helpers.
-- `src/monitoring/` contains lightweight health, alert, and dashboard placeholders.
+- `src/monitoring/` contains lightweight health, alert, and dashboard helpers for runtime visibility.
 
 ## File Map
 
@@ -34,11 +34,15 @@ Default execution mode: paper trading
 - `src/strategy/decision_engine.py`: async risk-gated buy evaluation plus open-position exit scanning and sell execution.
 - `src/strategy/position_manager.py`: async open-position persistence, exposure tracking, partial exits, and close handling.
 - `src/strategy/exits.py`: take-profit ladder, stop-loss, time-stop, liquidity, and emergency exit evaluation.
+- `src/monitoring/health.py`: process-level health probe plus the dashboard-compatible `HealthMonitor` shim.
+- `src/monitoring/dashboard.py`: Rich terminal dashboard that reads the canonical runtime DB path, recent trades/positions, and monitoring health.
 - `tests/`: smoke tests for risk contracts, signal aggregation, paper execution, whale tracker polling behavior, and pump.fun normalization/deduplication.
 - `tests/test_strategy.py`: focused coverage for decision-engine risk gating and exit-rule behavior.
+- `tests/test_monitoring.py`: focused coverage for dashboard DB-path resolution, health compatibility, and one-shot dashboard rendering.
 
 ## Last 10 Changes
 
+- 2026-07-06 CT-088: Added a dashboard-compatible `HealthMonitor`, aligned the dashboard's canonical DB path to `data/trades.db`, and tightened monitoring smoke coverage.
 - 2026-07-06 CT-082: Implemented the decision engine, position manager, exit ladder, and focused strategy tests.
 - 2026-07-06 CT-080: Implemented the pump.fun monitor with websocket buffering, HTTP fallback polling, payload normalization, and focused signal tests.
 - 2026-07-06 CT-081: Implemented a Helius polling-based whale wallet tracker, added tracked-wallet config placeholders, and covered signal emission/dedup behavior with focused tests.

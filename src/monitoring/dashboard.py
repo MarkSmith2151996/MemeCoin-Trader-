@@ -25,11 +25,8 @@ from src.core.models import Position, PositionStatus, Signal, SignalSource, Sign
 from src.monitoring import health as health_module
 from src.strategy.portfolio import open_exposure_sol
 
-DEFAULT_DB_PATH = Path("data/memecoin_trader.db")
-SUPPORTED_HEALTH_INTERFACE = (
-    "HealthMonitor(max_staleness_s=...).status()/stale_components() is unavailable in "
-    "src.monitoring.health"
-)
+# Core persistence takes an injected path, so the dashboard follows the repo's canonical runtime DB.
+DEFAULT_DB_PATH = Path("data/trades.db")
 
 
 @dataclass(slots=True)
@@ -92,9 +89,6 @@ def load_dashboard_snapshot(
     except sqlite3.Error as exc:
         snapshot.warnings.append(f"Database query failed: {exc}")
 
-    if not snapshot.recent_signals:
-        snapshot.warnings.append("No persisted signals available")
-
     return snapshot
 
 
@@ -117,7 +111,7 @@ def collect_health_snapshot(max_staleness_s: int) -> tuple[dict[str, dict[str, A
                 "message": getattr(health_status, "message", "unknown"),
                 "checked_at": getattr(health_status, "checked_at", None),
             }
-        }, [], [SUPPORTED_HEALTH_INTERFACE]
+        }, [], []
 
     return {}, [], ["No health interface available in src.monitoring.health"]
 

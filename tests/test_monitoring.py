@@ -1,9 +1,13 @@
+import asyncio
 from datetime import UTC, datetime
+from pathlib import Path
 
 from src.core.config import Settings
+from src.core.database import init_db
 from src.core.models import Position, PositionStatus, Trade
 from src.monitoring.alerts import AlertManager, format_alert_message
-from src.monitoring.dashboard import SUPPORTED_HEALTH_INTERFACE, load_dashboard_snapshot, summarize_positions
+from src.monitoring.dashboard import load_dashboard_snapshot, resolve_db_path, run_dashboard, summarize_positions
+from src.monitoring.health import HealthMonitor
 
 
 def test_summarize_positions_uses_open_exposure_only() -> None:
@@ -38,7 +42,31 @@ def test_load_dashboard_snapshot_handles_missing_db() -> None:
     assert snapshot.recent_signals == []
     assert snapshot.open_positions == []
     assert any("Database not found" in warning for warning in snapshot.warnings)
-    assert SUPPORTED_HEALTH_INTERFACE in snapshot.warnings
+
+
+def test_health_monitor_matches_dashboard_contract() -> None:
+    status = HealthMonitor(max_staleness_s=120).status()
+
+    assert status["monitoring"]["ok"] is True
+    assert status["monitoring"]["message"] == "memecoin-trader scaffold healthy"
+    assert HealthMonitor(max_staleness_s=120).stale_components() == []
+
+
+def test_resolve_db_path_uses_project_default(monkeypatch) -> None:
+    monkeypatch.delenv("MEMECOIN_DB_PATH", raising=False)
+    monkeypatch.delenv("DATABASE_PATH", raising=False)
+
+    assert resolve_db_path() == Path("data/trades.db")
+
+
+def test_run_dashboard_once_renders_without_signal_warning(tmp_path) -> None:
+    db_path = tmp_path / "trades.db"
+    asyncio.run(init_db(db_path))
+
+    run_dashboard(db_path=db_path, once=True)
+
+    snapshot = load_dashboard_snapshot(Settings(), db_path=db_path)
+    assert "No persisted signals available" not in snapshot.warnings
 
 
 def test_alert_manager_defaults_to_log_channel_only() -> None:
