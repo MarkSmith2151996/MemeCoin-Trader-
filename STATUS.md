@@ -20,7 +20,7 @@ Default execution mode: paper trading
 - `src/chain/` contains Solana/Jupiter/wallet integration placeholders.
 - `src/risk/` contains token risk checks and aggregate scoring.
 - `src/execution/` defines the execution adapter contract plus paper and live adapter implementations.
-- `src/signals/` defines async signal-source contracts and placeholder source implementations.
+- `src/signals/` defines async signal-source contracts; `whale_tracker.py` polls Helius enhanced address transactions and `pump_fun.py` now buffers websocket events, falls back to HTTP polling, and normalizes pump.fun payloads into `Signal` objects.
 - `src/strategy/` contains decision, portfolio, position, and exit helpers.
 - `src/monitoring/` contains lightweight health, alert, and dashboard placeholders.
 
@@ -29,15 +29,24 @@ Default execution mode: paper trading
 - `.env.example`: expected environment variables for RPC, APIs, wallet, and position caps.
 - `pyproject.toml`: Python package metadata, dependencies, dev dependencies, pytest, and Ruff config.
 - `config/settings.yaml`: risk, position, exit, execution, and monitoring defaults.
+- `config/wallets_to_track.yaml`: whale wallet watchlist with disabled placeholder entries that keep startup safe until real wallets are configured.
 - `scripts/check_token.py`: smoke-check script for building a token model and running risk scoring.
-- `tests/`: smoke tests for risk contracts, signal aggregation, and paper execution.
+- `src/strategy/decision_engine.py`: async risk-gated buy evaluation plus open-position exit scanning and sell execution.
+- `src/strategy/position_manager.py`: async open-position persistence, exposure tracking, partial exits, and close handling.
+- `src/strategy/exits.py`: take-profit ladder, stop-loss, time-stop, liquidity, and emergency exit evaluation.
+- `tests/`: smoke tests for risk contracts, signal aggregation, paper execution, whale tracker polling behavior, and pump.fun normalization/deduplication.
+- `tests/test_strategy.py`: focused coverage for decision-engine risk gating and exit-rule behavior.
 
 ## Last 10 Changes
 
+- 2026-07-06 CT-082: Implemented the decision engine, position manager, exit ladder, and focused strategy tests.
+- 2026-07-06 CT-080: Implemented the pump.fun monitor with websocket buffering, HTTP fallback polling, payload normalization, and focused signal tests.
+- 2026-07-06 CT-081: Implemented a Helius polling-based whale wallet tracker, added tracked-wallet config placeholders, and covered signal emission/dedup behavior with focused tests.
 - 2026-07-02 CT-079: Created Phase 1 scaffold and project metadata for Memecoin Trader.
 
 ## Known Issues
 
 - Live Jupiter execution is intentionally not implemented yet.
-- Signal sources currently return empty lists until provider integrations are added.
+- Whale tracker is polling-only for now; webhook ingestion still needs a public callback endpoint and receiver.
+- pump.fun uses best-effort public endpoint assumptions until the project selects a stable provider contract.
 - Risk checks use conservative local token fields until on-chain enrichment is implemented.
