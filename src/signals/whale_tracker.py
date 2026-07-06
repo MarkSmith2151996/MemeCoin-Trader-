@@ -9,6 +9,7 @@ from pathlib import Path
 
 import httpx
 import yaml
+from dotenv import dotenv_values
 
 from src.core.models import Signal
 from src.core.models import SignalSource as SignalSourceEnum
@@ -36,13 +37,15 @@ class WhaleWalletTracker(SignalSource):
     def __init__(
         self,
         wallets_config_path: str | Path | None = None,
+        dotenv_path: str | Path | None = None,
         api_key: str | None = None,
         poll_limit: int = 25,
         timeout_s: float = 15.0,
     ) -> None:
         repo_root = Path(__file__).resolve().parents[2]
         self._wallets_config_path = Path(wallets_config_path or repo_root / "config/wallets_to_track.yaml")
-        self._api_key = api_key or os.getenv("HELIUS_API_KEY", "").strip()
+        self._dotenv_path = Path(dotenv_path or repo_root / ".env")
+        self._api_key = api_key or self._load_api_key()
         self._poll_limit = max(poll_limit, 1)
         self._timeout_s = timeout_s
         self._client: httpx.AsyncClient | None = None
@@ -119,13 +122,28 @@ class WhaleWalletTracker(SignalSource):
 
         response = await self._client.get(
             f"https://api.helius.xyz/v0/addresses/{wallet_address}/transactions",
-            params={"api-key": self._api_key, "limit": self._poll_limit},
+            params={
+                "api-key": self._api_key,
+                "limit": self._poll_limit,
+                "token-accounts": "balanceChanged",
+            },
         )
         response.raise_for_status()
         payload = response.json()
         if isinstance(payload, list):
             return [item for item in payload if isinstance(item, dict)]
         return []
+
+    def _load_api_key(self) -> str:
+        direct_value = os.getenv("HELIUS_API_KEY", "").strip()
+        if direct_value:
+            return direct_value
+        if not self._dotenv_path.exists():
+            return ""
+        dotenv_value = dotenv_values(self._dotenv_path).get("HELIUS_API_KEY")
+        if isinstance(dotenv_value, str):
+            return dotenv_value.strip()
+        return ""
 
     def _build_signal(self, wallet: TrackedWallet, transaction: dict[str, object]) -> Signal | None:
         transfers = transaction.get("tokenTransfers")

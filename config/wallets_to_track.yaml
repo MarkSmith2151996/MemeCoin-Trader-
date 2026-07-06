@@ -1,10 +1,10 @@
-# Whale wallets to monitor. Replace placeholders with known profitable wallets.
+# Whale wallets to monitor. Replace these public sample addresses with wallets you want to track.
 wallets:
-  - address: "<placeholder_wallet_1>"
-    label: "whale_1"
+  - address: "86xCnPeV69n6t3DnyGvkKobf9FdN2H9oiVDdaMpo2MMY"
+    label: "sample_public_wallet_1"
     tier: "S"
-    enabled: false
-  - address: "<placeholder_wallet_2>"
-    label: "whale_2"
+    enabled: true
+  - address: "AArPXm8JatJiuyEffuC1un2Sc835SULa4uQqDcaGpAjV"
+    label: "sample_public_wallet_2"
     tier: "A"
-    enabled: false
+    enabled: true

@@ -29,8 +29,10 @@ Default execution mode: paper trading
 - `.env.example`: expected environment variables for RPC, APIs, wallet, and position caps.
 - `pyproject.toml`: Python package metadata, dependencies, dev dependencies, pytest, and Ruff config.
 - `config/settings.yaml`: risk, position, exit, execution, and monitoring defaults.
-- `config/wallets_to_track.yaml`: whale wallet watchlist with disabled placeholder entries that keep startup safe until real wallets are configured.
+- `config/wallets_to_track.yaml`: public sample wallet watchlist used for safe whale-tracker dry runs until real tracked wallets are configured locally.
 - `scripts/check_token.py`: smoke-check script for building a token model and running risk scoring.
+- `src/signals/pump_fun.py`: websocket-first pump.fun monitor with verified PumpPortal `subscribeNewToken` and `subscribeMigration` subscriptions plus v3 HTTP fallback over `/coins` and `/coins/currently-live`.
+- `src/signals/whale_tracker.py`: Helius enhanced-transactions poller that reads `HELIUS_API_KEY` from environment or local `.env`, includes token-account activity, deduplicates signatures, and emits whale-buy `Signal` objects.
 - `src/strategy/decision_engine.py`: async risk-gated buy evaluation plus open-position exit scanning and sell execution.
 - `src/strategy/position_manager.py`: async open-position persistence, exposure tracking, partial exits, and close handling.
 - `src/strategy/exits.py`: take-profit ladder, stop-loss, time-stop, liquidity, and emergency exit evaluation.
@@ -38,11 +40,15 @@ Default execution mode: paper trading
 - `src/monitoring/dashboard.py`: Rich terminal dashboard that reads the canonical runtime DB path, recent trades/positions, and monitoring health.
 - `tests/`: smoke tests for risk contracts, signal aggregation, paper execution, whale tracker polling behavior, and pump.fun normalization/deduplication.
 - `tests/test_e2e_paper.py`: offline signal-to-trade smoke covering decision-engine approval, paper execution, trade persistence, position persistence, and dashboard visibility on a temporary SQLite DB.
+- `tests/test_pump_fun_provider.py`: focused provider-shape coverage for live-style pump.fun create payloads, graduation detection from migration fields, and safe handling of websocket ack/malformed messages.
+- `tests/test_whale_tracker_provider.py`: focused provider tests for dotenv-based Helius key loading, token-account polling params, Helius-style buy normalization, dedupe, and safe empty/malformed handling.
 - `tests/test_strategy.py`: focused coverage for decision-engine risk gating and exit-rule behavior.
 - `tests/test_monitoring.py`: focused coverage for dashboard DB-path resolution, health compatibility, and one-shot dashboard rendering.
 
 ## Last 10 Changes
 
+- 2026-07-06 CT-093: Added dotenv-backed Helius key loading, switched whale polling to include token-account balance changes, replaced placeholder wallets with public sample addresses, and added focused provider tests; live Helius verification failed locally because `.env` and `HELIUS_API_KEY` were still missing at execution time.
+- 2026-07-06 CT-091: Verified PumpPortal websocket token-creation and migration subscriptions live, corrected the rejected `subscribeNewPairs` assumption, switched HTTP fallback to working frontend v3 coin-list endpoints, and added focused provider-shape tests.
 - 2026-07-06 CT-090: Added an offline end-to-end paper smoke test that pushes a fake pump.fun signal through the real decision engine, persists the trade and position to a temporary DB, and verifies dashboard visibility without external APIs.
 - 2026-07-06 CT-088: Added a dashboard-compatible `HealthMonitor`, aligned the dashboard's canonical DB path to `data/trades.db`, and tightened monitoring smoke coverage.
 - 2026-07-06 CT-082: Implemented the decision engine, position manager, exit ladder, and focused strategy tests.
@@ -54,5 +60,6 @@ Default execution mode: paper trading
 
 - Live Jupiter execution is intentionally not implemented yet.
 - Whale tracker is polling-only for now; webhook ingestion still needs a public callback endpoint and receiver.
-- pump.fun uses best-effort public endpoint assumptions until the project selects a stable provider contract.
+- CT-093 added `.env` loading and public sample wallets for whale-tracker verification, but the live Helius dry run could not authenticate locally because `/home/dev/projects/memecoin-trader/.env` was absent and `HELIUS_API_KEY` was not present in the process environment at execution time.
+- pump.fun websocket token-creation and migration subscriptions are now verified against PumpPortal, but the short dry-run did not capture a live migration payload; graduation normalization is still proven by offline fixtures rather than observed runtime traffic.
 - Risk checks use conservative local token fields until on-chain enrichment is implemented.
