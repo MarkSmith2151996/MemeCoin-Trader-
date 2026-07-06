@@ -1,0 +1,10 @@
+# Whale wallets to monitor. Replace placeholders with known profitable wallets.
+wallets:
+  - address: "<placeholder_wallet_1>"
+    label: "whale_1"
+    tier: "S"
+    enabled: false
+  - address: "<placeholder_wallet_2>"
+    label: "whale_2"
+    tier: "A"
+    enabled: false
