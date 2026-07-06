@@ -47,6 +47,7 @@ Default execution mode: paper trading
 
 ## Last 10 Changes
 
+- 2026-07-06 CT-094: Committed the pending pump.fun provider verification changes, pushed `master` to the new GitHub `origin`, and kept the local `opencode.json` out of git because it contains an API key; Berj access was added via `/home/dev/bin/berj-picker`.
 - 2026-07-06 CT-093: Added dotenv-backed Helius key loading, switched whale polling to include token-account balance changes, replaced placeholder wallets with public sample addresses, and added focused provider tests; live Helius verification failed locally because `.env` and `HELIUS_API_KEY` were still missing at execution time.
 - 2026-07-06 CT-091: Verified PumpPortal websocket token-creation and migration subscriptions live, corrected the rejected `subscribeNewPairs` assumption, switched HTTP fallback to working frontend v3 coin-list endpoints, and added focused provider-shape tests.
 - 2026-07-06 CT-090: Added an offline end-to-end paper smoke test that pushes a fake pump.fun signal through the real decision engine, persists the trade and position to a temporary DB, and verifies dashboard visibility without external APIs.
