@@ -20,14 +20,13 @@ HTTPFetcher = Callable[[httpx.AsyncClient, str], Awaitable[object]]
 WebsocketConnector = Callable[[str], Any]
 
 DEFAULT_HTTP_URLS = (
-    "https://frontend-api-v3.pump.fun/coins/latest?offset=0&limit=50&includeNsfw=true",
-    "https://frontend-api.pump.fun/coins/latest?offset=0&limit=50&includeNsfw=true",
+    "https://frontend-api-v3.pump.fun/coins?offset=0&limit=50&includeNsfw=true",
+    "https://frontend-api-v3.pump.fun/coins/currently-live?offset=0&limit=50&includeNsfw=true",
 )
 DEFAULT_WS_URL = "wss://pumpportal.fun/api/data"
 DEFAULT_SUBSCRIPTIONS = (
     {"method": "subscribeNewToken"},
     {"method": "subscribeMigration"},
-    {"method": "subscribeNewPairs"},
 )
 
 
@@ -220,7 +219,16 @@ class PumpFunMonitor(SignalSource):
     def _signal_type_from_payload(self, payload: Mapping[str, object]) -> SignalType:
         event_name = " ".join(
             str(payload.get(field_name, ""))
-            for field_name in ("event", "type", "eventType", "method", "channel")
+            for field_name in (
+                "event",
+                "type",
+                "eventType",
+                "method",
+                "channel",
+                "txType",
+                "tx_type",
+                "pool",
+            )
         ).lower()
 
         if any(keyword in event_name for keyword in ("graduat", "migration", "migrate", "raydium")):
