@@ -16,6 +16,8 @@ from src.chain.rpc import SolanaRpcClient
 from src.core.config import RiskConfig
 from src.core.models import CheckResult, RiskAssessment, Signal, SignalSource, SignalType, TokenInfo
 from src.risk.contract_audit import check_freeze_authority, check_honeypot, check_mint_authority
+from src.risk.funding_analysis import FundingAnalysisResult, FundingTransferProvider, analyze_buyer_funding
+from src.risk.funding_provider import HeliusFundingProvider
 from src.risk.holders import check_creator_holding, check_top10_holders
 from src.risk.liquidity import check_age, check_liquidity, check_unique_buyers
 from src.risk.rugcheck import RugCheckClient, RugCheckResult
@@ -97,23 +99,32 @@ class DiscoveryRiskScorer:
         config: RiskConfig,
         holder_lookup: ReadOnlyHolderLookup | None = None,
         rugcheck_client: RugCheckClient | None = None,
+        funding_provider: FundingTransferProvider | None = None,
         enable_holder_lookup: bool = True,
+        enable_funding_analysis: bool = True,
     ) -> None:
         self._config = config
         self._holder_lookup = holder_lookup or ReadOnlyHolderLookup()
         self._rugcheck_client = rugcheck_client
+        self._funding_provider = funding_provider or HeliusFundingProvider()
         self._enable_holder_lookup = enable_holder_lookup
+        self._enable_funding_analysis = enable_funding_analysis
         self._cache: dict[str, HolderLookupResult | None] = {}
         self._rugcheck_cache: dict[str, RugCheckResult | None] = {}
+        self._funding_cache: dict[str, tuple[FundingAnalysisResult, bool] | None] = {}
         self._lookup_outcomes: Counter[str] = Counter()
 
     async def assess_signal(self, signal: Signal) -> RiskAssessment:
         token = build_token_from_signal(signal)
         token, lookup_status, rugcheck_result = await self._enrich_token(token)
+        funding_result, missing_provider = await self._analyze_funding(signal, token)
+        token = _apply_funding_token_fields(token, funding_result)
         assessment = assess_token(token, self._config)
         assessment = _apply_rugcheck_assessment(assessment, rugcheck_result)
+        assessment = _apply_funding_assessment(assessment, funding_result, missing_provider=missing_provider)
         self._record_lookup_outcome(lookup_status, assessment)
         self._record_rugcheck_outcome(rugcheck_result, assessment)
+        self._record_funding_outcome(signal, funding_result, missing_provider=missing_provider)
         return assessment
 
     def diagnostics(self) -> dict[str, int]:
@@ -170,6 +181,40 @@ class DiscoveryRiskScorer:
 
         return self._rugcheck_cache[token.mint_address]
 
+    async def _analyze_funding(self, signal: Signal, token: TokenInfo) -> tuple[FundingAnalysisResult | None, bool]:
+        if not self._enable_funding_analysis:
+            return None, False
+
+        buyer_wallets = _extract_buyer_wallets(signal)
+        if buyer_wallets is None:
+            return None, False
+        if not buyer_wallets:
+            return FundingAnalysisResult(
+                funding_sybil_check=CheckResult.UNKNOWN,
+                bundled_buyer_pct=0.0,
+                largest_common_funder_group_size=0,
+                buyers_with_known_funders=0,
+                buyers_with_unknown_funders=0,
+                total_buyers=0,
+                flagged=False,
+            ), False
+
+        cache_key = f"{token.mint_address}:{'|'.join(sorted(buyer_wallets))}"
+        if cache_key not in self._funding_cache:
+            provider = _FundingProviderProbe(self._funding_provider)
+            try:
+                self._funding_cache[cache_key] = (
+                    await analyze_buyer_funding(buyer_wallets, provider),
+                    provider.missing_provider,
+                )
+            except Exception:
+                self._funding_cache[cache_key] = None
+
+        cached = self._funding_cache[cache_key]
+        if cached is None:
+            return None, False
+        return cached
+
     def _record_lookup_outcome(self, lookup_status: str | None, assessment: RiskAssessment) -> None:
         if lookup_status is None:
             return
@@ -199,6 +244,34 @@ class DiscoveryRiskScorer:
             self._lookup_outcomes[f"rugcheck_used_honeypot_{outcome}"] += 1
         if rugcheck_result.risk_level:
             self._lookup_outcomes[f"rugcheck_risk_level_{rugcheck_result.risk_level.lower()}"] += 1
+
+    def _record_funding_outcome(
+        self,
+        signal: Signal,
+        funding_result: FundingAnalysisResult | None,
+        *,
+        missing_provider: bool,
+    ) -> None:
+        buyer_wallets = _extract_buyer_wallets(signal)
+        if buyer_wallets is None:
+            return
+        if not buyer_wallets:
+            self._lookup_outcomes["funding_analysis_missing_buyers"] += 1
+            return
+        if funding_result is None:
+            self._lookup_outcomes["funding_analysis_unknown"] += 1
+            return
+
+        self._lookup_outcomes["funding_analysis_used"] += 1
+        if missing_provider:
+            self._lookup_outcomes["funding_analysis_missing_provider"] += 1
+        if funding_result.funding_sybil_check == CheckResult.FAIL:
+            self._lookup_outcomes["funding_analysis_failed_threshold"] += 1
+            return
+        if funding_result.funding_sybil_check == CheckResult.PASS:
+            self._lookup_outcomes["funding_analysis_passed"] += 1
+            return
+        self._lookup_outcomes["funding_analysis_unknown"] += 1
 
 
 def assess_token(token: TokenInfo, config: RiskConfig | None = None) -> RiskAssessment:
@@ -269,11 +342,132 @@ def _apply_rugcheck_assessment(
     return assessment.model_copy(update={"honeypot_check": honeypot_check, "score": score, "reasons": reasons})
 
 
+def _apply_funding_token_fields(token: TokenInfo, funding_result: FundingAnalysisResult | None) -> TokenInfo:
+    if funding_result is None or funding_result.total_buyers <= 0 or token.unique_buyers is not None:
+        return token
+    return token.model_copy(update={"unique_buyers": funding_result.total_buyers})
+
+
+def _apply_funding_assessment(
+    assessment: RiskAssessment,
+    funding_result: FundingAnalysisResult | None,
+    *,
+    missing_provider: bool,
+) -> RiskAssessment:
+    if funding_result is None:
+        return assessment
+    if funding_result.total_buyers == 0 and not missing_provider:
+        return assessment
+
+    funding_check = funding_result.funding_sybil_check
+    if funding_check == CheckResult.PASS and assessment.unique_buyers_check != CheckResult.FAIL:
+        return assessment
+
+    reasons = [reason for reason in assessment.reasons if not reason.startswith("unique_buyers_check ")]
+    score = assessment.score
+    current = assessment.unique_buyers_check
+
+    if funding_check == CheckResult.FAIL:
+        if current == CheckResult.PASS:
+            score -= CHECK_WEIGHTS["unique_buyers_check"]
+        reasons.append("unique_buyers_check failed")
+        return assessment.model_copy(update={"unique_buyers_check": CheckResult.FAIL, "score": score, "reasons": reasons})
+
+    if current == CheckResult.FAIL:
+        return assessment
+
+    if current == CheckResult.PASS:
+        score -= CHECK_WEIGHTS["unique_buyers_check"]
+    reasons.append("unique_buyers_check unknown")
+    if missing_provider or funding_check == CheckResult.UNKNOWN:
+        return assessment.model_copy(update={"unique_buyers_check": CheckResult.UNKNOWN, "score": score, "reasons": reasons})
+    return assessment
+
+
 def _looks_like_solana_mint(mint_address: str) -> bool:
     normalized = mint_address.strip()
     if not 32 <= len(normalized) <= 44:
         return False
     return all(ch in "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz" for ch in normalized)
+
+
+class _FundingProviderProbe:
+    def __init__(self, provider: FundingTransferProvider) -> None:
+        self._provider = provider
+        self.missing_provider = False
+
+    async def get_recent_inbound_transfers(self, wallet: str):
+        lookup_wallet = getattr(self._provider, "lookup_wallet", None)
+        if callable(lookup_wallet):
+            result = await lookup_wallet(wallet)
+            provider_status = getattr(result, "provider_status", "unknown")
+            if provider_status == "missing_api_key":
+                self.missing_provider = True
+                return None
+            if provider_status != "ok":
+                return None
+            return getattr(result, "transfers", None)
+        return await self._provider.get_recent_inbound_transfers(wallet)
+
+
+def _extract_buyer_wallets(signal: Signal) -> list[str] | None:
+    payload = signal.payload
+    candidates: list[object] = [payload]
+    for field_name in ("token", "coin"):
+        nested = payload.get(field_name)
+        if isinstance(nested, Mapping):
+            candidates.insert(0, nested)
+
+    extracted: list[str] = []
+    saw_field = False
+    for candidate in candidates:
+        if not isinstance(candidate, Mapping):
+            continue
+        field_names = (
+            "buyer_wallets",
+            "buyerWallets",
+            "buyers",
+            "buyerAddresses",
+            "buyer_addresses",
+            "uniqueBuyerWallets",
+            "recentBuyers",
+        )
+        raw_wallets = _first_value([candidate], *field_names)
+        if any(candidate.get(field_name) is not None for field_name in field_names):
+            saw_field = True
+        extracted.extend(_normalize_wallet_list(raw_wallets))
+
+    deduped: list[str] = []
+    seen: set[str] = set()
+    for wallet in extracted:
+        if wallet in seen:
+            continue
+        seen.add(wallet)
+        deduped.append(wallet)
+    if deduped:
+        return deduped
+    return [] if saw_field else None
+
+
+def _normalize_wallet_list(value: object) -> list[str]:
+    if isinstance(value, str):
+        wallet = value.strip()
+        return [wallet] if wallet else []
+    if isinstance(value, Mapping):
+        for key in ("wallet", "address", "buyer", "owner", "traderPublicKey", "user"):
+            nested = value.get(key)
+            if isinstance(nested, str) and nested.strip():
+                return [nested.strip()]
+        normalized: list[str] = []
+        for nested in value.values():
+            normalized.extend(_normalize_wallet_list(nested))
+        return normalized
+    if isinstance(value, (list, tuple, set)):
+        normalized: list[str] = []
+        for item in value:
+            normalized.extend(_normalize_wallet_list(item))
+        return normalized
+    return []
 
 
 def resolve_read_only_rpc_url(dotenv_path: str | Path | None = None) -> str:

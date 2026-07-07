@@ -783,6 +783,10 @@ def test_paper_cycle_cli_prints_safe_summary(tmp_path: Path, monkeypatch) -> Non
         passes=True,
         message="super secret alpha message that should not be printed",
     )
+    signal.payload["buyerWallets"] = [
+        "BuyerWallet11111111111111111111111111111111",
+        "BuyerWallet22222222222222222222222222222222",
+    ]
     monkeypatch.setattr(cli_module, "build_signal_sources", lambda: [FakeSignalSource([[signal]])])
 
     result = runner.invoke(
@@ -809,6 +813,8 @@ def test_paper_cycle_cli_prints_safe_summary(tmp_path: Path, monkeypatch) -> Non
     assert "rejection_reasons" not in result.stdout
     assert "cli-secret-mint" not in result.stdout
     assert "super secret alpha message" not in result.stdout
+    assert "BuyerWallet11111111111111111111111111111111" not in result.stdout
+    assert "BuyerWallet22222222222222222222222222222222" not in result.stdout
 
 
 def test_paper_cycle_cli_prints_discovery_risk_profile(tmp_path: Path, monkeypatch) -> None:

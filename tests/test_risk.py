@@ -3,6 +3,7 @@ from datetime import UTC, datetime, timedelta
 
 from src.core.config import RiskConfig
 from src.core.models import CheckResult, RiskAssessment, Signal, SignalSource, SignalType, TokenInfo
+from src.risk.funding_analysis import FundingAnalysisResult, InboundTransfer
 from src.risk.rugcheck import RugCheckResult
 from src.risk.scorer import (
     DiscoveryRiskScorer,
@@ -48,6 +49,26 @@ class FakeRugCheckClient:
         if self._result is not None:
             return self._result
         return RugCheckResult(mint_address=mint_address, provider_status="timeout", error="timed out")
+
+
+class FakeFundingProvider:
+    def __init__(self, transfers_by_wallet: dict[str, list[InboundTransfer] | None], failures: set[str] | None = None) -> None:
+        self._transfers_by_wallet = transfers_by_wallet
+        self._failures = failures or set()
+
+    async def get_recent_inbound_transfers(self, wallet: str) -> list[InboundTransfer] | None:
+        if wallet in self._failures:
+            raise RuntimeError("provider boom")
+        return self._transfers_by_wallet.get(wallet, [])
+
+
+class MissingProviderFundingProvider:
+    async def lookup_wallet(self, wallet: str):
+        class Result:
+            provider_status = "missing_api_key"
+            transfers = None
+
+        return Result()
 
 
 def test_risk_assessment_all_checks_pass() -> None:
@@ -379,3 +400,132 @@ def test_strict_thresholds_are_unchanged_when_rugcheck_adds_safe_metadata() -> N
     assessment = asyncio.run(scorer.assess_signal(signal))
 
     assert assessment.age_check == CheckResult.FAIL
+
+
+def test_funding_analysis_shared_funder_majority_fails_buyer_gate() -> None:
+    as_of = datetime.now(UTC) - timedelta(minutes=10)
+    buyers = [f"buyer-{index}" for index in range(40)]
+    transfers_by_wallet = {
+        wallet: [InboundTransfer(source_wallet="shared-funder", observed_at=as_of)]
+        for wallet in buyers[:35]
+    }
+    for wallet in buyers[35:]:
+        transfers_by_wallet[wallet] = [InboundTransfer(source_wallet=f"funder-{wallet}", observed_at=as_of)]
+
+    signal = Signal(
+        source=SignalSource.PUMP_FUN,
+        type=SignalType.NEW_POOL,
+        mint_address="So11111111111111111111111111111111111111112",
+        payload={
+            "vSolInBondingCurve": 30.1,
+            "createdAt": (datetime.now(UTC) - timedelta(minutes=10)).isoformat(),
+            "buyerWallets": buyers,
+        },
+    )
+    scorer = DiscoveryRiskScorer(
+        config=RiskConfig(min_age_minutes=0),
+        funding_provider=FakeFundingProvider(transfers_by_wallet),
+        enable_holder_lookup=False,
+        rugcheck_client=FakeRugCheckClient(
+            RugCheckResult(
+                mint_address=signal.mint_address,
+                found=True,
+                mint_authority_revoked=True,
+                freeze_authority_revoked=True,
+                top_holder_pct=30.0,
+                is_honeypot=False,
+                provider_status="ok",
+            )
+        ),
+    )
+
+    assessment = asyncio.run(scorer.assess_signal(signal))
+
+    assert assessment.unique_buyers_check == CheckResult.FAIL
+    assert assessment.token is not None
+    assert assessment.token.unique_buyers == 40
+    diagnostics = scorer.diagnostics()
+    assert diagnostics["funding_analysis_used"] == 1
+    assert diagnostics["funding_analysis_failed_threshold"] == 1
+
+
+def test_funding_analysis_diverse_funders_pass_and_preserve_existing_thresholds() -> None:
+    as_of = datetime.now(UTC) - timedelta(minutes=10)
+    buyers = [f"buyer-{index}" for index in range(8)]
+    transfers_by_wallet = {
+        wallet: [InboundTransfer(source_wallet=f"funder-{index}", observed_at=as_of)]
+        for index, wallet in enumerate(buyers)
+    }
+    signal = Signal(
+        source=SignalSource.PUMP_FUN,
+        type=SignalType.NEW_POOL,
+        mint_address="11111111111111111111111111111111",
+        payload={
+            "vSolInBondingCurve": 30.1,
+            "createdAt": (datetime.now(UTC) - timedelta(minutes=10)).isoformat(),
+            "buyerWallets": buyers,
+        },
+    )
+    scorer = DiscoveryRiskScorer(
+        config=RiskConfig(min_age_minutes=0),
+        funding_provider=FakeFundingProvider(transfers_by_wallet),
+        enable_holder_lookup=False,
+    )
+
+    assessment = asyncio.run(scorer.assess_signal(signal))
+
+    assert assessment.unique_buyers_check == CheckResult.FAIL
+    diagnostics = scorer.diagnostics()
+    assert diagnostics["funding_analysis_used"] == 1
+    assert diagnostics["funding_analysis_passed"] == 1
+
+
+def test_funding_analysis_missing_buyer_wallets_degrades_safely() -> None:
+    signal = Signal(
+        source=SignalSource.PUMP_FUN,
+        type=SignalType.NEW_POOL,
+        mint_address="22222222222222222222222222222222",
+        payload={
+            "vSolInBondingCurve": 30.1,
+            "uniqueBuyers": 25,
+            "buyerWallets": [],
+            "createdAt": (datetime.now(UTC) - timedelta(minutes=10)).isoformat(),
+        },
+    )
+    scorer = DiscoveryRiskScorer(
+        config=RiskConfig(min_age_minutes=0),
+        funding_provider=FakeFundingProvider({}),
+        enable_holder_lookup=False,
+    )
+
+    assessment = asyncio.run(scorer.assess_signal(signal))
+
+    assert assessment.unique_buyers_check == CheckResult.PASS
+    assert scorer.diagnostics()["funding_analysis_missing_buyers"] == 1
+
+
+def test_funding_analysis_missing_provider_does_not_crash_and_stays_conservative() -> None:
+    buyers = [f"buyer-{index}" for index in range(25)]
+    signal = Signal(
+        source=SignalSource.PUMP_FUN,
+        type=SignalType.NEW_POOL,
+        mint_address="33333333333333333333333333333333",
+        payload={
+            "vSolInBondingCurve": 30.1,
+            "createdAt": (datetime.now(UTC) - timedelta(minutes=10)).isoformat(),
+            "buyerWallets": buyers,
+        },
+    )
+    scorer = DiscoveryRiskScorer(
+        config=RiskConfig(min_age_minutes=0),
+        funding_provider=MissingProviderFundingProvider(),
+        enable_holder_lookup=False,
+    )
+
+    assessment = asyncio.run(scorer.assess_signal(signal))
+
+    assert assessment.unique_buyers_check == CheckResult.UNKNOWN
+    diagnostics = scorer.diagnostics()
+    assert diagnostics["funding_analysis_used"] == 1
+    assert diagnostics["funding_analysis_missing_provider"] == 1
+    assert diagnostics["funding_analysis_unknown"] == 1
