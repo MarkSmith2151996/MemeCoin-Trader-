@@ -4,6 +4,8 @@ import base64
 import httpx
 
 from src.chain.jito import JitoBlockEngineClient
+from src.core.models import Side
+from src.execution.jupiter_live import JupiterLiveExecutionAdapter
 
 
 class FakeResponse:
@@ -27,6 +29,18 @@ class RecordingClient:
         if isinstance(self.response, Exception):
             raise self.response
         return self.response
+
+
+class RecordingRpcSubmitter:
+    def __init__(self, result: str | Exception = "rpc-signature-123") -> None:
+        self.result = result
+        self.calls: list[str | bytes] = []
+
+    async def __call__(self, transaction: str | bytes) -> str:
+        self.calls.append(transaction)
+        if isinstance(self.result, Exception):
+            raise self.result
+        return self.result
 
 
 def test_bundle_request_payload_construction() -> None:
@@ -145,5 +159,128 @@ def test_no_wallet_or_private_key_required_and_no_real_network_calls() -> None:
         assert "private" not in str(used_payload).lower()
         assert "secret" not in str(used_payload).lower()
         assert used_payload["method"] == "sendBundle"
+
+    asyncio.run(run())
+
+
+def test_live_adapter_default_behavior_is_unchanged_when_jito_disabled() -> None:
+    async def run() -> None:
+        rpc_submitter = RecordingRpcSubmitter("rpc-signature-disabled")
+        adapter = JupiterLiveExecutionAdapter(rpc_submitter=rpc_submitter)
+
+        result = await adapter.submit_serialized_swap("serialized-tx")
+
+        assert result.ok is True
+        assert result.provider == "rpc"
+        assert result.tx_signature == "rpc-signature-disabled"
+        assert result.diagnostics == ["jito_disabled"]
+        assert len(rpc_submitter.calls) == 1
+
+        try:
+            await adapter.execute_swap("mint", Side.BUY, 1.0)
+        except NotImplementedError as exc:
+            assert str(exc) == "Live swaps must be implemented behind risk gates"
+        else:
+            raise AssertionError("execute_swap should remain disabled")
+
+        await adapter.close()
+
+    asyncio.run(run())
+
+
+def test_live_adapter_calls_jito_when_explicitly_enabled() -> None:
+    async def run() -> None:
+        http_client = RecordingClient(FakeResponse(200, {"result": "bundle-789"}))
+        adapter = JupiterLiveExecutionAdapter(
+            jito_enabled=True,
+            jito_client=JitoBlockEngineClient(http_client=http_client),
+            rpc_submitter=RecordingRpcSubmitter(),
+        )
+
+        result = await adapter.submit_serialized_swap("serialized-tx")
+
+        assert result.ok is True
+        assert result.provider == "jito"
+        assert result.jito_result is not None
+        assert result.jito_result.bundle_id == "bundle-789"
+        assert result.diagnostics == ["jito_attempted", "jito_bundle_submitted"]
+        assert len(http_client.calls) == 1
+
+        await adapter.close()
+
+    asyncio.run(run())
+
+
+def test_live_adapter_handles_successful_jito_response() -> None:
+    async def run() -> None:
+        http_client = RecordingClient(FakeResponse(200, {"result": {"bundleId": "bundle-success"}}))
+        adapter = JupiterLiveExecutionAdapter(
+            jito_enabled=True,
+            jito_tip_lamports=5_000,
+            jito_client=JitoBlockEngineClient(http_client=http_client),
+        )
+
+        result = await adapter.submit_serialized_swap(b"serialized-tx")
+
+        assert result.ok is True
+        assert result.provider == "jito"
+        assert result.jito_result is not None
+        assert result.jito_result.bundle_id == "bundle-success"
+        assert result.jito_result.tip_lamports == 5_000
+        assert result.tx_signature is None
+
+        await adapter.close()
+
+    asyncio.run(run())
+
+
+def test_live_adapter_falls_back_to_rpc_when_jito_fails_and_fallback_enabled() -> None:
+    async def run() -> None:
+        http_client = RecordingClient(FakeResponse(503, {"error": "busy"}))
+        rpc_submitter = RecordingRpcSubmitter("rpc-signature-fallback")
+        adapter = JupiterLiveExecutionAdapter(
+            jito_enabled=True,
+            jito_fallback_to_rpc=True,
+            jito_client=JitoBlockEngineClient(http_client=http_client),
+            rpc_submitter=rpc_submitter,
+        )
+
+        result = await adapter.submit_serialized_swap("serialized-tx")
+
+        assert result.ok is True
+        assert result.provider == "rpc"
+        assert result.tx_signature == "rpc-signature-fallback"
+        assert result.jito_result is not None
+        assert result.jito_result.error == "unexpected status: 503"
+        assert result.diagnostics == ["jito_attempted", "jito_failed_fallback_rpc"]
+        assert len(rpc_submitter.calls) == 1
+
+        await adapter.close()
+
+    asyncio.run(run())
+
+
+def test_live_adapter_fails_safely_when_jito_fails_and_fallback_disabled() -> None:
+    async def run() -> None:
+        http_client = RecordingClient(FakeResponse(503, {"error": "busy"}))
+        rpc_submitter = RecordingRpcSubmitter("rpc-should-not-run")
+        adapter = JupiterLiveExecutionAdapter(
+            jito_enabled=True,
+            jito_fallback_to_rpc=False,
+            jito_client=JitoBlockEngineClient(http_client=http_client),
+            rpc_submitter=rpc_submitter,
+        )
+
+        result = await adapter.submit_serialized_swap("serialized-tx")
+
+        assert result.ok is False
+        assert result.provider == "jito"
+        assert result.tx_signature is None
+        assert result.jito_result is not None
+        assert result.jito_result.error == "unexpected status: 503"
+        assert result.diagnostics == ["jito_attempted", "jito_failed_no_fallback"]
+        assert len(rpc_submitter.calls) == 0
+
+        await adapter.close()
 
     asyncio.run(run())
