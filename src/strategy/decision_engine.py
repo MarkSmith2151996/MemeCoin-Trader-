@@ -13,6 +13,7 @@ from src.core.database import record_trade
 from src.core.models import CheckResult, PartialExit, Position, RiskAssessment, Side, Signal, TokenInfo, Trade
 from src.execution.base import ExecutionAdapter
 from src.strategy.exits import evaluate_exits
+from src.strategy.market_regime import MarketRegimeInputs, detect_market_regime
 from src.strategy.position_manager import PositionManager
 from src.strategy.position_sizing import determine_liquidity_position_size
 
@@ -42,12 +43,15 @@ class DecisionEngine:
         position_manager: PositionManager,
         config: Settings,
         db: str | Path | None = None,
+        *,
+        market_regime_enabled: bool = False,
     ) -> None:
         self.execution = execution
         self.risk_scorer = risk_scorer
         self.position_manager = position_manager
         self.config = config
         self.db = Path(db) if db is not None else None
+        self.market_regime_enabled = market_regime_enabled
 
     async def evaluate_signal(self, signal: Signal) -> Trade | None:
         return (await self.evaluate_signal_with_diagnostics(signal)).trade
@@ -62,22 +66,36 @@ class DecisionEngine:
             logger.info("Skipping %s: open position already exists", signal.mint_address)
             return DecisionResult(trade=None, rejection_reason="open_position_exists")
 
+        regime_metadata = self._market_regime_metadata(signal)
+
         risk = await self._assess_signal(signal)
         if not risk.all_checks_pass:
             logger.info("Skipping %s: risk gate blocked trade (%s)", signal.mint_address, ", ".join(risk.reasons))
-            return DecisionResult(trade=None, rejection_reason=self._risk_rejection_reason(risk))
+            return DecisionResult(
+                trade=None,
+                rejection_reason=self._risk_rejection_reason(risk),
+                metadata=regime_metadata,
+            )
 
         open_positions = await self.position_manager.get_all_open()
         if len(open_positions) >= self.config.position.max_open_positions:
             logger.info("Skipping %s: max open positions reached", signal.mint_address)
-            return DecisionResult(trade=None, rejection_reason="max_open_positions_reached")
+            return DecisionResult(
+                trade=None,
+                rejection_reason="max_open_positions_reached",
+                metadata=regime_metadata,
+            )
 
         remaining_portfolio = (
             self.config.position.max_portfolio_sol - await self.position_manager.total_exposure_sol()
         )
         if remaining_portfolio <= 0:
             logger.info("Skipping %s: max portfolio exposure reached", signal.mint_address)
-            return DecisionResult(trade=None, rejection_reason="max_portfolio_exposure_reached")
+            return DecisionResult(
+                trade=None,
+                rejection_reason="max_portfolio_exposure_reached",
+                metadata=regime_metadata,
+            )
 
         sizing = self._calculate_position_size(signal, risk, remaining_portfolio)
         if sizing.amount_sol <= 0:
@@ -85,7 +103,7 @@ class DecisionEngine:
             return DecisionResult(
                 trade=None,
                 rejection_reason=sizing.rejection_reason or "position_size_zero",
-                metadata=sizing.metadata,
+                metadata={**sizing.metadata, **regime_metadata},
             )
 
         trade = await self.execution.execute_swap(
@@ -100,6 +118,7 @@ class DecisionEngine:
                 "metadata": {
                     **trade.metadata,
                     **sizing.metadata,
+                    **regime_metadata,
                     "signal_source": signal.source.value,
                     "signal_type": signal.type.value,
                     "signal_confidence": signal.confidence,
@@ -111,7 +130,7 @@ class DecisionEngine:
         )
         await self._record_trade(trade)
         await self.position_manager.open_position(trade, signal)
-        return DecisionResult(trade=trade, metadata=sizing.metadata)
+        return DecisionResult(trade=trade, metadata={**sizing.metadata, **regime_metadata})
 
     async def check_exits(self) -> list[Trade]:
         exit_trades: list[Trade] = []
@@ -223,6 +242,37 @@ class DecisionEngine:
             amount_sol=final_size,
             metadata=metadata,
             rejection_reason=rejection_reason,
+        )
+
+    def _market_regime_metadata(self, signal: Signal) -> dict[str, object]:
+        if not self.market_regime_enabled:
+            return {}
+
+        regime = detect_market_regime(self._market_regime_inputs(signal))
+        return {
+            "market_regime_enabled": True,
+            "market_regime": regime.regime,
+            "market_regime_confidence": regime.confidence,
+            "market_regime_reasons": list(regime.reason_labels),
+            "market_regime_input_summary": regime.input_summary,
+            "market_regime_adjustment_hints": {
+                "position_cap_multiplier": regime.adjustment_hints.position_cap_multiplier,
+                "signal_threshold_multiplier": regime.adjustment_hints.signal_threshold_multiplier,
+                "risk_appetite": regime.adjustment_hints.risk_appetite,
+            },
+        }
+
+    def _market_regime_inputs(self, signal: Signal) -> MarketRegimeInputs:
+        payload = signal.payload
+        return MarketRegimeInputs(
+            new_pool_count=self._coerce_int(payload.get("new_pool_count") or payload.get("newPoolCount")),
+            average_liquidity_sol=self._coerce_float(payload.get("average_liquidity_sol") or payload.get("averageLiquiditySol")),
+            median_volume_sol=self._coerce_float(payload.get("median_volume_sol") or payload.get("medianVolumeSol")),
+            median_transaction_count=self._coerce_float(payload.get("median_transaction_count") or payload.get("medianTransactionCount")),
+            paper_trade_success_rate=self._coerce_float(payload.get("paper_trade_success_rate") or payload.get("paperTradeSuccessRate")),
+            paper_trade_sample_size=self._coerce_int(payload.get("paper_trade_sample_size") or payload.get("paperTradeSampleSize")),
+            signal_count=self._coerce_int(payload.get("signal_count") or payload.get("signalCount")),
+            signal_velocity_per_hour=self._coerce_float(payload.get("signal_velocity_per_hour") or payload.get("signalVelocityPerHour")),
         )
 
     async def _assess_signal(self, signal: Signal) -> RiskAssessment:
@@ -337,3 +387,21 @@ class DecisionEngine:
             trade_id=trade.id,
             executed_at=trade.executed_at,
         )
+
+    @staticmethod
+    def _coerce_int(value: object) -> int | None:
+        if isinstance(value, bool) or value is None:
+            return None
+        try:
+            return int(value)
+        except (TypeError, ValueError):
+            return None
+
+    @staticmethod
+    def _coerce_float(value: object) -> float | None:
+        if isinstance(value, bool) or value is None:
+            return None
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            return None

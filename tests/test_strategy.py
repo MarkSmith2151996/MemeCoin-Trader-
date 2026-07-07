@@ -111,6 +111,7 @@ def test_decision_engine_executes_risk_gated_buy() -> None:
         assert trade is not None
         assert trade.amount_sol == 0.4
         assert trade.side == Side.BUY
+        assert "market_regime" not in trade.metadata
         assert (await manager.get_position("mint")) is not None
 
     asyncio.run(run())
@@ -347,6 +348,89 @@ def test_decision_engine_returns_sizing_metadata_for_paper_decisions() -> None:
         assert decision.metadata["position_sizing_reason"] == "15_to_50_sol"
         assert decision.trade.metadata["position_sizing_liquidity_sol"] == 30.0
         assert decision.trade.metadata["position_sizing_mode"] == "liquidity"
+        assert "market_regime" not in decision.trade.metadata
+
+    asyncio.run(run())
+
+
+def test_decision_engine_adds_market_regime_metadata_when_enabled() -> None:
+    async def run() -> None:
+        settings = Settings()
+        adapter = FakeExecutionAdapter({"mint": 0.25})
+        manager = PositionManager(None, settings)
+        engine = DecisionEngine(
+            adapter,
+            FakeRiskScorer(safe_assessment()),
+            manager,
+            settings,
+            market_regime_enabled=True,
+        )
+
+        decision = await engine.evaluate_signal_with_diagnostics(
+            Signal(
+                source=SignalSource.MANUAL,
+                type=SignalType.BUY,
+                mint_address="mint",
+                confidence=0.8,
+                weight=1.0,
+                payload={
+                    "newPoolCount": 12,
+                    "averageLiquiditySol": 95.0,
+                    "medianVolumeSol": 180.0,
+                    "medianTransactionCount": 140,
+                    "paperTradeSuccessRate": 0.7,
+                    "paperTradeSampleSize": 10,
+                    "signalCount": 14,
+                    "signalVelocityPerHour": 6.5,
+                },
+            )
+        )
+
+        assert decision.trade is not None
+        assert decision.trade.amount_sol == 0.4
+        assert decision.metadata["market_regime_enabled"] is True
+        assert decision.metadata["market_regime"] == "hot"
+        assert decision.metadata["market_regime_confidence"] == 0.9
+        assert decision.metadata["market_regime_reasons"] == [
+            "high_signal_count",
+            "high_signal_velocity",
+            "healthy_liquidity",
+            "healthy_flow",
+        ]
+        assert decision.trade.metadata["market_regime"] == "hot"
+        assert decision.trade.metadata["market_regime_adjustment_hints"]["risk_appetite"] == "measured"
+
+    asyncio.run(run())
+
+
+def test_decision_engine_market_regime_unknown_degrades_safely_when_enabled() -> None:
+    async def run() -> None:
+        settings = Settings()
+        adapter = FakeExecutionAdapter({"mint": 0.25})
+        manager = PositionManager(None, settings)
+        engine = DecisionEngine(
+            adapter,
+            FakeRiskScorer(safe_assessment()),
+            manager,
+            settings,
+            market_regime_enabled=True,
+        )
+
+        decision = await engine.evaluate_signal_with_diagnostics(
+            Signal(
+                source=SignalSource.MANUAL,
+                type=SignalType.BUY,
+                mint_address="mint",
+                confidence=0.8,
+                weight=1.0,
+            )
+        )
+
+        assert decision.trade is not None
+        assert decision.trade.amount_sol == 0.4
+        assert decision.trade.metadata["market_regime"] == "unknown"
+        assert decision.trade.metadata["market_regime_confidence"] == 0.2
+        assert decision.trade.metadata["market_regime_reasons"] == ["insufficient_activity_data"]
 
     asyncio.run(run())
 
