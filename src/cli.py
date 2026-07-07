@@ -30,11 +30,13 @@ from src.strategy.position_manager import PositionManager
 app = typer.Typer(help="Memecoin Trader CLI")
 console = Console()
 logger = logging.getLogger(__name__)
+SUPPORTED_RISK_PROFILES = {"strict", "discovery"}
 
 
 @dataclass(slots=True)
 class PaperCycleSummary:
     execution_mode: str
+    risk_profile: str
     max_signals: int
     timeout_seconds: float
     signals_collected: int
@@ -49,6 +51,7 @@ class PaperCycleSummary:
     def safe_lines(self) -> list[str]:
         lines = [
             f"execution_mode={self.execution_mode}",
+            f"risk_profile={self.risk_profile}",
             f"max_signals={self.max_signals}",
             f"timeout_seconds={self.timeout_seconds:g}",
             f"signals_collected={self.signals_collected}",
@@ -73,6 +76,22 @@ def force_paper_settings(settings: Settings) -> Settings:
     return settings.model_copy(
         update={"execution": settings.execution.model_copy(update={"mode": "paper"})}
     )
+
+
+def apply_risk_profile(settings: Settings, risk_profile: str) -> Settings:
+    normalized = normalize_risk_profile(risk_profile)
+    if normalized == "discovery":
+        return settings.model_copy(
+            update={"risk": settings.risk.model_copy(update={"min_age_minutes": 0})}
+        )
+    return settings
+
+
+def normalize_risk_profile(risk_profile: str) -> str:
+    normalized = risk_profile.strip().lower()
+    if normalized not in SUPPORTED_RISK_PROFILES:
+        raise ValueError(f"Unsupported risk profile: {risk_profile}")
+    return normalized
 
 
 def _count_rows(db_path: Path, table: str, where_clause: str | None = None, params: tuple[object, ...] = ()) -> int:
@@ -117,6 +136,7 @@ async def run_bounded_paper_cycle(
     max_signals: int,
     timeout_seconds: float,
     *,
+    risk_profile: str = "strict",
     db_path: str | Path | None = None,
     settings: Settings | None = None,
     sources: list[SignalSource] | None = None,
@@ -124,7 +144,8 @@ async def run_bounded_paper_cycle(
     risk_scorer: Any = None,
     poll_interval_s: float = 1.0,
 ) -> PaperCycleSummary:
-    runtime_settings = force_paper_settings(settings or load_settings())
+    normalized_risk_profile = normalize_risk_profile(risk_profile)
+    runtime_settings = apply_risk_profile(force_paper_settings(settings or load_settings()), normalized_risk_profile)
     runtime_db_path = resolve_db_path(db_path)
     signal_sources = list(sources) if sources is not None else build_signal_sources()
     execution_adapter = execution or PaperExecutionAdapter()
@@ -186,6 +207,7 @@ async def run_bounded_paper_cycle(
 
     return PaperCycleSummary(
         execution_mode=runtime_settings.execution.mode,
+        risk_profile=normalized_risk_profile,
         max_signals=max_signals,
         timeout_seconds=timeout_seconds,
         signals_collected=signals_collected,
@@ -215,12 +237,19 @@ def show_config() -> None:
 def paper_cycle(
     max_signals: int = typer.Option(5, min=1, help="Maximum number of signals to evaluate before stopping."),
     timeout_seconds: float = typer.Option(30.0, min=0.0, help="Maximum wall-clock runtime before stopping."),
+    risk_profile: str = typer.Option("strict", "--mode", help="Risk profile: strict or discovery."),
     db_path: str | None = typer.Option(None, help="Optional SQLite path override."),
 ) -> None:
+    try:
+        normalized_risk_profile = normalize_risk_profile(risk_profile)
+    except ValueError as exc:
+        raise typer.BadParameter(str(exc), param_hint="--mode") from exc
+
     summary = asyncio.run(
         run_bounded_paper_cycle(
             max_signals=max_signals,
             timeout_seconds=timeout_seconds,
+            risk_profile=normalized_risk_profile,
             db_path=db_path,
         )
     )

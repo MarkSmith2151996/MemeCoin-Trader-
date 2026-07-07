@@ -1,4 +1,5 @@
 import asyncio
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 from typer.testing import CliRunner
@@ -101,6 +102,33 @@ def build_signal(
     )
 
 
+def build_enriched_pump_fun_signal(
+    mint_address: str,
+    *,
+    created_at: datetime,
+    liquidity_sol: float = 30.1,
+    unique_buyers: int = 25,
+    top10_holder_pct: float = 30.0,
+    creator_holding_pct: float = 5.0,
+) -> Signal:
+    return Signal(
+        source=SignalSourceEnum.PUMP_FUN,
+        type=SignalType.NEW_POOL,
+        mint_address=mint_address,
+        confidence=0.85,
+        payload={
+            "symbol": "PUMP",
+            "vSolInBondingCurve": liquidity_sol,
+            "uniqueBuyers": unique_buyers,
+            "top10HolderPct": top10_holder_pct,
+            "creatorHoldingPct": creator_holding_pct,
+            "mintAuthorityRevoked": True,
+            "freezeAuthorityRevoked": True,
+            "createdAt": created_at.isoformat(),
+        },
+    )
+
+
 def test_paper_cycle_persists_accepted_and_rejected_fake_signals(tmp_path: Path) -> None:
     async def run() -> None:
         db_path = tmp_path / "paper-cycle.db"
@@ -122,6 +150,7 @@ def test_paper_cycle_persists_accepted_and_rejected_fake_signals(tmp_path: Path)
         )
 
         assert summary.execution_mode == "paper"
+        assert summary.risk_profile == "strict"
         assert summary.signals_collected == 2
         assert summary.signals_accepted == 1
         assert summary.signals_rejected == 1
@@ -144,7 +173,7 @@ def test_paper_cycle_persists_accepted_and_rejected_fake_signals(tmp_path: Path)
     asyncio.run(run())
 
 
-def test_paper_cycle_forces_paper_execution_when_settings_request_live(tmp_path: Path) -> None:
+def test_paper_cycle_discovery_mode_stays_paper_when_settings_request_live(tmp_path: Path) -> None:
     async def run() -> None:
         db_path = tmp_path / "live-request.db"
         live_settings = cli_module.load_settings().model_copy(
@@ -156,6 +185,7 @@ def test_paper_cycle_forces_paper_execution_when_settings_request_live(tmp_path:
             max_signals=1,
             timeout_seconds=0.1,
             db_path=db_path,
+            risk_profile="discovery",
             settings=live_settings,
             sources=[source],
             poll_interval_s=0.0,
@@ -164,6 +194,7 @@ def test_paper_cycle_forces_paper_execution_when_settings_request_live(tmp_path:
         trades = load_recent_trades(db_path, limit=5)
 
         assert summary.execution_mode == "paper"
+        assert summary.risk_profile == "discovery"
         assert len(trades) == 1
         assert trades[0].mode == "paper"
 
@@ -191,6 +222,7 @@ def test_paper_cycle_stops_at_max_signals_bound(tmp_path: Path) -> None:
         assert summary.signals_accepted == 1
         assert summary.signals_rejected == 0
         assert summary.trades_persisted == 1
+        assert summary.risk_profile == "strict"
         assert summary.rejection_reasons == {}
         assert summary.termination_reason == "max_signals"
         assert len(trades) == 1
@@ -232,27 +264,15 @@ def test_paper_cycle_reports_stable_rejection_reason_counts(tmp_path: Path) -> N
     asyncio.run(run())
 
 
-def test_paper_cycle_default_scorer_enriches_pump_fun_liquidity(tmp_path: Path) -> None:
+def test_paper_cycle_strict_mode_rejects_too_new_tokens_with_age_check_failed(tmp_path: Path) -> None:
     async def run() -> None:
-        db_path = tmp_path / "pump-fun-enrichment.db"
+        db_path = tmp_path / "strict-age.db"
         source = FakeSignalSource(
             [
                 [
-                    Signal(
-                        source=SignalSourceEnum.PUMP_FUN,
-                        type=SignalType.NEW_POOL,
-                        mint_address="pump-enriched-mint",
-                        confidence=0.85,
-                        payload={
-                            "symbol": "PUMP",
-                            "vSolInBondingCurve": 30.1,
-                            "uniqueBuyers": 25,
-                            "top10HolderPct": 30.0,
-                            "creatorHoldingPct": 5.0,
-                            "mintAuthorityRevoked": True,
-                            "freezeAuthorityRevoked": True,
-                            "createdAt": "2026-07-06T00:00:00+00:00",
-                        },
+                    build_enriched_pump_fun_signal(
+                        "strict-age-mint",
+                        created_at=datetime.now(UTC),
                     )
                 ]
             ]
@@ -269,7 +289,75 @@ def test_paper_cycle_default_scorer_enriches_pump_fun_liquidity(tmp_path: Path) 
         assert summary.signals_collected == 1
         assert summary.signals_accepted == 0
         assert summary.signals_rejected == 1
+        assert summary.risk_profile == "strict"
+        assert summary.rejection_reasons == {"age_check_failed": 1}
+
+    asyncio.run(run())
+
+
+def test_paper_cycle_discovery_mode_relaxes_only_age_blocker(tmp_path: Path) -> None:
+    async def run() -> None:
+        db_path = tmp_path / "discovery-age.db"
+        source = FakeSignalSource(
+            [
+                [
+                    build_enriched_pump_fun_signal(
+                        "discovery-age-mint",
+                        created_at=datetime.now(UTC),
+                    )
+                ]
+            ]
+        )
+
+        summary = await cli_module.run_bounded_paper_cycle(
+            max_signals=1,
+            timeout_seconds=0.1,
+            db_path=db_path,
+            risk_profile="discovery",
+            sources=[source],
+            poll_interval_s=0.0,
+        )
+
+        assert summary.execution_mode == "paper"
+        assert summary.risk_profile == "discovery"
+        assert summary.signals_collected == 1
+        assert summary.signals_accepted == 0
+        assert summary.signals_rejected == 1
         assert summary.rejection_reasons == {"honeypot_check_unknown": 1}
+
+    asyncio.run(run())
+
+
+def test_paper_cycle_discovery_mode_still_respects_other_blockers(tmp_path: Path) -> None:
+    async def run() -> None:
+        db_path = tmp_path / "discovery-liquidity.db"
+        source = FakeSignalSource(
+            [
+                [
+                    build_enriched_pump_fun_signal(
+                        "discovery-liquidity-mint",
+                        created_at=datetime.now(UTC) - timedelta(minutes=10),
+                        liquidity_sol=5.0,
+                    )
+                ]
+            ]
+        )
+
+        summary = await cli_module.run_bounded_paper_cycle(
+            max_signals=1,
+            timeout_seconds=0.1,
+            db_path=db_path,
+            risk_profile="discovery",
+            sources=[source],
+            poll_interval_s=0.0,
+        )
+
+        assert summary.execution_mode == "paper"
+        assert summary.risk_profile == "discovery"
+        assert summary.signals_collected == 1
+        assert summary.signals_accepted == 0
+        assert summary.signals_rejected == 1
+        assert summary.rejection_reasons == {"liquidity_check_failed": 1}
 
     asyncio.run(run())
 
@@ -345,9 +433,38 @@ def test_paper_cycle_cli_prints_safe_summary(tmp_path: Path, monkeypatch) -> Non
 
     assert result.exit_code == 0
     assert "execution_mode=paper" in result.stdout
+    assert "risk_profile=strict" in result.stdout
     assert "signals_collected=1" in result.stdout
     assert "signals_accepted=1" in result.stdout
     assert "termination_reason=max_signals" in result.stdout
     assert "rejection_reasons" not in result.stdout
     assert "cli-secret-mint" not in result.stdout
     assert "super secret alpha message" not in result.stdout
+
+
+def test_paper_cycle_cli_prints_discovery_risk_profile(tmp_path: Path, monkeypatch) -> None:
+    signal = build_enriched_pump_fun_signal(
+        "discovery-cli-mint",
+        created_at=datetime.now(UTC),
+    )
+    monkeypatch.setattr(cli_module, "build_signal_sources", lambda: [FakeSignalSource([[signal]])])
+
+    result = runner.invoke(
+        cli_module.app,
+        [
+            "paper-cycle",
+            "--max-signals",
+            "1",
+            "--timeout-seconds",
+            "0.1",
+            "--mode",
+            "discovery",
+            "--db-path",
+            str(tmp_path / "discovery-cli.db"),
+        ],
+    )
+
+    assert result.exit_code == 0
+    assert "execution_mode=paper" in result.stdout
+    assert "risk_profile=discovery" in result.stdout
+    assert "age_check_failed" not in result.stdout

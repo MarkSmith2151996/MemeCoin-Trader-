@@ -23,7 +23,7 @@ Default execution mode: paper trading
 - `src/signals/` defines async signal-source contracts; `whale_tracker.py` polls Helius enhanced address transactions and `pump_fun.py` now buffers websocket events, falls back to HTTP polling, and normalizes pump.fun payloads into `Signal` objects.
 - `src/strategy/` contains decision, portfolio, position, and exit helpers.
 - `src/monitoring/` contains lightweight health, alert, and dashboard helpers for runtime visibility.
-- `src/cli.py` exposes operator commands including health/config inspection and a bounded `paper-cycle` runtime that polls signal sources, routes signals through the decision engine, persists paper trades/positions, and prints a safe summary before terminating.
+- `src/cli.py` exposes operator commands including health/config inspection and a bounded `paper-cycle` runtime that polls signal sources, routes signals through the decision engine, persists paper trades/positions, and prints a safe summary before terminating, with strict and discovery paper-only risk profiles.
 
 ## File Map
 
@@ -32,8 +32,8 @@ Default execution mode: paper trading
 - `config/settings.yaml`: risk, position, exit, execution, and monitoring defaults.
 - `config/wallets_to_track.yaml`: public sample wallet watchlist used for safe whale-tracker dry runs until real tracked wallets are configured locally.
 - `scripts/check_token.py`: smoke-check script for building a token model and running risk scoring.
-- `src/risk/scorer.py`: aggregate risk scoring plus signal-aware `TokenInfo` enrichment from raw pump.fun/on-chain payload fields for paper-cycle diagnostics.
-- `src/cli.py`: Typer entrypoint for health/config commands plus the bounded `paper-cycle` runner over existing signal, decision, and paper execution paths, including aggregate rejection diagnostics for skipped signals.
+- `src/risk/scorer.py`: aggregate risk scoring plus signal-aware `TokenInfo` enrichment from raw pump.fun/on-chain payload fields for paper-cycle diagnostics and discovery-mode age relaxation.
+- `src/cli.py`: Typer entrypoint for health/config commands plus the bounded `paper-cycle` runner over existing signal, decision, and paper execution paths, including strict/discovery paper-only risk profiles and aggregate rejection diagnostics for skipped signals.
 - `src/signals/pump_fun.py`: websocket-first pump.fun monitor with verified PumpPortal `subscribeNewToken` and `subscribeMigration` subscriptions plus v3 HTTP fallback over `/coins` and `/coins/currently-live`.
 - `src/signals/whale_tracker.py`: Helius enhanced-transactions poller that reads `HELIUS_API_KEY` from environment or local `.env`, includes token-account activity, deduplicates signatures, and emits whale-buy `Signal` objects.
 - `src/strategy/decision_engine.py`: async risk-gated buy evaluation plus open-position exit scanning and sell execution, with structured rejection reasons for paper-cycle diagnostics.
@@ -51,6 +51,7 @@ Default execution mode: paper trading
 
 ## Last 10 Changes
 
+- 2026-07-07 Added a paper-only `discovery` risk profile for `paper-cycle` that relaxes only the age gate while keeping strict mode as the default; targeted and full pytest are green, and the latest real strict run reported `age_check_failed=5` while the matching discovery run advanced to `top10_holder_check_unknown=5` with 0 accepted buys in both modes.
 - 2026-07-07 Added signal-aware pump.fun/on-chain token enrichment for bounded paper-cycle risk scoring so raw signal payloads now populate `TokenInfo` fields like `liquidity_sol`, `created_at`, and authority flags before risk evaluation; targeted and full pytest are green, and the latest real paper-mode smoke still approved 0 buys but advanced rejection diagnostics from `liquidity_check_unknown=5` to `age_check_failed=5`.
 - 2026-07-07 Added aggregate paper-cycle rejection diagnostics so bounded runs now report stable labels like `liquidity_check_unknown`, `honeypot_check_failed`, and `position_size_zero`; targeted and full pytest are green, and the latest real paper-mode smoke collected 5 signals, approved 0 buys, and reported `liquidity_check_unknown=5` with no persisted trades/positions.
 - 2026-07-07 Fixed `DecisionEngine` callable risk-scorer fallback so the bounded `paper-cycle` runtime can retry plain callables like `assess_token` with `TokenInfo` after a failed `Signal` probe; reran targeted tests plus the full pytest suite, then verified a real paper-mode smoke collected 5 signals, approved 0 buys, and persisted 0 trades/positions without dashboard warnings.
@@ -60,7 +61,6 @@ Default execution mode: paper trading
 - 2026-07-06 CT-093: Added dotenv-backed Helius key loading, switched whale polling to include token-account balance changes, replaced placeholder wallets with public sample addresses, and added focused provider tests; live Helius verification failed locally because `.env` and `HELIUS_API_KEY` were still missing at execution time.
 - 2026-07-06 CT-091: Verified PumpPortal websocket token-creation and migration subscriptions live, corrected the rejected `subscribeNewPairs` assumption, switched HTTP fallback to working frontend v3 coin-list endpoints, and added focused provider-shape tests.
 - 2026-07-06 CT-090: Added an offline end-to-end paper smoke test that pushes a fake pump.fun signal through the real decision engine, persists the trade and position to a temporary DB, and verifies dashboard visibility without external APIs.
-- 2026-07-06 CT-088: Added a dashboard-compatible `HealthMonitor`, aligned the dashboard's canonical DB path to `data/trades.db`, and tightened monitoring smoke coverage.
 
 ## Known Issues
 

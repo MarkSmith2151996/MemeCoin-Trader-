@@ -52,6 +52,16 @@ class FakeRiskScorer:
         return self.assessment.model_copy(update={"token": token})
 
 
+class RecordingCallableRiskScorer:
+    def __init__(self, assessment: RiskAssessment) -> None:
+        self.assessment = assessment
+        self.received_config = None
+
+    async def __call__(self, signal_or_token, config=None) -> RiskAssessment:
+        self.received_config = config
+        return self.assessment
+
+
 def safe_assessment() -> RiskAssessment:
     return RiskAssessment(
         liquidity_check=CheckResult.PASS,
@@ -134,6 +144,29 @@ def test_decision_engine_reports_failed_check_reason() -> None:
 
         assert decision.trade is None
         assert decision.rejection_reason == "honeypot_check_failed"
+
+    asyncio.run(run())
+
+
+def test_decision_engine_passes_runtime_risk_config_to_callable_signal_scorer() -> None:
+    async def run() -> None:
+        settings = Settings().model_copy(update={"risk": Settings().risk.model_copy(update={"min_age_minutes": 0})})
+        adapter = FakeExecutionAdapter({"mint": 0.25})
+        scorer = RecordingCallableRiskScorer(safe_assessment())
+        manager = PositionManager(None, settings)
+        engine = DecisionEngine(adapter, scorer, manager, settings)
+
+        trade = await engine.evaluate_signal(
+            Signal(
+                source=SignalSource.MANUAL,
+                type=SignalType.BUY,
+                mint_address="mint",
+                confidence=0.8,
+            )
+        )
+
+        assert trade is not None
+        assert scorer.received_config == settings.risk
 
     asyncio.run(run())
 

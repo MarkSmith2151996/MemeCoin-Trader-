@@ -188,10 +188,11 @@ class DecisionEngine:
             return await self._maybe_await(result)
 
         if callable(scorer):
-            try:
-                return await self._maybe_await(scorer(signal))
-            except (TypeError, AttributeError):
-                return await self._maybe_await(scorer(token, self.config.risk))
+            for args in ((signal, self.config.risk), (signal,), (token, self.config.risk)):
+                try:
+                    return await self._maybe_await(scorer(*args))
+                except (TypeError, AttributeError):
+                    continue
 
         raise TypeError("risk_scorer must provide assess_signal(), assess(), assess_token(), or be callable")
 
