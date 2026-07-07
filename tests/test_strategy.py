@@ -4,7 +4,7 @@ from datetime import UTC, datetime, timedelta
 from src.core.config import Settings
 from src.core.models import CheckResult, Position, RiskAssessment, Side, Signal, SignalSource, SignalType, TokenInfo, Trade
 from src.strategy.decision_engine import DecisionEngine
-from src.strategy.exits import build_partial_exits, evaluate_exits
+from src.strategy.exits import DynamicExitState, build_partial_exits, evaluate_exits
 from src.strategy.position_manager import PositionManager
 
 
@@ -77,6 +77,20 @@ def safe_assessment() -> RiskAssessment:
     )
 
 
+def settings_with_liquidity_sizing(*, enabled: bool, max_single_position_sol: float = 0.5) -> Settings:
+    settings = Settings()
+    return settings.model_copy(
+        update={
+            "position": settings.position.model_copy(
+                update={
+                    "liquidity_sizing_enabled": enabled,
+                    "max_single_position_sol": max_single_position_sol,
+                }
+            )
+        }
+    )
+
+
 def test_decision_engine_executes_risk_gated_buy() -> None:
     async def run() -> None:
         settings = Settings()
@@ -98,6 +112,35 @@ def test_decision_engine_executes_risk_gated_buy() -> None:
         assert trade.amount_sol == 0.4
         assert trade.side == Side.BUY
         assert (await manager.get_position("mint")) is not None
+
+    asyncio.run(run())
+
+
+def test_decision_engine_keeps_fixed_sizing_when_liquidity_sizing_disabled() -> None:
+    async def run() -> None:
+        settings = settings_with_liquidity_sizing(enabled=False)
+        adapter = FakeExecutionAdapter({"mint": 0.25})
+        assessment = safe_assessment().model_copy(
+            update={"token": TokenInfo(mint_address="mint", liquidity_sol=30.0)}
+        )
+        manager = PositionManager(None, settings)
+        engine = DecisionEngine(adapter, FakeRiskScorer(assessment), manager, settings)
+
+        decision = await engine.evaluate_signal_with_diagnostics(
+            Signal(
+                source=SignalSource.MANUAL,
+                type=SignalType.BUY,
+                mint_address="mint",
+                confidence=0.8,
+                weight=1.0,
+            )
+        )
+
+        assert decision.trade is not None
+        assert decision.trade.amount_sol == 0.4
+        assert decision.trade.metadata["position_sizing_mode"] == "flat"
+        assert decision.trade.metadata["position_sizing_reason"] == "liquidity_sizing_disabled"
+        assert decision.trade.metadata["position_sizing_max_position_cap_sol"] == 0.5
 
     asyncio.run(run())
 
@@ -125,6 +168,32 @@ def test_decision_engine_blocks_failed_risk() -> None:
     asyncio.run(run())
 
 
+def test_decision_engine_skips_unknown_liquidity_when_liquidity_sizing_enabled() -> None:
+    async def run() -> None:
+        settings = settings_with_liquidity_sizing(enabled=True)
+        adapter = FakeExecutionAdapter({"mint": 0.25})
+        assessment = safe_assessment().model_copy(update={"token": TokenInfo(mint_address="mint")})
+        manager = PositionManager(None, settings)
+        engine = DecisionEngine(adapter, FakeRiskScorer(assessment), manager, settings)
+
+        decision = await engine.evaluate_signal_with_diagnostics(
+            Signal(
+                source=SignalSource.MANUAL,
+                type=SignalType.BUY,
+                mint_address="mint",
+                confidence=1.0,
+            )
+        )
+
+        assert decision.trade is None
+        assert decision.rejection_reason == "liquidity_sizing_liquidity_unknown"
+        assert decision.metadata["position_sizing_skip_trade"] is True
+        assert decision.metadata["position_sizing_reason"] == "liquidity_unknown"
+        assert decision.metadata["position_sizing_max_position_cap_sol"] == 0.0
+
+    asyncio.run(run())
+
+
 def test_decision_engine_reports_failed_check_reason() -> None:
     async def run() -> None:
         settings = Settings()
@@ -148,6 +217,90 @@ def test_decision_engine_reports_failed_check_reason() -> None:
     asyncio.run(run())
 
 
+def test_decision_engine_caps_15_to_50_sol_liquidity_to_point_two_five() -> None:
+    async def run() -> None:
+        settings = settings_with_liquidity_sizing(enabled=True, max_single_position_sol=0.5)
+        adapter = FakeExecutionAdapter({"mint": 0.25})
+        assessment = safe_assessment().model_copy(
+            update={"token": TokenInfo(mint_address="mint", liquidity_sol=30.0)}
+        )
+        manager = PositionManager(None, settings)
+        engine = DecisionEngine(adapter, FakeRiskScorer(assessment), manager, settings)
+
+        decision = await engine.evaluate_signal_with_diagnostics(
+            Signal(
+                source=SignalSource.MANUAL,
+                type=SignalType.BUY,
+                mint_address="mint",
+                confidence=1.0,
+            )
+        )
+
+        assert decision.trade is not None
+        assert decision.trade.amount_sol == 0.25
+        assert decision.trade.metadata["position_sizing_reason"] == "15_to_50_sol"
+        assert decision.trade.metadata["position_sizing_max_position_cap_sol"] == 0.25
+        assert decision.trade.metadata["position_sizing_capped"] is True
+
+    asyncio.run(run())
+
+
+def test_decision_engine_caps_50_to_200_sol_liquidity_to_point_five() -> None:
+    async def run() -> None:
+        settings = settings_with_liquidity_sizing(enabled=True, max_single_position_sol=1.0)
+        adapter = FakeExecutionAdapter({"mint": 0.25})
+        assessment = safe_assessment().model_copy(
+            update={"token": TokenInfo(mint_address="mint", liquidity_sol=75.0)}
+        )
+        manager = PositionManager(None, settings)
+        engine = DecisionEngine(adapter, FakeRiskScorer(assessment), manager, settings)
+
+        decision = await engine.evaluate_signal_with_diagnostics(
+            Signal(
+                source=SignalSource.MANUAL,
+                type=SignalType.BUY,
+                mint_address="mint",
+                confidence=0.8,
+                weight=1.0,
+            )
+        )
+
+        assert decision.trade is not None
+        assert decision.trade.amount_sol == 0.5
+        assert decision.trade.metadata["position_sizing_reason"] == "50_to_200_sol"
+        assert decision.trade.metadata["position_sizing_max_position_cap_sol"] == 0.5
+
+    asyncio.run(run())
+
+
+def test_decision_engine_never_exceeds_global_cap_for_high_liquidity() -> None:
+    async def run() -> None:
+        settings = settings_with_liquidity_sizing(enabled=True, max_single_position_sol=0.75)
+        adapter = FakeExecutionAdapter({"mint": 0.25})
+        assessment = safe_assessment().model_copy(
+            update={"token": TokenInfo(mint_address="mint", liquidity_sol=250.0)}
+        )
+        manager = PositionManager(None, settings)
+        engine = DecisionEngine(adapter, FakeRiskScorer(assessment), manager, settings)
+
+        decision = await engine.evaluate_signal_with_diagnostics(
+            Signal(
+                source=SignalSource.MANUAL,
+                type=SignalType.BUY,
+                mint_address="mint",
+                confidence=1.0,
+            )
+        )
+
+        assert decision.trade is not None
+        assert decision.trade.amount_sol == 0.75
+        assert decision.trade.metadata["position_sizing_reason"] == "over_200_sol"
+        assert decision.trade.metadata["position_sizing_max_position_cap_sol"] == 0.75
+        assert decision.trade.metadata["position_sizing_helper_max_position_sol"] == 1.0
+
+    asyncio.run(run())
+
+
 def test_decision_engine_passes_runtime_risk_config_to_callable_signal_scorer() -> None:
     async def run() -> None:
         settings = Settings().model_copy(update={"risk": Settings().risk.model_copy(update={"min_age_minutes": 0})})
@@ -167,6 +320,33 @@ def test_decision_engine_passes_runtime_risk_config_to_callable_signal_scorer() 
 
         assert trade is not None
         assert scorer.received_config == settings.risk
+
+    asyncio.run(run())
+
+
+def test_decision_engine_returns_sizing_metadata_for_paper_decisions() -> None:
+    async def run() -> None:
+        settings = settings_with_liquidity_sizing(enabled=True)
+        adapter = FakeExecutionAdapter({"mint": 0.25})
+        assessment = safe_assessment().model_copy(
+            update={"token": TokenInfo(mint_address="mint", liquidity_sol=30.0)}
+        )
+        manager = PositionManager(None, settings)
+        engine = DecisionEngine(adapter, FakeRiskScorer(assessment), manager, settings)
+
+        decision = await engine.evaluate_signal_with_diagnostics(
+            Signal(
+                source=SignalSource.MANUAL,
+                type=SignalType.BUY,
+                mint_address="mint",
+                confidence=1.0,
+            )
+        )
+
+        assert decision.trade is not None
+        assert decision.metadata["position_sizing_reason"] == "15_to_50_sol"
+        assert decision.trade.metadata["position_sizing_liquidity_sol"] == 30.0
+        assert decision.trade.metadata["position_sizing_mode"] == "liquidity"
 
     asyncio.run(run())
 
@@ -205,3 +385,37 @@ def test_evaluate_exits_time_stop_full_exits_stalled_position() -> None:
 
     assert len(actions) == 1
     assert actions[0].is_full_exit is True
+
+
+def test_evaluate_exits_preserves_existing_take_profit_behavior_when_dynamic_exits_disabled() -> None:
+    settings = Settings()
+    position = Position(
+        mint_address="mint",
+        entry_trade_id="trade-1",
+        amount_sol=0.5,
+        token_amount=2.0,
+        entry_price_sol=1.0,
+        partial_exits=build_partial_exits(settings.exits),
+    )
+    observed_at = datetime.now(UTC)
+
+    actions = evaluate_exits(
+        position,
+        current_price=5.0,
+        pool_liquidity_sol=100.0,
+        config=settings,
+        dynamic_state=DynamicExitState(
+            current_volume=10.0,
+            peak_volume=100.0,
+            volume_below_threshold_started_at=observed_at - timedelta(minutes=20),
+            reference_liquidity=200.0,
+            reference_liquidity_at=observed_at - timedelta(seconds=30),
+            observed_at=observed_at,
+        ),
+    )
+
+    assert len(actions) == 2
+    assert [action.reason for action in actions] == [
+        "take profit hit 2.0x entry",
+        "take profit hit 5.0x entry",
+    ]

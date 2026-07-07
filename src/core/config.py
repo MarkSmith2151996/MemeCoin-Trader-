@@ -25,6 +25,7 @@ class PositionConfig(BaseModel):
     max_single_position_sol: float = 0.5
     max_portfolio_sol: float = 5.0
     max_open_positions: int = 5
+    liquidity_sizing_enabled: bool = False
     default_slippage_bps: int = 300
     max_slippage_bps: int = 500
 
@@ -41,6 +42,12 @@ class ExitConfig(BaseModel):
     stop_loss_pct: float = 0.50
     time_stop_minutes: int = 120
     trail_stop_pct: float = 0.30
+    dynamic_exits_enabled: bool = False
+    dynamic_volume_decay_ratio: float = Field(default=0.20, gt=0.0, le=1.0)
+    dynamic_volume_decay_minutes: int = Field(default=15, ge=1)
+    dynamic_liquidity_drop_ratio: float = Field(default=0.50, gt=0.0, le=1.0)
+    dynamic_liquidity_drop_window_seconds: int = Field(default=60, ge=1)
+    dynamic_trail_start_multiple: float | None = Field(default=None, gt=0)
 
 
 class ExecutionConfig(BaseModel):

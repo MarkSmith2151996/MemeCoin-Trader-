@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import inspect
 import logging
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
@@ -14,6 +14,7 @@ from src.core.models import CheckResult, PartialExit, Position, RiskAssessment, 
 from src.execution.base import ExecutionAdapter
 from src.strategy.exits import evaluate_exits
 from src.strategy.position_manager import PositionManager
+from src.strategy.position_sizing import determine_liquidity_position_size
 
 
 logger = logging.getLogger(__name__)
@@ -22,6 +23,14 @@ logger = logging.getLogger(__name__)
 @dataclass(slots=True)
 class DecisionResult:
     trade: Trade | None
+    rejection_reason: str | None = None
+    metadata: dict[str, object] = field(default_factory=dict)
+
+
+@dataclass(slots=True)
+class PositionSizingResult:
+    amount_sol: float
+    metadata: dict[str, object]
     rejection_reason: str | None = None
 
 
@@ -70,15 +79,19 @@ class DecisionEngine:
             logger.info("Skipping %s: max portfolio exposure reached", signal.mint_address)
             return DecisionResult(trade=None, rejection_reason="max_portfolio_exposure_reached")
 
-        position_size = self._calculate_position_size(signal, remaining_portfolio)
-        if position_size <= 0:
+        sizing = self._calculate_position_size(signal, risk, remaining_portfolio)
+        if sizing.amount_sol <= 0:
             logger.info("Skipping %s: calculated position size was zero", signal.mint_address)
-            return DecisionResult(trade=None, rejection_reason="position_size_zero")
+            return DecisionResult(
+                trade=None,
+                rejection_reason=sizing.rejection_reason or "position_size_zero",
+                metadata=sizing.metadata,
+            )
 
         trade = await self.execution.execute_swap(
             signal.mint_address,
             Side.BUY,
-            position_size,
+            sizing.amount_sol,
             slippage_bps=self.config.position.default_slippage_bps,
         )
         trade = trade.model_copy(
@@ -86,6 +99,7 @@ class DecisionEngine:
                 "mode": self.execution.mode,
                 "metadata": {
                     **trade.metadata,
+                    **sizing.metadata,
                     "signal_source": signal.source.value,
                     "signal_type": signal.type.value,
                     "signal_confidence": signal.confidence,
@@ -97,7 +111,7 @@ class DecisionEngine:
         )
         await self._record_trade(trade)
         await self.position_manager.open_position(trade, signal)
-        return DecisionResult(trade=trade)
+        return DecisionResult(trade=trade, metadata=sizing.metadata)
 
     async def check_exits(self) -> list[Trade]:
         exit_trades: list[Trade] = []
@@ -157,14 +171,59 @@ class DecisionEngine:
 
         return exit_trades
 
-    def _calculate_position_size(self, signal: Signal, remaining_portfolio: float) -> float:
+    def _calculate_position_size(
+        self,
+        signal: Signal,
+        risk: RiskAssessment,
+        remaining_portfolio: float,
+    ) -> PositionSizingResult:
         strength = max(0.0, min(signal.confidence * max(signal.weight, 0.0), 1.0))
         capped_single = min(
             self.config.position.max_single_position_sol,
             remaining_portfolio,
         )
-        size = capped_single * strength
-        return round(min(size, self.config.position.max_single_position_sol), 6)
+        flat_size = round(min(capped_single * strength, self.config.position.max_single_position_sol), 6)
+        token = risk.token or self._coerce_token(signal.payload.get("token"), signal.mint_address)
+        liquidity_sol = token.liquidity_sol
+
+        metadata: dict[str, object] = {
+            "position_sizing_mode": "flat",
+            "position_sizing_enabled": self.config.position.liquidity_sizing_enabled,
+            "position_sizing_requested_sol": flat_size,
+            "position_sizing_max_position_cap_sol": round(capped_single, 6),
+            "position_sizing_reason": "liquidity_sizing_disabled",
+            "position_sizing_skip_trade": False,
+            "position_sizing_capped": False,
+        }
+        if liquidity_sol is not None:
+            metadata["position_sizing_liquidity_sol"] = round(liquidity_sol, 6)
+
+        if not self.config.position.liquidity_sizing_enabled:
+            return PositionSizingResult(amount_sol=flat_size, metadata=metadata)
+
+        liquidity_decision = determine_liquidity_position_size(liquidity_sol)
+        effective_cap = round(min(liquidity_decision.max_position_sol, capped_single), 6)
+        skip_trade = liquidity_decision.skip_trade or effective_cap <= 0
+        final_size = 0.0 if skip_trade else round(min(flat_size, effective_cap), 6)
+        metadata.update(
+            {
+                "position_sizing_mode": "liquidity",
+                "position_sizing_helper_max_position_sol": liquidity_decision.max_position_sol,
+                "position_sizing_max_position_cap_sol": effective_cap,
+                "position_sizing_reason": liquidity_decision.reason,
+                "position_sizing_skip_trade": skip_trade,
+                "position_sizing_capped": skip_trade or final_size < flat_size,
+            }
+        )
+
+        rejection_reason = None
+        if skip_trade:
+            rejection_reason = f"liquidity_sizing_{liquidity_decision.reason}"
+        return PositionSizingResult(
+            amount_sol=final_size,
+            metadata=metadata,
+            rejection_reason=rejection_reason,
+        )
 
     async def _assess_signal(self, signal: Signal) -> RiskAssessment:
         if isinstance(signal.payload.get("risk_assessment"), RiskAssessment):

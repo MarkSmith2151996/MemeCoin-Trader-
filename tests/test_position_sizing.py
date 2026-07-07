@@ -48,16 +48,17 @@ def test_over_200_sol_caps_to_one() -> None:
 
 def test_custom_tier_config_is_used() -> None:
     tiers = (
-        LiquiditySizingTier(max_liquidity_sol=20.0, max_position_sol=0.05, label="tiny"),
-        LiquiditySizingTier(min_liquidity_sol=20.0, max_position_sol=0.2, label="small"),
+        LiquiditySizingTier(max_liquidity_sol=15.0, max_position_sol=0.05, label="tiny"),
+        LiquiditySizingTier(min_liquidity_sol=15.0, max_liquidity_sol=50.0, max_position_sol=0.2, label="small_liquidity"),
+        LiquiditySizingTier(min_liquidity_sol=50.0, max_position_sol=0.4, label="bigger_liquidity"),
     )
 
     decision = determine_liquidity_position_size(19.5, tiers=tiers)
 
     assert decision.skip_trade is False
-    assert decision.max_position_sol == 0.05
-    assert decision.matched_tier == "tiny"
-    assert decision.reason == "tiny"
+    assert decision.max_position_sol == 0.2
+    assert decision.matched_tier == "small_liquidity"
+    assert decision.reason == "small_liquidity"
 
 
 def test_invalid_liquidity_skips_trade() -> None:
