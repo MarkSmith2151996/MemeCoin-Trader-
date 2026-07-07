@@ -36,6 +36,13 @@ TICKER_PATTERN = re.compile(r"(?<!\w)\$([A-Za-z][A-Za-z0-9]{1,14})\b")
 SOLANA_MINT_PATTERN = re.compile(r"\b[1-9A-HJ-NP-Za-km-z]{32,44}\b")
 
 
+@dataclass(frozen=True, slots=True)
+class CredibilityResult:
+    score: float
+    tier: str
+    details: dict[str, float | int | str | bool | None]
+
+
 @dataclass(slots=True)
 class TwitterPost:
     post_id: str
@@ -44,6 +51,9 @@ class TwitterPost:
     author_handle: str | None
     follower_count: int
     created_at: datetime
+    author_created_at: datetime | None = None
+    verified: bool | None = None
+    spam_flags: tuple[str, ...] = ()
 
 
 @dataclass(slots=True)
@@ -54,6 +64,7 @@ class MentionRecord:
     observed_at: datetime
     text_type: str
     tickers: tuple[str, ...]
+    content_fingerprint: str
 
 
 def extract_ticker_symbols(text: str) -> list[str]:
@@ -115,21 +126,111 @@ def compute_mention_velocity(
     return mention_count / max(effective_minutes, 1e-6)
 
 
+def normalize_post_fingerprint(text: str) -> str:
+    normalized = TICKER_PATTERN.sub("$TICKER", text.upper())
+    normalized = SOLANA_MINT_PATTERN.sub("MINT", normalized)
+    normalized = re.sub(r"https?://\S+", "URL", normalized)
+    normalized = re.sub(r"\s+", " ", normalized)
+    return normalized.strip()
+
+
+def score_author_credibility(
+    *,
+    follower_count: int,
+    verified: bool | None,
+    account_created_at: datetime | None,
+    observed_at: datetime,
+    spam_flags: Sequence[str] = (),
+    duplicate_posts: int = 0,
+    total_posts: int = 1,
+) -> CredibilityResult:
+    metadata_known = verified is not None or account_created_at is not None or bool(spam_flags) or follower_count > 0
+    score = 0.5
+
+    follower_bonus = min(math.log10(max(follower_count, 0) + 1) / 6, 1.0) * 0.2
+    score += follower_bonus
+
+    if verified is True:
+        score += 0.15
+
+    account_age_days: float | None = None
+    if account_created_at is not None:
+        account_age_days = max((observed_at - account_created_at).total_seconds() / 86400, 0.0)
+        if account_age_days >= 365:
+            score += 0.1
+        elif account_age_days >= 90:
+            score += 0.05
+        elif account_age_days < 30:
+            score -= 0.1
+
+    spam_penalty = min(len(spam_flags), 2) * 0.15
+    score -= spam_penalty
+
+    duplicate_ratio = duplicate_posts / max(total_posts, 1)
+    duplicate_penalty = 0.0
+    if duplicate_posts >= 3 and duplicate_ratio >= 0.75:
+        duplicate_penalty = 0.2
+    elif duplicate_posts >= 2 and duplicate_ratio >= 0.5:
+        duplicate_penalty = 0.1
+    score -= duplicate_penalty
+
+    score = min(max(score, 0.05), 0.95)
+
+    if not metadata_known:
+        tier = "unknown"
+    elif score >= 0.85:
+        tier = "S"
+    elif score >= 0.72:
+        tier = "A"
+    elif score >= 0.58:
+        tier = "B"
+    else:
+        tier = "C"
+
+    return CredibilityResult(
+        score=round(score, 4),
+        tier=tier,
+        details={
+            "follower_count": max(follower_count, 0),
+            "verified": verified,
+            "account_age_days": round(account_age_days, 2) if account_age_days is not None else None,
+            "spam_flags": list(spam_flags),
+            "duplicate_posts": duplicate_posts,
+            "duplicate_ratio": round(duplicate_ratio, 4),
+        },
+    )
+
+
 def score_signal_strength(
     *,
     velocity_per_minute: float,
     unique_accounts: int,
     text_type: str,
-    follower_count: int,
-    mention_count: int,
+    follower_count: float,
+    mention_count: float,
+    avg_credibility: float,
+    effective_unique_accounts: float,
+    dominant_author_share: float,
 ) -> float:
     velocity_score = min(velocity_per_minute / 1.5, 1.0) * 0.4
-    unique_score = min(unique_accounts / 5, 1.0) * 0.2
-    diversity_score = min(unique_accounts / max(mention_count, 1), 1.0) * 0.15
+    unique_score = min(unique_accounts / 5, 1.0) * 0.15
+    weighted_unique_score = min(effective_unique_accounts / 3, 1.0) * 0.1
+    diversity_score = min(unique_accounts / max(mention_count, 1.0), 1.0) * 0.1
     follower_score = min(math.log10(max(follower_count, 0) + 1) / 6, 1.0) * 0.15
+    credibility_score = min(max(avg_credibility, 0.0), 1.0) * 0.1
+    concentration_penalty = min(max(dominant_author_share - 0.5, 0.0), 0.5) * 0.3
     text_score = {"buy_call": 0.2, "observation": 0.1, "warning": 0.0}.get(text_type, 0.0)
 
-    score = velocity_score + unique_score + diversity_score + follower_score + text_score
+    score = (
+        velocity_score
+        + unique_score
+        + weighted_unique_score
+        + diversity_score
+        + follower_score
+        + credibility_score
+        + text_score
+        - concentration_penalty
+    )
     if text_type == "warning":
         score *= 0.5
     return min(max(score, 0.0), 1.0)
@@ -151,7 +252,7 @@ async def _default_fetch_posts(
             "max_results": min(max(limit, 10), 100),
             "expansions": "author_id",
             "tweet.fields": "author_id,created_at,public_metrics,text",
-            "user.fields": "public_metrics,username",
+            "user.fields": "created_at,public_metrics,username,verified",
         },
     )
     response.raise_for_status()
@@ -286,6 +387,11 @@ class TwitterMonitor(SignalSource):
         )
         follower_count = self._follower_count(payload, author)
         created_at = self._parse_datetime(payload.get("created_at")) or utc_now()
+        author_created_at = self._parse_datetime(author.get("created_at")) or self._parse_datetime(
+            payload.get("author_created_at")
+        )
+        verified = self._verified_flag(payload, author)
+        spam_flags = tuple(self._spam_flags(payload, author))
 
         return TwitterPost(
             post_id=post_id,
@@ -294,6 +400,9 @@ class TwitterMonitor(SignalSource):
             author_handle=author_handle,
             follower_count=follower_count,
             created_at=created_at,
+            author_created_at=author_created_at,
+            verified=verified,
+            spam_flags=spam_flags,
         )
 
     def _build_signals(self, posts: Sequence[TwitterPost]) -> list[Signal]:
@@ -304,6 +413,7 @@ class TwitterMonitor(SignalSource):
         latest_posts: dict[str, TwitterPost] = {}
         current_batch_types: dict[str, list[str]] = defaultdict(list)
         current_batch_tickers: dict[str, set[str]] = defaultdict(set)
+        author_posts: dict[str, TwitterPost] = {}
 
         for post in posts:
             mints = extract_solana_mints(post.text)
@@ -312,6 +422,8 @@ class TwitterMonitor(SignalSource):
 
             text_type = classify_text_type(post.text)
             tickers = tuple(extract_ticker_symbols(post.text))
+            fingerprint = normalize_post_fingerprint(post.text)
+            author_posts[post.author_id] = post
             for mint in mints:
                 touched_mints.add(mint)
                 latest_posts[mint] = post
@@ -325,6 +437,7 @@ class TwitterMonitor(SignalSource):
                         observed_at=post.created_at,
                         text_type=text_type,
                         tickers=tickers,
+                        content_fingerprint=fingerprint,
                     )
                 )
 
@@ -336,22 +449,68 @@ class TwitterMonitor(SignalSource):
 
             unique_accounts = len({record.author_id for record in history})
             mention_count = len(history)
+            records_by_author: dict[str, list[MentionRecord]] = defaultdict(list)
+            for record in history:
+                records_by_author[record.author_id].append(record)
+
+            credibility_by_author: dict[str, CredibilityResult] = {}
+            capped_weighted_mentions = 0.0
+            effective_unique_accounts = 0.0
+            weighted_follower_total = 0.0
+            max_author_mentions = 0
+            for author_id, author_history in records_by_author.items():
+                max_author_mentions = max(max_author_mentions, len(author_history))
+                duplicate_posts = len(author_history) - len({record.content_fingerprint for record in author_history})
+                author_post = author_posts.get(author_id)
+                credibility = score_author_credibility(
+                    follower_count=author_post.follower_count if author_post is not None else 0,
+                    verified=author_post.verified if author_post is not None else None,
+                    account_created_at=author_post.author_created_at if author_post is not None else None,
+                    observed_at=max(record.observed_at for record in author_history),
+                    spam_flags=author_post.spam_flags if author_post is not None else (),
+                    duplicate_posts=duplicate_posts,
+                    total_posts=len(author_history),
+                )
+                credibility_by_author[author_id] = credibility
+                capped_weighted_mentions += min(len(author_history), 2) * credibility.score
+                effective_unique_accounts += credibility.score
+                weighted_follower_total += (author_post.follower_count if author_post is not None else 0) * credibility.score
+
             velocity = compute_mention_velocity(
                 [record.observed_at for record in history],
                 self._window,
             )
             max_followers = max(record.follower_count for record in history)
+            avg_credibility = sum(result.score for result in credibility_by_author.values()) / max(
+                len(credibility_by_author), 1
+            )
+            dominant_author_share = max_author_mentions / max(mention_count, 1)
             text_type = self._strongest_text_type(current_batch_types[mint])
             confidence = score_signal_strength(
                 velocity_per_minute=velocity,
                 unique_accounts=unique_accounts,
                 text_type=text_type,
-                follower_count=max_followers,
-                mention_count=mention_count,
+                follower_count=max(weighted_follower_total, max_followers),
+                mention_count=max(capped_weighted_mentions, 1.0),
+                avg_credibility=avg_credibility,
+                effective_unique_accounts=effective_unique_accounts,
+                dominant_author_share=dominant_author_share,
             )
             signal_type = SignalType.BUY if text_type == "buy_call" else SignalType.MENTION
             latest_post = latest_posts[mint]
             tickers = sorted(current_batch_tickers[mint])
+            author_handles = sorted(
+                {
+                    post.author_handle
+                    for post in author_posts.values()
+                    if post.author_handle
+                }
+            )
+            top_credibility = max(
+                credibility_by_author.values(),
+                key=lambda result: result.score,
+                default=CredibilityResult(score=0.5, tier="unknown", details={}),
+            )
             payload = {
                 "query": self._query,
                 "auth_mode": self._auth_mode,
@@ -361,14 +520,21 @@ class TwitterMonitor(SignalSource):
                 "velocity_per_minute": round(velocity, 4),
                 "text_type": text_type,
                 "max_follower_count": max_followers,
-                "post_ids": [record.post_id for record in history],
-                "author_handles": sorted(
-                    {
-                        latest_post.author_handle
-                        for latest_post in latest_posts.values()
-                        if latest_post.author_handle
+                "effective_mentions_window": round(capped_weighted_mentions, 4),
+                "effective_unique_accounts": round(effective_unique_accounts, 4),
+                "dominant_author_share": round(dominant_author_share, 4),
+                "credibility_avg_score": round(avg_credibility, 4),
+                "credibility_tier": top_credibility.tier,
+                "credibility_by_author": {
+                    author_id: {
+                        "score": result.score,
+                        "tier": result.tier,
+                        **result.details,
                     }
-                ),
+                    for author_id, result in credibility_by_author.items()
+                },
+                "post_ids": [record.post_id for record in history],
+                "author_handles": author_handles,
             }
             signals.append(
                 Signal(
@@ -376,7 +542,10 @@ class TwitterMonitor(SignalSource):
                     type=signal_type,
                     mint_address=mint,
                     confidence=confidence,
-                    weight=round(1.0 + min(math.log10(max_followers + 1) / 3, 1.0), 3),
+                    weight=round(
+                        1.0 + min(math.log10(max(weighted_follower_total, max_followers) + 1) / 3, 1.0) * avg_credibility,
+                        3,
+                    ),
                     message=self._build_message(mint, tickers, text_type, latest_post),
                     payload=payload,
                     observed_at=latest_post.created_at,
@@ -440,6 +609,32 @@ class TwitterMonitor(SignalSource):
         if isinstance(followers, int):
             return followers
         return None
+
+    def _verified_flag(self, payload: Mapping[str, object], author: Mapping[str, object]) -> bool | None:
+        for candidate in (payload.get("verified"), author.get("verified")):
+            if isinstance(candidate, bool):
+                return candidate
+        return None
+
+    def _spam_flags(self, payload: Mapping[str, object], author: Mapping[str, object]) -> list[str]:
+        flags: list[str] = []
+        candidate_fields = (
+            (payload.get("is_bot"), "bot_flag"),
+            (author.get("is_bot"), "bot_flag"),
+            (payload.get("is_spam"), "spam_flag"),
+            (author.get("is_spam"), "spam_flag"),
+            (payload.get("default_profile_image"), "default_avatar"),
+            (author.get("default_profile_image"), "default_avatar"),
+        )
+        for value, label in candidate_fields:
+            if value is True and label not in flags:
+                flags.append(label)
+
+        for value in (payload.get("spam_score"), author.get("spam_score")):
+            if isinstance(value, (int, float)) and value >= 0.8 and "high_spam_score" not in flags:
+                flags.append("high_spam_score")
+
+        return flags
 
     def _parse_datetime(self, value: object) -> datetime | None:
         if not isinstance(value, str) or not value.strip():
