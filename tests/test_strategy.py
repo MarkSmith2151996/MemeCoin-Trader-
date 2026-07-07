@@ -115,6 +115,29 @@ def test_decision_engine_blocks_failed_risk() -> None:
     asyncio.run(run())
 
 
+def test_decision_engine_reports_failed_check_reason() -> None:
+    async def run() -> None:
+        settings = Settings()
+        adapter = FakeExecutionAdapter({"mint": 0.25})
+        blocked = safe_assessment().model_copy(update={"honeypot_check": CheckResult.FAIL, "reasons": ["honeypot"]})
+        manager = PositionManager(None, settings)
+        engine = DecisionEngine(adapter, FakeRiskScorer(blocked), manager, settings)
+
+        decision = await engine.evaluate_signal_with_diagnostics(
+            Signal(
+                source=SignalSource.MANUAL,
+                type=SignalType.BUY,
+                mint_address="mint",
+                confidence=0.8,
+            )
+        )
+
+        assert decision.trade is None
+        assert decision.rejection_reason == "honeypot_check_failed"
+
+    asyncio.run(run())
+
+
 def test_evaluate_exits_sells_remaining_at_20x() -> None:
     settings = Settings()
     position = Position(

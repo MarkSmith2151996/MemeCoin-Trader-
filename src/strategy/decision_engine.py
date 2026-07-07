@@ -4,18 +4,25 @@ from __future__ import annotations
 
 import inspect
 import logging
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
 from src.core.config import Settings
 from src.core.database import record_trade
-from src.core.models import PartialExit, Position, RiskAssessment, Side, Signal, TokenInfo, Trade
+from src.core.models import CheckResult, PartialExit, Position, RiskAssessment, Side, Signal, TokenInfo, Trade
 from src.execution.base import ExecutionAdapter
 from src.strategy.exits import evaluate_exits
 from src.strategy.position_manager import PositionManager
 
 
 logger = logging.getLogger(__name__)
+
+
+@dataclass(slots=True)
+class DecisionResult:
+    trade: Trade | None
+    rejection_reason: str | None = None
 
 
 class DecisionEngine:
@@ -34,36 +41,39 @@ class DecisionEngine:
         self.db = Path(db) if db is not None else None
 
     async def evaluate_signal(self, signal: Signal) -> Trade | None:
+        return (await self.evaluate_signal_with_diagnostics(signal)).trade
+
+    async def evaluate_signal_with_diagnostics(self, signal: Signal) -> DecisionResult:
         if not signal.mint_address.strip():
             logger.info("Skipping signal without mint address")
-            return None
+            return DecisionResult(trade=None, rejection_reason="missing_mint_address")
 
         existing = await self.position_manager.get_position(signal.mint_address)
         if existing is not None:
             logger.info("Skipping %s: open position already exists", signal.mint_address)
-            return None
+            return DecisionResult(trade=None, rejection_reason="open_position_exists")
 
         risk = await self._assess_signal(signal)
         if not risk.all_checks_pass:
             logger.info("Skipping %s: risk gate blocked trade (%s)", signal.mint_address, ", ".join(risk.reasons))
-            return None
+            return DecisionResult(trade=None, rejection_reason=self._risk_rejection_reason(risk))
 
         open_positions = await self.position_manager.get_all_open()
         if len(open_positions) >= self.config.position.max_open_positions:
             logger.info("Skipping %s: max open positions reached", signal.mint_address)
-            return None
+            return DecisionResult(trade=None, rejection_reason="max_open_positions_reached")
 
         remaining_portfolio = (
             self.config.position.max_portfolio_sol - await self.position_manager.total_exposure_sol()
         )
         if remaining_portfolio <= 0:
             logger.info("Skipping %s: max portfolio exposure reached", signal.mint_address)
-            return None
+            return DecisionResult(trade=None, rejection_reason="max_portfolio_exposure_reached")
 
         position_size = self._calculate_position_size(signal, remaining_portfolio)
         if position_size <= 0:
             logger.info("Skipping %s: calculated position size was zero", signal.mint_address)
-            return None
+            return DecisionResult(trade=None, rejection_reason="position_size_zero")
 
         trade = await self.execution.execute_swap(
             signal.mint_address,
@@ -87,7 +97,7 @@ class DecisionEngine:
         )
         await self._record_trade(trade)
         await self.position_manager.open_position(trade, signal)
-        return trade
+        return DecisionResult(trade=trade)
 
     async def check_exits(self) -> list[Trade]:
         exit_trades: list[Trade] = []
@@ -221,6 +231,36 @@ class DecisionEngine:
         if isinstance(raw_token, dict):
             return TokenInfo.model_validate({"mint_address": mint_address, **raw_token})
         return TokenInfo(mint_address=mint_address)
+
+    @staticmethod
+    def _risk_rejection_reason(risk: RiskAssessment) -> str:
+        for field_name in (
+            "liquidity_check",
+            "top10_holder_check",
+            "creator_holding_check",
+            "age_check",
+            "unique_buyers_check",
+            "mint_authority_check",
+            "freeze_authority_check",
+            "honeypot_check",
+        ):
+            result = getattr(risk, field_name)
+            if result == CheckResult.FAIL:
+                return f"{field_name}_failed"
+        for field_name in (
+            "liquidity_check",
+            "top10_holder_check",
+            "creator_holding_check",
+            "age_check",
+            "unique_buyers_check",
+            "mint_authority_check",
+            "freeze_authority_check",
+            "honeypot_check",
+        ):
+            result = getattr(risk, field_name)
+            if result == CheckResult.UNKNOWN:
+                return f"{field_name}_unknown"
+        return "risk_check_blocked"
 
     @staticmethod
     def _realized_pnl(position: Position, exit_price_sol: float, sell_pct: float) -> float:

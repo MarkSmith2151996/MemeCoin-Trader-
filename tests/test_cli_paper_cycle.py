@@ -36,9 +36,24 @@ class FakeSignalSource(SignalSource):
         return []
 
 
-def build_assessment(mint_address: str, *, passes: bool) -> RiskAssessment:
-    check_value = CheckResult.PASS if passes else CheckResult.FAIL
-    reasons = [] if passes else ["honeypot_check failed"]
+class ExplodingRiskScorer:
+    async def assess_signal(self, signal: Signal) -> RiskAssessment:
+        raise RuntimeError("boom")
+
+
+def build_assessment(mint_address: str, *, passes: bool, failed_field: str = "honeypot_check") -> RiskAssessment:
+    checks = {
+        "liquidity_check": CheckResult.PASS,
+        "top10_holder_check": CheckResult.PASS,
+        "creator_holding_check": CheckResult.PASS,
+        "age_check": CheckResult.PASS,
+        "unique_buyers_check": CheckResult.PASS,
+        "mint_authority_check": CheckResult.PASS,
+        "freeze_authority_check": CheckResult.PASS,
+        "honeypot_check": CheckResult.PASS,
+    }
+    if not passes:
+        checks[failed_field] = CheckResult.FAIL
     return RiskAssessment(
         token=TokenInfo(
             mint_address=mint_address,
@@ -49,27 +64,40 @@ def build_assessment(mint_address: str, *, passes: bool) -> RiskAssessment:
             mint_authority_revoked=True,
             freeze_authority_revoked=True,
         ),
-        liquidity_check=CheckResult.PASS,
-        top10_holder_check=CheckResult.PASS,
-        creator_holding_check=CheckResult.PASS,
-        age_check=CheckResult.PASS,
-        unique_buyers_check=CheckResult.PASS,
-        mint_authority_check=CheckResult.PASS,
-        freeze_authority_check=CheckResult.PASS,
-        honeypot_check=check_value,
+        liquidity_check=checks["liquidity_check"],
+        top10_holder_check=checks["top10_holder_check"],
+        creator_holding_check=checks["creator_holding_check"],
+        age_check=checks["age_check"],
+        unique_buyers_check=checks["unique_buyers_check"],
+        mint_authority_check=checks["mint_authority_check"],
+        freeze_authority_check=checks["freeze_authority_check"],
+        honeypot_check=checks["honeypot_check"],
         score=100.0 if passes else 70.0,
-        reasons=reasons,
+        reasons=[] if passes else [f"{failed_field} failed"],
     )
 
 
-def build_signal(mint_address: str, *, passes: bool, message: str | None = None) -> Signal:
+def build_signal(
+    mint_address: str,
+    *,
+    passes: bool,
+    confidence: float = 0.8,
+    failed_field: str = "honeypot_check",
+    include_assessment: bool = True,
+    message: str | None = None,
+) -> Signal:
+    payload = (
+        {"risk_assessment": build_assessment(mint_address, passes=passes, failed_field=failed_field)}
+        if include_assessment
+        else {}
+    )
     return Signal(
         source=SignalSourceEnum.MANUAL,
         type=SignalType.BUY,
         mint_address=mint_address,
-        confidence=0.8,
+        confidence=confidence,
         message=message,
-        payload={"risk_assessment": build_assessment(mint_address, passes=passes)},
+        payload=payload,
     )
 
 
@@ -99,6 +127,7 @@ def test_paper_cycle_persists_accepted_and_rejected_fake_signals(tmp_path: Path)
         assert summary.signals_rejected == 1
         assert summary.trades_persisted == 1
         assert summary.open_positions == 1
+        assert summary.rejection_reasons == {"honeypot_check_failed": 1}
         assert summary.termination_reason == "max_signals"
         assert source.started is True
         assert source.stopped is True
@@ -162,9 +191,43 @@ def test_paper_cycle_stops_at_max_signals_bound(tmp_path: Path) -> None:
         assert summary.signals_accepted == 1
         assert summary.signals_rejected == 0
         assert summary.trades_persisted == 1
+        assert summary.rejection_reasons == {}
         assert summary.termination_reason == "max_signals"
         assert len(trades) == 1
         assert trades[0].mint_address == "mint-1"
+
+    asyncio.run(run())
+
+
+def test_paper_cycle_reports_stable_rejection_reason_counts(tmp_path: Path) -> None:
+    async def run() -> None:
+        db_path = tmp_path / "rejections.db"
+        source = FakeSignalSource(
+            [
+                [
+                    build_signal("risk-1", passes=False, failed_field="honeypot_check"),
+                    build_signal("risk-2", passes=False, failed_field="honeypot_check"),
+                    build_signal("zero-size", passes=True, confidence=0.0),
+                ]
+            ]
+        )
+
+        summary = await cli_module.run_bounded_paper_cycle(
+            max_signals=3,
+            timeout_seconds=0.1,
+            db_path=db_path,
+            sources=[source],
+            poll_interval_s=0.0,
+        )
+
+        assert summary.signals_collected == 3
+        assert summary.signals_accepted == 0
+        assert summary.signals_rejected == 3
+        assert summary.trades_persisted == 0
+        assert summary.rejection_reasons == {
+            "honeypot_check_failed": 2,
+            "position_size_zero": 1,
+        }
 
     asyncio.run(run())
 
@@ -190,6 +253,29 @@ def test_paper_cycle_times_out_cleanly_without_signals(tmp_path: Path) -> None:
         assert summary.termination_reason == "timeout"
         assert source.started is True
         assert source.stopped is True
+
+    asyncio.run(run())
+
+
+def test_paper_cycle_counts_ambiguous_failures_as_unknown_or_other(tmp_path: Path) -> None:
+    async def run() -> None:
+        db_path = tmp_path / "unknown.db"
+        source = FakeSignalSource([[build_signal("unknown-mint", passes=True, include_assessment=False)]])
+
+        summary = await cli_module.run_bounded_paper_cycle(
+            max_signals=1,
+            timeout_seconds=0.1,
+            db_path=db_path,
+            sources=[source],
+            risk_scorer=ExplodingRiskScorer(),
+            poll_interval_s=0.0,
+        )
+
+        assert summary.signals_collected == 1
+        assert summary.signals_accepted == 0
+        assert summary.signals_rejected == 1
+        assert summary.trades_persisted == 0
+        assert summary.rejection_reasons == {"unknown_or_other": 1}
 
     asyncio.run(run())
 
@@ -220,5 +306,6 @@ def test_paper_cycle_cli_prints_safe_summary(tmp_path: Path, monkeypatch) -> Non
     assert "signals_collected=1" in result.stdout
     assert "signals_accepted=1" in result.stdout
     assert "termination_reason=max_signals" in result.stdout
+    assert "rejection_reasons" not in result.stdout
     assert "cli-secret-mint" not in result.stdout
     assert "super secret alpha message" not in result.stdout

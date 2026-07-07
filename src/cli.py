@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import sqlite3
+from collections import Counter
 from dataclasses import dataclass
 from pathlib import Path
 from time import monotonic
@@ -41,11 +42,12 @@ class PaperCycleSummary:
     signals_rejected: int
     trades_persisted: int
     open_positions: int
+    rejection_reasons: dict[str, int]
     termination_reason: str
     elapsed_seconds: float
 
     def safe_lines(self) -> list[str]:
-        return [
+        lines = [
             f"execution_mode={self.execution_mode}",
             f"max_signals={self.max_signals}",
             f"timeout_seconds={self.timeout_seconds:g}",
@@ -57,6 +59,10 @@ class PaperCycleSummary:
             f"termination_reason={self.termination_reason}",
             f"elapsed_seconds={self.elapsed_seconds:.3f}",
         ]
+        if self.rejection_reasons:
+            lines.append("rejection_reasons:")
+            lines.extend(f"  {reason}={count}" for reason, count in self.rejection_reasons.items())
+        return lines
 
 
 def build_signal_sources() -> list[SignalSource]:
@@ -78,28 +84,31 @@ def _count_rows(db_path: Path, table: str, where_clause: str | None = None, para
     return int(row[0]) if row is not None else 0
 
 
-async def _start_signal_sources(sources: list[SignalSource]) -> None:
+async def _start_signal_sources(sources: list[SignalSource], rejection_reasons: Counter[str]) -> None:
     for source in sources:
         try:
             await source.start()
         except Exception as exc:  # pragma: no cover - defensive against provider/network errors
+            rejection_reasons["provider_warning"] += 1
             logger.warning("Failed to start signal source %s: %s", source.name, exc)
 
 
-async def _stop_signal_sources(sources: list[SignalSource]) -> None:
+async def _stop_signal_sources(sources: list[SignalSource], rejection_reasons: Counter[str]) -> None:
     for source in sources:
         try:
             await source.stop()
         except Exception as exc:  # pragma: no cover - defensive against provider/network errors
+            rejection_reasons["provider_warning"] += 1
             logger.warning("Failed to stop signal source %s: %s", source.name, exc)
 
 
-async def _poll_signal_sources(sources: list[SignalSource]) -> list[Any]:
+async def _poll_signal_sources(sources: list[SignalSource], rejection_reasons: Counter[str]) -> list[Any]:
     signals: list[Any] = []
     for source in sources:
         try:
             signals.extend(await source.poll())
         except Exception as exc:  # pragma: no cover - defensive against provider/network errors
+            rejection_reasons["provider_warning"] += 1
             logger.warning("Failed to poll signal source %s: %s", source.name, exc)
     return signals
 
@@ -135,23 +144,33 @@ async def run_bounded_paper_cycle(
     signals_collected = 0
     signals_accepted = 0
     signals_rejected = 0
+    rejection_reasons: Counter[str] = Counter()
     termination_reason = "timeout"
 
-    await _start_signal_sources(signal_sources)
+    await _start_signal_sources(signal_sources, rejection_reasons)
     try:
         while signals_collected < max_signals:
             if monotonic() - start_at >= timeout_seconds:
                 break
 
             remaining_capacity = max_signals - signals_collected
-            batch = await _poll_signal_sources(signal_sources)
+            batch = await _poll_signal_sources(signal_sources, rejection_reasons)
             for signal in batch[:remaining_capacity]:
-                trade = await engine.evaluate_signal(signal)
                 signals_collected += 1
-                if trade is None:
+                try:
+                    decision = await engine.evaluate_signal_with_diagnostics(signal)
+                except Exception as exc:  # pragma: no cover - defensive against future decision/runtime failures
+                    logger.warning("Failed to evaluate signal during paper-cycle: %s", exc)
                     signals_rejected += 1
-                else:
-                    signals_accepted += 1
+                    rejection_reasons["unknown_or_other"] += 1
+                    continue
+
+                if decision.trade is None:
+                    signals_rejected += 1
+                    rejection_reasons[decision.rejection_reason or "unknown_or_other"] += 1
+                    continue
+
+                signals_accepted += 1
 
             if signals_collected >= max_signals:
                 termination_reason = "max_signals"
@@ -162,7 +181,7 @@ async def run_bounded_paper_cycle(
                 break
             await asyncio.sleep(min(max(poll_interval_s, 0.0), remaining_time))
     finally:
-        await _stop_signal_sources(signal_sources)
+        await _stop_signal_sources(signal_sources, rejection_reasons)
         await execution_adapter.close()
 
     return PaperCycleSummary(
@@ -174,6 +193,7 @@ async def run_bounded_paper_cycle(
         signals_rejected=signals_rejected,
         trades_persisted=max(_count_rows(runtime_db_path, "trades") - initial_trade_count, 0),
         open_positions=_count_rows(runtime_db_path, "positions", "status != ?", ("CLOSED",)),
+        rejection_reasons=dict(sorted(rejection_reasons.items())),
         termination_reason=termination_reason,
         elapsed_seconds=round(monotonic() - start_at, 3),
     )
