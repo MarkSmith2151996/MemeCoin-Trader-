@@ -23,6 +23,12 @@ exits:
   stop_loss_pct: 0.50
   time_stop_minutes: 120
   trail_stop_pct: 0.30
+  dynamic_exits_enabled: false
+  dynamic_volume_decay_ratio: 0.20
+  dynamic_volume_decay_minutes: 15
+  dynamic_liquidity_drop_ratio: 0.50
+  dynamic_liquidity_drop_window_seconds: 60
+  dynamic_trail_start_multiple: null
 
 execution:
   mode: paper
