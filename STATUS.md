@@ -21,7 +21,7 @@ Default execution mode: paper trading
 - `src/risk/` contains token risk checks and aggregate scoring, including signal-aware token enrichment for bounded paper-cycle runs.
 - `src/execution/` defines the execution adapter contract plus paper and live adapter implementations.
 - `src/signals/` defines async signal-source contracts; `aggregator.py` safely starts/stops/polls sources, clusters same-mint signals by time window, boosts multi-source composites, and best-effort logs ranked opportunities, while `whale_tracker.py`, `pump_fun.py`, `onchain.py`, and `twitter.py` provide Helius, PumpPortal, DexScreener, and Twitter/X-backed signal feeds.
-- `src/strategy/` contains decision, portfolio, position, fixed-exit helpers, and standalone dynamic-exit calibration helpers that are not yet wired into runtime behavior.
+- `src/strategy/` contains decision, portfolio, position, exit, and standalone position-sizing helpers.
 - `src/monitoring/` contains lightweight health, alert, and dashboard helpers for runtime visibility.
 - `src/cli.py` exposes operator commands including health/config inspection and a bounded `paper-cycle` runtime that polls signal sources, routes signals through the decision engine, persists paper trades/positions, and prints a safe summary before terminating, with strict and discovery paper-only risk profiles.
 
@@ -40,7 +40,7 @@ Default execution mode: paper trading
 - `src/signals/twitter.py`: Twitter/X monitor that uses recent search when `TWITTER_BEARER_TOKEN` is present, safely degrades without configured credentials, extracts `$TICKER` and Solana mint mentions, deduplicates posts by ID, and emits deterministic velocity/account/follower-weighted `Signal` objects only when a mint address is present.
 - `src/signals/whale_tracker.py`: Helius enhanced-transactions poller that reads `HELIUS_API_KEY` from environment or local `.env`, includes token-account activity, deduplicates signatures, and emits whale-buy `Signal` objects.
 - `src/strategy/decision_engine.py`: async risk-gated buy evaluation plus open-position exit scanning and sell execution, with structured rejection reasons for paper-cycle diagnostics.
-- `src/strategy/dynamic_exits.py`: helper-only dynamic exit calibration module with deterministic checks for volume-decay exits, trail-start eligibility, liquidity-drop emergencies, and aggregate reason-label summaries, intentionally not yet wired into active exit management.
+- `src/strategy/position_sizing.py`: deterministic liquidity-tier helpers that convert pool liquidity into a conservative max-position cap plus an explicit skip/reason decision for later integration.
 - `src/strategy/position_manager.py`: async open-position persistence, exposure tracking, partial exits, and close handling.
 - `src/strategy/exits.py`: take-profit ladder, stop-loss, time-stop, liquidity, and emergency exit evaluation.
 - `src/monitoring/health.py`: process-level health probe plus the dashboard-compatible `HealthMonitor` shim.
@@ -48,18 +48,18 @@ Default execution mode: paper trading
 - `tests/`: smoke tests for risk contracts, signal aggregation, paper execution, whale tracker polling behavior, and pump.fun normalization/deduplication.
 - `tests/test_aggregator.py`: focused coverage for signal-source fan-out, same-mint clustering inside/outside the dedupe window, composite ranking, safe single-source passthrough, source-failure isolation, and optional SQLite signal logging.
 - `tests/test_cli_paper_cycle.py`: bounded paper-cycle coverage for accepted/rejected fake signals, stable rejection-reason counts, paper-only enforcement, max-signal/timeout termination, SQLite persistence, and safe CLI summary output.
-- `tests/test_dynamic_exits.py`: focused helper coverage for volume-decay threshold timing, trail-start multiple calibration, liquidity-drop emergency thresholds, aggregate reason labels, and import-only safety with no runtime exit behavior changes.
 - `tests/test_e2e_paper.py`: offline signal-to-trade smoke covering decision-engine approval, paper execution, trade persistence, position persistence, and dashboard visibility on a temporary SQLite DB.
 - `tests/test_onchain_provider.py`: focused provider coverage for `OnChainMonitor` interface conformance, deterministic DexScreener scoring helpers, graceful provider degradation, mint-level dedupe, and explicit confirmation that no wallet/trading code is involved.
 - `tests/test_pump_fun_provider.py`: focused provider-shape coverage for live-style pump.fun create payloads, graduation detection from migration fields, and safe handling of websocket ack/malformed messages.
 - `tests/test_twitter_provider.py`: focused provider coverage for Twitter/X payload normalization, no-key degradation, ticker/mint extraction helpers, mention-velocity scoring, and post-ID deduplication without live network calls.
 - `tests/test_whale_tracker_provider.py`: focused provider tests for dotenv-based Helius key loading, token-account polling params, Helius-style buy normalization, dedupe, and safe empty/malformed handling.
 - `tests/test_strategy.py`: focused coverage for decision-engine risk gating and exit-rule behavior.
+- `tests/test_position_sizing.py`: focused coverage for conservative unknown-liquidity handling, roadmap default tiers, invalid-liquidity skips, and custom tier overrides without invoking runtime trading components.
 - `tests/test_monitoring.py`: focused coverage for dashboard DB-path resolution, health compatibility, and one-shot dashboard rendering.
 
 ## Last 10 Changes
 
-- 2026-07-07 Added `src/strategy/dynamic_exits.py` as a helper-only calibration module for future exit tuning, with deterministic checks for 20%-of-peak volume decay over 15 minutes, configurable trail-start multiples defaulting to `3.0`, 50% liquidity-drop emergencies inside 60 seconds, and aggregate reason-label summaries; `python3 -m compileall src/strategy/dynamic_exits.py`, focused helper pytest, and the full pytest suite all passed.
+- 2026-07-07 Added a standalone `position_sizing` helper module that maps pool liquidity tiers to deterministic max-position caps, skips unknown or invalid liquidity conservatively, and keeps decision-engine behavior unchanged until a later integration task; `python3 -m compileall src/strategy/position_sizing.py`, focused pytest, and the full pytest suite all passed.
 - 2026-07-07 Replaced the Twitter/X placeholder with a `TwitterMonitor` that uses recent search when a bearer token exists, recognizes `$TICKER` and Solana mint mentions, scores mention velocity plus account diversity and follower weight, and safely returns no signals when credentials are absent or only a Grok key is configured; `python3 -m compileall src/signals/twitter.py`, focused provider pytest, and the full pytest suite all passed.
 - 2026-07-07 Built `OnChainMonitor` as a read-only DexScreener signal source that discovers candidate Solana mints from token profiles, fetches `latest/dex/tokens/{mint}` pair snapshots, scores volume spikes, buy/sell momentum, liquidity changes, and recent-pool activity with deterministic helpers, and deduplicates emitted mints within a five-minute poll window; `python3 -m compileall src/signals/onchain.py`, focused provider pytest, and the full pytest suite all passed.
 - 2026-07-07 Built `SignalAggregator` as an independent signal fan-out layer that safely starts/stops/polls async sources, clusters same-mint signals inside a configurable dedupe window, boosts multi-source composites, ranks opportunities by composite score, and best-effort logs to a compatible `signals` table or recorder; `python3 -m compileall src/signals/aggregator.py`, targeted aggregator pytest, and the full pytest suite all passed.
@@ -69,7 +69,6 @@ Default execution mode: paper trading
 - 2026-07-07 Added signal-aware pump.fun/on-chain token enrichment for bounded paper-cycle risk scoring so raw signal payloads now populate `TokenInfo` fields like `liquidity_sol`, `created_at`, and authority flags before risk evaluation; targeted and full pytest are green, and the latest real paper-mode smoke still approved 0 buys but advanced rejection diagnostics from `liquidity_check_unknown=5` to `age_check_failed=5`.
 - 2026-07-07 Added aggregate paper-cycle rejection diagnostics so bounded runs now report stable labels like `liquidity_check_unknown`, `honeypot_check_failed`, and `position_size_zero`; targeted and full pytest are green, and the latest real paper-mode smoke collected 5 signals, approved 0 buys, and reported `liquidity_check_unknown=5` with no persisted trades/positions.
 - 2026-07-07 Fixed `DecisionEngine` callable risk-scorer fallback so the bounded `paper-cycle` runtime can retry plain callables like `assess_token` with `TokenInfo` after a failed `Signal` probe; reran targeted tests plus the full pytest suite, then verified a real paper-mode smoke collected 5 signals, approved 0 buys, and persisted 0 trades/positions without dashboard warnings.
-- 2026-07-07 Added a bounded `python3 -m src.cli paper-cycle --max-signals N --timeout-seconds T` runtime that polls existing signal sources safely, forces paper execution, persists trades/positions to SQLite, prints only a concise summary, and terminates on `max_signals` or timeout; added focused CLI/runtime tests and reran the full pytest suite successfully.
 
 ## Known Issues
 
