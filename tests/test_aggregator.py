@@ -272,6 +272,144 @@ def test_aggregator_reports_source_and_composite_diagnostics() -> None:
     asyncio.run(run())
 
 
+def test_composite_signal_preserves_and_summarizes_social_credibility_metadata() -> None:
+    async def run() -> None:
+        twitter_signal = Signal(
+            source=SignalSourceEnum.TWITTER,
+            type=SignalType.BUY,
+            mint_address="mint-social",
+            confidence=0.7,
+            weight=1.1,
+            observed_at=BASE_TIME,
+            payload={
+                "credibility_tier": "A",
+                "credibility_by_author": {
+                    "author-1": {
+                        "tier": "A",
+                        "score": 0.81,
+                        "spam_flags": [],
+                        "duplicate_posts": 0,
+                    },
+                    "author-2": {
+                        "tier": "C",
+                        "score": 0.33,
+                        "spam_flags": ["bot_flag"],
+                        "duplicate_posts": 2,
+                    },
+                },
+            },
+        )
+        onchain_signal = build_signal(
+            mint="mint-social",
+            source=SignalSourceEnum.ONCHAIN,
+            confidence=0.5,
+            observed_at=BASE_TIME + timedelta(seconds=5),
+        )
+        aggregator = SignalAggregator(
+            [FakeSource("twitter", [twitter_signal]), FakeSource("onchain", [onchain_signal])]
+        )
+
+        ranked = await aggregator.poll_all()
+        diagnostics = aggregator.diagnostics()
+
+        assert len(ranked) == 1
+        assert ranked[0].payload["credibility_tier"] == "A"
+        assert ranked[0].payload["social_credibility"] == {
+            "highest_tier": "A",
+            "unique_accounts": 2,
+            "tier_distribution": {"A": 1, "C": 1},
+            "spam_flagged_accounts": 1,
+            "duplicate_suppression_posts": 2,
+        }
+        assert diagnostics["social_credibility"] == ranked[0].payload["social_credibility"]
+
+    asyncio.run(run())
+
+
+def test_aggregator_social_diagnostics_degrade_safely_when_metadata_missing() -> None:
+    async def run() -> None:
+        twitter_signal = Signal(
+            source=SignalSourceEnum.TWITTER,
+            type=SignalType.MENTION,
+            mint_address="mint-social",
+            confidence=0.4,
+            observed_at=BASE_TIME,
+            payload={"credibility_tier": "unknown"},
+        )
+        aggregator = SignalAggregator([FakeSource("twitter", [twitter_signal])])
+
+        ranked = await aggregator.poll_all()
+        diagnostics = aggregator.diagnostics()
+
+        assert len(ranked) == 1
+        assert "social_credibility" not in ranked[0].payload
+        assert diagnostics["social_credibility"] == {
+            "highest_tier": "unknown",
+            "unique_accounts": 0,
+            "tier_distribution": {"unknown": 1},
+            "spam_flagged_accounts": 0,
+            "duplicate_suppression_posts": 0,
+        }
+
+    asyncio.run(run())
+
+
+def test_spammy_social_signals_do_not_inflate_aggregate_diagnostics() -> None:
+    async def run() -> None:
+        spam_signal_one = Signal(
+            source=SignalSourceEnum.TWITTER,
+            type=SignalType.BUY,
+            mint_address="mint-social",
+            confidence=0.5,
+            observed_at=BASE_TIME,
+            payload={
+                "credibility_tier": "C",
+                "credibility_by_author": {
+                    "spam-author": {
+                        "tier": "C",
+                        "score": 0.2,
+                        "spam_flags": ["bot_flag"],
+                        "duplicate_posts": 3,
+                    }
+                },
+            },
+        )
+        spam_signal_two = Signal(
+            source=SignalSourceEnum.TWITTER,
+            type=SignalType.BUY,
+            mint_address="mint-social",
+            confidence=0.45,
+            observed_at=BASE_TIME + timedelta(seconds=5),
+            payload={
+                "credibility_tier": "C",
+                "credibility_by_author": {
+                    "spam-author": {
+                        "tier": "C",
+                        "score": 0.2,
+                        "spam_flags": ["bot_flag"],
+                        "duplicate_posts": 3,
+                    }
+                },
+            },
+        )
+        aggregator = SignalAggregator(
+            [FakeSource("twitter", [spam_signal_one, spam_signal_two])]
+        )
+
+        await aggregator.poll_all()
+        diagnostics = aggregator.diagnostics()
+
+        assert diagnostics["social_credibility"] == {
+            "highest_tier": "C",
+            "unique_accounts": 1,
+            "tier_distribution": {"C": 1},
+            "spam_flagged_accounts": 1,
+            "duplicate_suppression_posts": 3,
+        }
+
+    asyncio.run(run())
+
+
 def test_database_logging_is_called_when_sqlite_contract_supports_signals(tmp_path: Path) -> None:
     async def run() -> None:
         db_path = tmp_path / "signals.db"

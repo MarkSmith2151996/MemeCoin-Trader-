@@ -32,6 +32,7 @@ class SignalAggregator:
         self._last_source_failures: dict[str, int] = {}
         self._last_raw_signal_count = 0
         self._last_composite_count = 0
+        self._last_social_credibility: dict[str, object] | None = None
 
     async def start(self) -> None:
         await self._run_source_method("start")
@@ -49,6 +50,7 @@ class SignalAggregator:
             self._last_source_failures = {}
             self._last_raw_signal_count = 0
             self._last_composite_count = 0
+            self._last_social_credibility = None
             return []
 
         raw_signals: list[Signal] = []
@@ -74,13 +76,14 @@ class SignalAggregator:
             for signal in opportunities
             if isinstance(signal.payload.get("source_count"), int) and signal.payload["source_count"] > 1
         )
+        self._last_social_credibility = self._aggregate_social_credibility(raw_signals)
         return list(opportunities)
 
     async def get_top_opportunities(self, n: int = 10) -> list[Signal]:
         return list(self._latest_opportunities[: max(n, 0)])
 
     def diagnostics(self) -> dict[str, object]:
-        return {
+        diagnostics: dict[str, object] = {
             "sources_polled": [source.name for source in self.sources],
             "source_signal_counts": dict(sorted(self._last_source_signal_counts.items())),
             "source_failures": dict(sorted(self._last_source_failures.items())),
@@ -88,6 +91,9 @@ class SignalAggregator:
             "composite_opportunities": self._last_composite_count,
             "ranked_opportunities": len(self._latest_opportunities),
         }
+        if self._last_social_credibility is not None:
+            diagnostics["social_credibility"] = self._last_social_credibility
+        return diagnostics
 
     async def _run_source_method(self, method_name: str) -> None:
         if not self.sources:
@@ -145,6 +151,17 @@ class SignalAggregator:
         composite_score = min(self._signal_score(base_signal) * multiplier, 1.0)
         latest_signal = max(cluster, key=lambda signal: signal.observed_at)
         payload = dict(latest_signal.payload)
+        latest_social_signal = max(
+            (signal for signal in cluster if signal.source.value == "TWITTER"),
+            key=lambda signal: signal.observed_at,
+            default=None,
+        )
+        if latest_social_signal is not None:
+            social_payload = latest_social_signal.payload if isinstance(latest_social_signal.payload, dict) else {}
+            for key in ("credibility_tier", "credibility_avg_score", "credibility_by_author"):
+                if key in social_payload and key not in payload:
+                    payload[key] = social_payload[key]
+        social_credibility = self._aggregate_social_credibility(cluster)
         payload.update(
             {
                 "raw_data": [signal.model_dump(mode="json") for signal in cluster],
@@ -153,6 +170,8 @@ class SignalAggregator:
                 "sources": [source.value for source in sorted(distinct_sources)],
             }
         )
+        if social_credibility is not None:
+            payload["social_credibility"] = social_credibility
 
         return latest_signal.model_copy(
             update={
@@ -175,6 +194,58 @@ class SignalAggregator:
 
     def _signal_score(self, signal: Signal) -> float:
         return min(signal.confidence * signal.weight, 1.0)
+
+    def _aggregate_social_credibility(self, signals: Iterable[Signal]) -> dict[str, object] | None:
+        author_tiers: dict[str, str] = {}
+        tier_counts: dict[str, int] = defaultdict(int)
+        highest_tier: str | None = None
+        spam_flagged_accounts = 0
+        duplicate_suppression_posts = 0
+
+        for signal in signals:
+            if signal.source.value != "TWITTER":
+                continue
+            payload = signal.payload if isinstance(signal.payload, dict) else {}
+            credibility_by_author = payload.get("credibility_by_author")
+            if not isinstance(credibility_by_author, dict):
+                tier = payload.get("credibility_tier")
+                if isinstance(tier, str) and tier:
+                    tier_counts[tier] += 1
+                    highest_tier = self._higher_social_tier(highest_tier, tier)
+                continue
+
+            for author_id, details in credibility_by_author.items():
+                if author_id in author_tiers or not isinstance(details, dict):
+                    continue
+                tier = details.get("tier") if isinstance(details.get("tier"), str) else "unknown"
+                author_tiers[author_id] = tier
+                tier_counts[tier] += 1
+                highest_tier = self._higher_social_tier(highest_tier, tier)
+
+                spam_flags = details.get("spam_flags")
+                if isinstance(spam_flags, list) and spam_flags:
+                    spam_flagged_accounts += 1
+
+                duplicate_posts = details.get("duplicate_posts")
+                if isinstance(duplicate_posts, int):
+                    duplicate_suppression_posts += max(duplicate_posts, 0)
+
+        if not tier_counts:
+            return None
+
+        return {
+            "highest_tier": highest_tier or "unknown",
+            "unique_accounts": len(author_tiers),
+            "tier_distribution": dict(sorted(tier_counts.items())),
+            "spam_flagged_accounts": spam_flagged_accounts,
+            "duplicate_suppression_posts": duplicate_suppression_posts,
+        }
+
+    def _higher_social_tier(self, current: str | None, candidate: str) -> str:
+        tier_rank = {"unknown": 0, "C": 1, "B": 2, "A": 3, "S": 4}
+        if current is None:
+            return candidate
+        return candidate if tier_rank.get(candidate, -1) > tier_rank.get(current, -1) else current
 
     async def _log_signals(self, signals: list[Signal]) -> None:
         for signal in signals:
