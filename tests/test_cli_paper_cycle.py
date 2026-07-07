@@ -5,8 +5,10 @@ from pathlib import Path
 from typer.testing import CliRunner
 
 import src.cli as cli_module
+from src.core.config import RiskConfig
 from src.core.models import CheckResult, RiskAssessment, Signal, SignalSource as SignalSourceEnum, SignalType, TokenInfo
 from src.monitoring.dashboard import load_open_positions, load_recent_trades
+from src.risk.scorer import DiscoveryRiskScorer, HolderLookupResult
 from src.signals.base import SignalSource
 
 
@@ -40,6 +42,17 @@ class FakeSignalSource(SignalSource):
 class ExplodingRiskScorer:
     async def assess_signal(self, signal: Signal) -> RiskAssessment:
         raise RuntimeError("boom")
+
+
+class FakeHolderLookup:
+    def __init__(self, result: HolderLookupResult | None = None, error: Exception | None = None) -> None:
+        self._result = result
+        self._error = error
+
+    async def fetch(self, mint_address: str) -> HolderLookupResult | None:
+        if self._error is not None:
+            raise self._error
+        return self._result
 
 
 def build_assessment(mint_address: str, *, passes: bool, failed_field: str = "honeypot_check") -> RiskAssessment:
@@ -392,6 +405,103 @@ def test_paper_cycle_discovery_mode_keeps_holder_unknown_when_payload_lacks_hold
             db_path=db_path,
             risk_profile="discovery",
             sources=[source],
+            poll_interval_s=0.0,
+        )
+
+        assert summary.execution_mode == "paper"
+        assert summary.risk_profile == "discovery"
+        assert summary.signals_collected == 1
+        assert summary.signals_accepted == 0
+        assert summary.signals_rejected == 1
+        assert summary.rejection_reasons == {"top10_holder_check_unknown": 1}
+
+    asyncio.run(run())
+
+
+def test_paper_cycle_discovery_mode_uses_holder_lookup_to_move_past_unknown(tmp_path: Path) -> None:
+    async def run() -> None:
+        db_path = tmp_path / "discovery-holder-lookup.db"
+        source = FakeSignalSource(
+            [
+                [
+                    Signal(
+                        source=SignalSourceEnum.PUMP_FUN,
+                        type=SignalType.NEW_POOL,
+                        mint_address="discovery-holder-lookup-mint",
+                        confidence=0.85,
+                        payload={
+                            "symbol": "PUMP",
+                            "vSolInBondingCurve": 30.1,
+                            "uniqueBuyers": 25,
+                            "creatorHoldingPct": 5.0,
+                            "mintAuthorityRevoked": True,
+                            "freezeAuthorityRevoked": True,
+                            "createdAt": (datetime.now(UTC) - timedelta(minutes=10)).isoformat(),
+                        },
+                    )
+                ]
+            ]
+        )
+        scorer = DiscoveryRiskScorer(
+            RiskConfig(min_age_minutes=0),
+            holder_lookup=FakeHolderLookup(HolderLookupResult(top10_holder_pct=30.0)),
+        )
+
+        summary = await cli_module.run_bounded_paper_cycle(
+            max_signals=1,
+            timeout_seconds=0.1,
+            db_path=db_path,
+            risk_profile="discovery",
+            sources=[source],
+            risk_scorer=scorer,
+            poll_interval_s=0.0,
+        )
+
+        assert summary.execution_mode == "paper"
+        assert summary.risk_profile == "discovery"
+        assert summary.signals_collected == 1
+        assert summary.signals_accepted == 0
+        assert summary.signals_rejected == 1
+        assert summary.rejection_reasons == {"honeypot_check_unknown": 1}
+
+    asyncio.run(run())
+
+
+def test_paper_cycle_discovery_mode_holder_lookup_failure_falls_back_to_unknown(tmp_path: Path) -> None:
+    async def run() -> None:
+        db_path = tmp_path / "discovery-holder-failure.db"
+        source = FakeSignalSource(
+            [
+                [
+                    Signal(
+                        source=SignalSourceEnum.PUMP_FUN,
+                        type=SignalType.NEW_POOL,
+                        mint_address="discovery-holder-failure-mint",
+                        confidence=0.85,
+                        payload={
+                            "symbol": "PUMP",
+                            "vSolInBondingCurve": 30.1,
+                            "uniqueBuyers": 25,
+                            "mintAuthorityRevoked": True,
+                            "freezeAuthorityRevoked": True,
+                            "createdAt": (datetime.now(UTC) - timedelta(minutes=10)).isoformat(),
+                        },
+                    )
+                ]
+            ]
+        )
+        scorer = DiscoveryRiskScorer(
+            RiskConfig(min_age_minutes=0),
+            holder_lookup=FakeHolderLookup(error=RuntimeError("rpc unavailable")),
+        )
+
+        summary = await cli_module.run_bounded_paper_cycle(
+            max_signals=1,
+            timeout_seconds=0.1,
+            db_path=db_path,
+            risk_profile="discovery",
+            sources=[source],
+            risk_scorer=scorer,
             poll_interval_s=0.0,
         )
 

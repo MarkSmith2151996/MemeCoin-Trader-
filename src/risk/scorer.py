@@ -2,9 +2,16 @@
 
 from __future__ import annotations
 
+import os
 from collections.abc import Mapping
+from dataclasses import dataclass
 from datetime import UTC, datetime
+from pathlib import Path
+from typing import Callable
 
+from dotenv import dotenv_values
+
+from src.chain.rpc import SolanaRpcClient
 from src.core.config import RiskConfig
 from src.core.models import CheckResult, RiskAssessment, Signal, SignalSource, SignalType, TokenInfo
 from src.risk.contract_audit import check_freeze_authority, check_honeypot, check_mint_authority
@@ -22,6 +29,95 @@ CHECK_WEIGHTS = {
     "freeze_authority_check": 10.0,
     "honeypot_check": 10.0,
 }
+
+
+@dataclass(slots=True)
+class HolderLookupResult:
+    top10_holder_pct: float | None = None
+    creator_holding_pct: float | None = None
+    holder_count: int | None = None
+
+
+class ReadOnlyHolderLookup:
+    def __init__(
+        self,
+        rpc_url: str | None = None,
+        timeout_s: float = 10.0,
+        rpc_client_factory: Callable[[str, float], SolanaRpcClient] | None = None,
+        dotenv_path: str | Path | None = None,
+    ) -> None:
+        self._rpc_url = rpc_url or resolve_read_only_rpc_url(dotenv_path=dotenv_path)
+        self._timeout_s = timeout_s
+        self._rpc_client_factory = rpc_client_factory or SolanaRpcClient
+
+    async def fetch(self, mint_address: str) -> HolderLookupResult | None:
+        if not self._rpc_url:
+            return None
+
+        client = self._rpc_client_factory(self._rpc_url, self._timeout_s)
+        try:
+            supply_result = await client.call("getTokenSupply", [mint_address])
+            largest_accounts_result = await client.call("getTokenLargestAccounts", [mint_address])
+        finally:
+            await client.close()
+
+        supply = _extract_token_balance((supply_result or {}).get("value") if isinstance(supply_result, Mapping) else supply_result)
+        if supply is None or supply <= 0:
+            return None
+
+        largest_accounts = (largest_accounts_result or {}).get("value") if isinstance(largest_accounts_result, Mapping) else largest_accounts_result
+        if not isinstance(largest_accounts, list):
+            return None
+
+        top10_total = 0.0
+        for account in largest_accounts[:10]:
+            if not isinstance(account, Mapping):
+                continue
+            balance = _extract_token_balance(account)
+            if balance is not None:
+                top10_total += balance
+
+        if top10_total <= 0:
+            return None
+
+        return HolderLookupResult(top10_holder_pct=round((top10_total / supply) * 100, 6))
+
+
+class DiscoveryRiskScorer:
+    def __init__(self, config: RiskConfig, holder_lookup: ReadOnlyHolderLookup | None = None) -> None:
+        self._config = config
+        self._holder_lookup = holder_lookup or ReadOnlyHolderLookup()
+        self._cache: dict[str, HolderLookupResult | None] = {}
+
+    async def assess_signal(self, signal: Signal) -> RiskAssessment:
+        token = build_token_from_signal(signal)
+        token = await self._enrich_token(token)
+        return assess_token(token, self._config)
+
+    async def _enrich_token(self, token: TokenInfo) -> TokenInfo:
+        if token.top10_holder_pct is not None:
+            return token
+
+        if token.mint_address not in self._cache:
+            try:
+                self._cache[token.mint_address] = await self._holder_lookup.fetch(token.mint_address)
+            except Exception:
+                self._cache[token.mint_address] = None
+
+        lookup_result = self._cache[token.mint_address]
+        if lookup_result is None:
+            return token
+
+        updates: dict[str, float | int] = {}
+        if token.top10_holder_pct is None and lookup_result.top10_holder_pct is not None:
+            updates["top10_holder_pct"] = lookup_result.top10_holder_pct
+        if token.creator_holding_pct is None and lookup_result.creator_holding_pct is not None:
+            updates["creator_holding_pct"] = lookup_result.creator_holding_pct
+        if token.holder_count is None and lookup_result.holder_count is not None:
+            updates["holder_count"] = lookup_result.holder_count
+        if not updates:
+            return token
+        return token.model_copy(update=updates)
 
 
 def assess_token(token: TokenInfo, config: RiskConfig | None = None) -> RiskAssessment:
@@ -52,6 +148,31 @@ def assess_token(token: TokenInfo, config: RiskConfig | None = None) -> RiskAsse
 
 def assess_signal(signal: Signal, config: RiskConfig | None = None) -> RiskAssessment:
     return assess_token(build_token_from_signal(signal), config)
+
+
+def resolve_read_only_rpc_url(dotenv_path: str | Path | None = None) -> str:
+    direct_rpc_url = os.getenv("HELIUS_RPC_URL", "").strip()
+    if direct_rpc_url:
+        return direct_rpc_url
+
+    direct_api_key = os.getenv("HELIUS_API_KEY", "").strip()
+    if direct_api_key:
+        return f"https://mainnet.helius-rpc.com/?api-key={direct_api_key}"
+
+    resolved_dotenv_path = Path(dotenv_path) if dotenv_path is not None else Path(__file__).resolve().parents[2] / ".env"
+    if not resolved_dotenv_path.exists():
+        return ""
+
+    dotenv_data = dotenv_values(resolved_dotenv_path)
+    rpc_url = dotenv_data.get("HELIUS_RPC_URL")
+    if isinstance(rpc_url, str) and rpc_url.strip():
+        return rpc_url.strip()
+
+    api_key = dotenv_data.get("HELIUS_API_KEY")
+    if isinstance(api_key, str) and api_key.strip():
+        return f"https://mainnet.helius-rpc.com/?api-key={api_key.strip()}"
+
+    return ""
 
 
 def build_token_from_signal(signal: Signal) -> TokenInfo:
@@ -195,4 +316,30 @@ def _coerce_datetime(value: object) -> datetime | None:
         except ValueError:
             return None
         return parsed if parsed.tzinfo is not None else parsed.replace(tzinfo=UTC)
+    return None
+
+
+def _extract_token_balance(value: object) -> float | None:
+    if not isinstance(value, Mapping):
+        return None
+
+    ui_amount = value.get("uiAmount")
+    if isinstance(ui_amount, (int, float)):
+        return float(ui_amount)
+
+    ui_amount_string = value.get("uiAmountString")
+    if isinstance(ui_amount_string, str) and ui_amount_string.strip():
+        try:
+            return float(ui_amount_string)
+        except ValueError:
+            return None
+
+    raw_amount = value.get("amount")
+    decimals = value.get("decimals")
+    try:
+        if raw_amount is not None and decimals is not None:
+            return float(raw_amount) / (10 ** int(decimals))
+    except (TypeError, ValueError, ZeroDivisionError):
+        return None
+
     return None

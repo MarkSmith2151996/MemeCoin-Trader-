@@ -20,7 +20,7 @@ from src.execution.base import ExecutionAdapter
 from src.execution.paper import PaperExecutionAdapter
 from src.monitoring.dashboard import resolve_db_path
 from src.monitoring.health import check_health
-from src.risk.scorer import assess_signal
+from src.risk.scorer import DiscoveryRiskScorer, assess_signal
 from src.signals.base import SignalSource
 from src.signals.pump_fun import build_monitor_from_env
 from src.signals.whale_tracker import WhaleWalletTracker
@@ -94,6 +94,13 @@ def normalize_risk_profile(risk_profile: str) -> str:
     return normalized
 
 
+def build_paper_cycle_risk_scorer(risk_profile: str, settings: Settings) -> Any:
+    normalized = normalize_risk_profile(risk_profile)
+    if normalized == "discovery":
+        return DiscoveryRiskScorer(settings.risk)
+    return assess_signal
+
+
 def _count_rows(db_path: Path, table: str, where_clause: str | None = None, params: tuple[object, ...] = ()) -> int:
     query = f"SELECT COUNT(*) FROM {table}"
     if where_clause:
@@ -155,7 +162,7 @@ async def run_bounded_paper_cycle(
 
     engine = DecisionEngine(
         execution_adapter,
-        risk_scorer or assess_signal,
+        risk_scorer or build_paper_cycle_risk_scorer(normalized_risk_profile, runtime_settings),
         PositionManager(runtime_db_path, runtime_settings),
         runtime_settings,
         db=runtime_db_path,

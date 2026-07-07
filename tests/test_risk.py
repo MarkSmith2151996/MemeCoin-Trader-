@@ -1,7 +1,39 @@
+import asyncio
 from datetime import UTC, datetime, timedelta
 
+from src.core.config import RiskConfig
 from src.core.models import CheckResult, RiskAssessment, Signal, SignalSource, SignalType, TokenInfo
-from src.risk.scorer import assess_signal, assess_token, build_token_from_signal
+from src.risk.scorer import (
+    DiscoveryRiskScorer,
+    HolderLookupResult,
+    ReadOnlyHolderLookup,
+    assess_signal,
+    assess_token,
+    build_token_from_signal,
+)
+
+
+class FakeRpcClient:
+    def __init__(self, responses: dict[str, object]) -> None:
+        self._responses = responses
+        self.closed = False
+
+    async def call(self, method: str, params: list[object] | None = None) -> object:
+        return self._responses[method]
+
+    async def close(self) -> None:
+        self.closed = True
+
+
+class FakeHolderLookup:
+    def __init__(self, result: HolderLookupResult | None = None, error: Exception | None = None) -> None:
+        self._result = result
+        self._error = error
+
+    async def fetch(self, mint_address: str) -> HolderLookupResult | None:
+        if self._error is not None:
+            raise self._error
+        return self._result
 
 
 def test_risk_assessment_all_checks_pass() -> None:
@@ -87,6 +119,31 @@ def test_build_token_from_signal_maps_holder_alias_variants() -> None:
     assert token.holder_count == 1234
 
 
+def test_read_only_holder_lookup_computes_top10_holder_pct_from_rpc() -> None:
+    rpc_client = FakeRpcClient(
+        {
+            "getTokenSupply": {"value": {"uiAmount": 100.0}},
+            "getTokenLargestAccounts": {
+                "value": [
+                    {"uiAmount": 30.0},
+                    {"uiAmount": 20.0},
+                    {"uiAmount": 10.0},
+                ]
+            },
+        }
+    )
+    lookup = ReadOnlyHolderLookup(
+        rpc_url="https://example.invalid",
+        rpc_client_factory=lambda _url, _timeout: rpc_client,
+    )
+
+    result = asyncio.run(lookup.fetch("mint"))
+
+    assert result is not None
+    assert result.top10_holder_pct == 60.0
+    assert rpc_client.closed is True
+
+
 def test_assess_signal_uses_enriched_pump_fun_liquidity() -> None:
     signal = Signal(
         source=SignalSource.PUMP_FUN,
@@ -128,3 +185,28 @@ def test_assess_signal_keeps_holder_check_unknown_when_holder_fields_missing() -
 
     assert assessment.top10_holder_check == CheckResult.UNKNOWN
     assert assessment.creator_holding_check == CheckResult.UNKNOWN
+
+
+def test_discovery_risk_scorer_populates_top10_holder_pct_from_lookup() -> None:
+    signal = Signal(
+        source=SignalSource.PUMP_FUN,
+        type=SignalType.NEW_POOL,
+        mint_address="lookup-mint",
+        payload={
+            "vSolInBondingCurve": 30.1,
+            "uniqueBuyers": 25,
+            "creatorHoldingPct": 5.0,
+            "mintAuthorityRevoked": True,
+            "freezeAuthorityRevoked": True,
+            "createdAt": (datetime.now(UTC) - timedelta(minutes=10)).isoformat(),
+        },
+    )
+    scorer = DiscoveryRiskScorer(
+        config=RiskConfig(min_age_minutes=0),
+        holder_lookup=FakeHolderLookup(HolderLookupResult(top10_holder_pct=30.0)),
+    )
+
+    assessment = asyncio.run(scorer.assess_signal(signal))
+
+    assert assessment.top10_holder_check == CheckResult.PASS
+    assert assessment.creator_holding_check == CheckResult.PASS

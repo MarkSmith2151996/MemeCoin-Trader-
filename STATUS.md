@@ -32,7 +32,7 @@ Default execution mode: paper trading
 - `config/settings.yaml`: risk, position, exit, execution, and monitoring defaults.
 - `config/wallets_to_track.yaml`: public sample wallet watchlist used for safe whale-tracker dry runs until real tracked wallets are configured locally.
 - `scripts/check_token.py`: smoke-check script for building a token model and running risk scoring.
-- `src/risk/scorer.py`: aggregate risk scoring plus signal-aware `TokenInfo` enrichment from raw pump.fun/on-chain payload fields for paper-cycle diagnostics, discovery-mode age relaxation, and holder-alias mapping when concentration fields exist.
+- `src/risk/scorer.py`: aggregate risk scoring plus signal-aware `TokenInfo` enrichment from raw pump.fun/on-chain payload fields for paper-cycle diagnostics, discovery-mode age relaxation, holder-alias mapping, and read-only holder lookups for discovery-mode concentration checks.
 - `src/cli.py`: Typer entrypoint for health/config commands plus the bounded `paper-cycle` runner over existing signal, decision, and paper execution paths, including strict/discovery paper-only risk profiles and aggregate rejection diagnostics for skipped signals.
 - `src/signals/pump_fun.py`: websocket-first pump.fun monitor with verified PumpPortal `subscribeNewToken` and `subscribeMigration` subscriptions plus v3 HTTP fallback over `/coins` and `/coins/currently-live`.
 - `src/signals/whale_tracker.py`: Helius enhanced-transactions poller that reads `HELIUS_API_KEY` from environment or local `.env`, includes token-account activity, deduplicates signatures, and emits whale-buy `Signal` objects.
@@ -51,6 +51,7 @@ Default execution mode: paper trading
 
 ## Last 10 Changes
 
+- 2026-07-07 Added a read-only holder lookup path for discovery-mode paper-cycle scoring that uses Solana/Helius RPC token supply plus largest-account reads to compute `top10_holder_pct` when payload fields are absent; targeted and full pytest are green, and the latest real discovery smoke still reported `top10_holder_check_unknown=5` even though a follow-up boolean-only diagnostic confirmed the lookup path is available and can succeed for at least one sampled live mint.
 - 2026-07-07 Extended holder-concentration alias mapping for discovery-mode paper-cycle scoring so payload fields like `top10HolderPercent`, `creatorPercent`, and `totalHolders` populate `TokenInfo` when present; targeted and full pytest are green, but the latest real discovery smoke still reported `top10_holder_check_unknown=5` because current live pump.fun payloads did not include holder concentration fields.
 - 2026-07-07 Added a paper-only `discovery` risk profile for `paper-cycle` that relaxes only the age gate while keeping strict mode as the default; targeted and full pytest are green, and the latest real strict run reported `age_check_failed=5` while the matching discovery run advanced to `top10_holder_check_unknown=5` with 0 accepted buys in both modes.
 - 2026-07-07 Added signal-aware pump.fun/on-chain token enrichment for bounded paper-cycle risk scoring so raw signal payloads now populate `TokenInfo` fields like `liquidity_sol`, `created_at`, and authority flags before risk evaluation; targeted and full pytest are green, and the latest real paper-mode smoke still approved 0 buys but advanced rejection diagnostics from `liquidity_check_unknown=5` to `age_check_failed=5`.
@@ -60,7 +61,6 @@ Default execution mode: paper trading
 - 2026-07-06 Ad hoc Helius retry: Fixed `WhaleWalletTracker` so an explicit empty `api_key` no longer falls back to local `.env`, reran the focused whale-tracker test and full pytest suite successfully, and verified a bounded one-wallet Helius paper-mode dry run authenticates and returns data safely.
 - 2026-07-06 CT-094: Committed the pending pump.fun provider verification changes, pushed `master` to the new GitHub `origin`, and kept the local `opencode.json` out of git because it contains an API key; Berj access was added via `/home/dev/bin/berj-picker`.
 - 2026-07-06 CT-093: Added dotenv-backed Helius key loading, switched whale polling to include token-account balance changes, replaced placeholder wallets with public sample addresses, and added focused provider tests; live Helius verification failed locally because `.env` and `HELIUS_API_KEY` were still missing at execution time.
-- 2026-07-06 CT-091: Verified PumpPortal websocket token-creation and migration subscriptions live, corrected the rejected `subscribeNewPairs` assumption, switched HTTP fallback to working frontend v3 coin-list endpoints, and added focused provider-shape tests.
 
 ## Known Issues
 
