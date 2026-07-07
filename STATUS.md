@@ -23,6 +23,7 @@ Default execution mode: paper trading
 - `src/signals/` defines async signal-source contracts; `whale_tracker.py` polls Helius enhanced address transactions and `pump_fun.py` now buffers websocket events, falls back to HTTP polling, and normalizes pump.fun payloads into `Signal` objects.
 - `src/strategy/` contains decision, portfolio, position, and exit helpers.
 - `src/monitoring/` contains lightweight health, alert, and dashboard helpers for runtime visibility.
+- `src/cli.py` exposes operator commands including health/config inspection and a bounded `paper-cycle` runtime that polls signal sources, routes signals through the decision engine, persists paper trades/positions, and prints a safe summary before terminating.
 
 ## File Map
 
@@ -31,6 +32,7 @@ Default execution mode: paper trading
 - `config/settings.yaml`: risk, position, exit, execution, and monitoring defaults.
 - `config/wallets_to_track.yaml`: public sample wallet watchlist used for safe whale-tracker dry runs until real tracked wallets are configured locally.
 - `scripts/check_token.py`: smoke-check script for building a token model and running risk scoring.
+- `src/cli.py`: Typer entrypoint for health/config commands plus the bounded `paper-cycle` runner over existing signal, decision, and paper execution paths.
 - `src/signals/pump_fun.py`: websocket-first pump.fun monitor with verified PumpPortal `subscribeNewToken` and `subscribeMigration` subscriptions plus v3 HTTP fallback over `/coins` and `/coins/currently-live`.
 - `src/signals/whale_tracker.py`: Helius enhanced-transactions poller that reads `HELIUS_API_KEY` from environment or local `.env`, includes token-account activity, deduplicates signatures, and emits whale-buy `Signal` objects.
 - `src/strategy/decision_engine.py`: async risk-gated buy evaluation plus open-position exit scanning and sell execution.
@@ -39,6 +41,7 @@ Default execution mode: paper trading
 - `src/monitoring/health.py`: process-level health probe plus the dashboard-compatible `HealthMonitor` shim.
 - `src/monitoring/dashboard.py`: Rich terminal dashboard that reads the canonical runtime DB path, recent trades/positions, and monitoring health.
 - `tests/`: smoke tests for risk contracts, signal aggregation, paper execution, whale tracker polling behavior, and pump.fun normalization/deduplication.
+- `tests/test_cli_paper_cycle.py`: bounded paper-cycle coverage for accepted/rejected fake signals, paper-only enforcement, max-signal/timeout termination, SQLite persistence, and safe CLI summary output.
 - `tests/test_e2e_paper.py`: offline signal-to-trade smoke covering decision-engine approval, paper execution, trade persistence, position persistence, and dashboard visibility on a temporary SQLite DB.
 - `tests/test_pump_fun_provider.py`: focused provider-shape coverage for live-style pump.fun create payloads, graduation detection from migration fields, and safe handling of websocket ack/malformed messages.
 - `tests/test_whale_tracker_provider.py`: focused provider tests for dotenv-based Helius key loading, token-account polling params, Helius-style buy normalization, dedupe, and safe empty/malformed handling.
@@ -47,6 +50,7 @@ Default execution mode: paper trading
 
 ## Last 10 Changes
 
+- 2026-07-07 Added a bounded `python3 -m src.cli paper-cycle --max-signals N --timeout-seconds T` runtime that polls existing signal sources safely, forces paper execution, persists trades/positions to SQLite, prints only a concise summary, and terminates on `max_signals` or timeout; added focused CLI/runtime tests and reran the full pytest suite successfully.
 - 2026-07-06 Ad hoc Helius retry: Fixed `WhaleWalletTracker` so an explicit empty `api_key` no longer falls back to local `.env`, reran the focused whale-tracker test and full pytest suite successfully, and verified a bounded one-wallet Helius paper-mode dry run authenticates and returns data safely.
 - 2026-07-06 CT-094: Committed the pending pump.fun provider verification changes, pushed `master` to the new GitHub `origin`, and kept the local `opencode.json` out of git because it contains an API key; Berj access was added via `/home/dev/bin/berj-picker`.
 - 2026-07-06 CT-093: Added dotenv-backed Helius key loading, switched whale polling to include token-account balance changes, replaced placeholder wallets with public sample addresses, and added focused provider tests; live Helius verification failed locally because `.env` and `HELIUS_API_KEY` were still missing at execution time.
