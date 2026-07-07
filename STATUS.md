@@ -50,6 +50,7 @@ Default execution mode: paper trading
 
 ## Last 10 Changes
 
+- 2026-07-07 Fixed `DecisionEngine` callable risk-scorer fallback so the bounded `paper-cycle` runtime can retry plain callables like `assess_token` with `TokenInfo` after a failed `Signal` probe; reran targeted tests plus the full pytest suite, then verified a real paper-mode smoke collected 5 signals, approved 0 buys, and persisted 0 trades/positions without dashboard warnings.
 - 2026-07-07 Added a bounded `python3 -m src.cli paper-cycle --max-signals N --timeout-seconds T` runtime that polls existing signal sources safely, forces paper execution, persists trades/positions to SQLite, prints only a concise summary, and terminates on `max_signals` or timeout; added focused CLI/runtime tests and reran the full pytest suite successfully.
 - 2026-07-06 Ad hoc Helius retry: Fixed `WhaleWalletTracker` so an explicit empty `api_key` no longer falls back to local `.env`, reran the focused whale-tracker test and full pytest suite successfully, and verified a bounded one-wallet Helius paper-mode dry run authenticates and returns data safely.
 - 2026-07-06 CT-094: Committed the pending pump.fun provider verification changes, pushed `master` to the new GitHub `origin`, and kept the local `opencode.json` out of git because it contains an API key; Berj access was added via `/home/dev/bin/berj-picker`.
@@ -59,8 +60,6 @@ Default execution mode: paper trading
 - 2026-07-06 CT-088: Added a dashboard-compatible `HealthMonitor`, aligned the dashboard's canonical DB path to `data/trades.db`, and tightened monitoring smoke coverage.
 - 2026-07-06 CT-082: Implemented the decision engine, position manager, exit ladder, and focused strategy tests.
 - 2026-07-06 CT-080: Implemented the pump.fun monitor with websocket buffering, HTTP fallback polling, payload normalization, and focused signal tests.
-- 2026-07-06 CT-081: Implemented a Helius polling-based whale wallet tracker, added tracked-wallet config placeholders, and covered signal emission/dedup behavior with focused tests.
-- 2026-07-02 CT-079: Created Phase 1 scaffold and project metadata for Memecoin Trader.
 
 ## Known Issues
 
