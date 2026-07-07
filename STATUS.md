@@ -47,6 +47,7 @@ Default execution mode: paper trading
 
 ## Last 10 Changes
 
+- 2026-07-06 Ad hoc Helius retry: Fixed `WhaleWalletTracker` so an explicit empty `api_key` no longer falls back to local `.env`, reran the focused whale-tracker test and full pytest suite successfully, and verified a bounded one-wallet Helius paper-mode dry run authenticates and returns data safely.
 - 2026-07-06 CT-094: Committed the pending pump.fun provider verification changes, pushed `master` to the new GitHub `origin`, and kept the local `opencode.json` out of git because it contains an API key; Berj access was added via `/home/dev/bin/berj-picker`.
 - 2026-07-06 CT-093: Added dotenv-backed Helius key loading, switched whale polling to include token-account balance changes, replaced placeholder wallets with public sample addresses, and added focused provider tests; live Helius verification failed locally because `.env` and `HELIUS_API_KEY` were still missing at execution time.
 - 2026-07-06 CT-091: Verified PumpPortal websocket token-creation and migration subscriptions live, corrected the rejected `subscribeNewPairs` assumption, switched HTTP fallback to working frontend v3 coin-list endpoints, and added focused provider-shape tests.
@@ -61,6 +62,5 @@ Default execution mode: paper trading
 
 - Live Jupiter execution is intentionally not implemented yet.
 - Whale tracker is polling-only for now; webhook ingestion still needs a public callback endpoint and receiver.
-- CT-093 added `.env` loading and public sample wallets for whale-tracker verification, but the live Helius dry run could not authenticate locally because `/home/dev/projects/memecoin-trader/.env` was absent and `HELIUS_API_KEY` was not present in the process environment at execution time.
 - pump.fun websocket token-creation and migration subscriptions are now verified against PumpPortal, but the short dry-run did not capture a live migration payload; graduation normalization is still proven by offline fixtures rather than observed runtime traffic.
 - Risk checks use conservative local token fields until on-chain enrichment is implemented.

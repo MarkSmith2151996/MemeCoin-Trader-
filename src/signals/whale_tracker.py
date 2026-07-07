@@ -45,7 +45,7 @@ class WhaleWalletTracker(SignalSource):
         repo_root = Path(__file__).resolve().parents[2]
         self._wallets_config_path = Path(wallets_config_path or repo_root / "config/wallets_to_track.yaml")
         self._dotenv_path = Path(dotenv_path or repo_root / ".env")
-        self._api_key = api_key or self._load_api_key()
+        self._api_key = self._load_api_key() if api_key is None else api_key
         self._poll_limit = max(poll_limit, 1)
         self._timeout_s = timeout_s
         self._client: httpx.AsyncClient | None = None
