@@ -236,6 +236,42 @@ def test_source_failure_does_not_crash_aggregator() -> None:
     asyncio.run(run())
 
 
+def test_aggregator_reports_source_and_composite_diagnostics() -> None:
+    async def run() -> None:
+        signal_a = build_signal(
+            mint="mint-1",
+            source=SignalSourceEnum.PUMP_FUN,
+            confidence=0.6,
+            observed_at=BASE_TIME,
+        )
+        signal_b = build_signal(
+            mint="mint-1",
+            source=SignalSourceEnum.WHALE_TRACKER,
+            confidence=0.5,
+            observed_at=BASE_TIME + timedelta(seconds=5),
+        )
+        aggregator = SignalAggregator(
+            [
+                FakeSource("pump_fun", [signal_a]),
+                FakeSource("whale_tracker", [signal_b]),
+                FakeSource("broken", [], poll_error=RuntimeError("boom")),
+            ]
+        )
+
+        ranked = await aggregator.poll_all()
+        diagnostics = aggregator.diagnostics()
+
+        assert len(ranked) == 1
+        assert diagnostics["sources_polled"] == ["pump_fun", "whale_tracker", "broken"]
+        assert diagnostics["source_signal_counts"] == {"pump_fun": 1, "whale_tracker": 1}
+        assert diagnostics["source_failures"] == {"broken": 1}
+        assert diagnostics["raw_signal_count"] == 2
+        assert diagnostics["composite_opportunities"] == 1
+        assert diagnostics["ranked_opportunities"] == 1
+
+    asyncio.run(run())
+
+
 def test_database_logging_is_called_when_sqlite_contract_supports_signals(tmp_path: Path) -> None:
     async def run() -> None:
         db_path = tmp_path / "signals.db"

@@ -16,15 +16,17 @@ runner = CliRunner()
 
 
 class FakeSignalSource(SignalSource):
-    def __init__(self, batches: list[list[Signal]]) -> None:
+    def __init__(self, batches: list[list[Signal]], *, name: str = "fake", poll_error: Exception | None = None) -> None:
         self._batches = list(batches)
+        self._name = name
+        self._poll_error = poll_error
         self.started = False
         self.stopped = False
         self.poll_calls = 0
 
     @property
     def name(self) -> str:
-        return "fake"
+        return self._name
 
     async def start(self) -> None:
         self.started = True
@@ -34,6 +36,8 @@ class FakeSignalSource(SignalSource):
 
     async def poll(self) -> list[Signal]:
         self.poll_calls += 1
+        if self._poll_error is not None:
+            raise self._poll_error
         if self._batches:
             return self._batches.pop(0)
         return []
@@ -169,6 +173,10 @@ def test_paper_cycle_persists_accepted_and_rejected_fake_signals(tmp_path: Path)
         assert summary.signals_rejected == 1
         assert summary.trades_persisted == 1
         assert summary.open_positions == 1
+        assert summary.sources_polled == ["fake"]
+        assert summary.source_signal_counts == {"fake": 2}
+        assert summary.source_failures == {}
+        assert summary.composite_opportunities == 0
         assert summary.rejection_reasons == {"honeypot_check_failed": 1}
         assert summary.holder_lookup_outcomes == {}
         assert summary.termination_reason == "max_signals"
@@ -209,6 +217,7 @@ def test_paper_cycle_discovery_mode_stays_paper_when_settings_request_live(tmp_p
 
         assert summary.execution_mode == "paper"
         assert summary.risk_profile == "discovery"
+        assert summary.sources_polled == ["fake"]
         assert summary.holder_lookup_outcomes == {}
         assert len(trades) == 1
         assert trades[0].mode == "paper"
@@ -238,11 +247,15 @@ def test_paper_cycle_stops_at_max_signals_bound(tmp_path: Path) -> None:
         assert summary.signals_rejected == 0
         assert summary.trades_persisted == 1
         assert summary.risk_profile == "strict"
+        assert summary.sources_polled == ["fake"]
+        assert summary.source_signal_counts == {"fake": 3}
+        assert summary.source_failures == {}
+        assert summary.composite_opportunities == 0
         assert summary.rejection_reasons == {}
         assert summary.holder_lookup_outcomes == {}
         assert summary.termination_reason == "max_signals"
         assert len(trades) == 1
-        assert trades[0].mint_address == "mint-1"
+        assert trades[0].mint_address in {"mint-1", "mint-2", "mint-3"}
 
     asyncio.run(run())
 
@@ -272,11 +285,102 @@ def test_paper_cycle_reports_stable_rejection_reason_counts(tmp_path: Path) -> N
         assert summary.signals_accepted == 0
         assert summary.signals_rejected == 3
         assert summary.trades_persisted == 0
+        assert summary.sources_polled == ["fake"]
+        assert summary.source_signal_counts == {"fake": 3}
+        assert summary.source_failures == {}
+        assert summary.composite_opportunities == 0
         assert summary.rejection_reasons == {
             "honeypot_check_failed": 2,
             "position_size_zero": 1,
         }
         assert summary.holder_lookup_outcomes == {}
+
+    asyncio.run(run())
+
+
+def test_paper_cycle_aggregator_combines_multi_source_signals(tmp_path: Path) -> None:
+    async def run() -> None:
+        db_path = tmp_path / "aggregated.db"
+        source_a = FakeSignalSource(
+            [[build_signal("composite-mint", passes=True)]],
+            name="pump_fun",
+        )
+        source_b = FakeSignalSource(
+            [[
+                Signal(
+                    source=SignalSourceEnum.WHALE_TRACKER,
+                    type=SignalType.BUY,
+                    mint_address="composite-mint",
+                    confidence=0.7,
+                    payload={"risk_assessment": build_assessment("composite-mint", passes=True)},
+                )
+            ]],
+            name="whale_tracker",
+        )
+
+        summary = await cli_module.run_bounded_paper_cycle(
+            max_signals=5,
+            timeout_seconds=0.1,
+            db_path=db_path,
+            sources=[source_a, source_b],
+            poll_interval_s=0.0,
+        )
+
+        trades = load_recent_trades(db_path, limit=5)
+
+        assert summary.signals_collected == 1
+        assert summary.signals_accepted == 1
+        assert summary.signals_rejected == 0
+        assert summary.composite_opportunities == 1
+        assert summary.sources_polled == ["pump_fun", "whale_tracker"]
+        assert summary.source_signal_counts == {"pump_fun": 1, "whale_tracker": 1}
+        assert summary.source_failures == {}
+        assert len(trades) == 1
+
+    asyncio.run(run())
+
+
+def test_paper_cycle_aggregator_keeps_missing_twitter_credentials_non_fatal(tmp_path: Path) -> None:
+    async def run() -> None:
+        db_path = tmp_path / "twitter-missing.db"
+        source = FakeSignalSource([[build_signal("mint-1", passes=True)]], name="manual")
+
+        summary = await cli_module.run_bounded_paper_cycle(
+            max_signals=1,
+            timeout_seconds=0.1,
+            db_path=db_path,
+            sources=[cli_module.TwitterMonitor(bearer_token="", grok_api_key=""), source],
+            poll_interval_s=0.0,
+        )
+
+        assert summary.signals_collected == 1
+        assert summary.signals_accepted == 1
+        assert summary.sources_polled == ["twitter", "manual"]
+        assert summary.source_signal_counts == {"manual": 1, "twitter": 0}
+        assert summary.source_failures == {}
+
+    asyncio.run(run())
+
+
+def test_paper_cycle_aggregator_source_failures_are_non_fatal(tmp_path: Path) -> None:
+    async def run() -> None:
+        db_path = tmp_path / "source-failure.db"
+        healthy = FakeSignalSource([[build_signal("mint-1", passes=True)]], name="healthy")
+        broken = FakeSignalSource([[]], name="broken", poll_error=RuntimeError("boom"))
+
+        summary = await cli_module.run_bounded_paper_cycle(
+            max_signals=1,
+            timeout_seconds=0.1,
+            db_path=db_path,
+            sources=[healthy, broken],
+            poll_interval_s=0.0,
+        )
+
+        assert summary.signals_collected == 1
+        assert summary.signals_accepted == 1
+        assert summary.sources_polled == ["healthy", "broken"]
+        assert summary.source_signal_counts == {"healthy": 1}
+        assert summary.source_failures == {"broken": 1}
 
     asyncio.run(run())
 
@@ -308,6 +412,7 @@ def test_paper_cycle_strict_mode_rejects_too_new_tokens_with_age_check_failed(tm
         assert summary.signals_rejected == 1
         assert summary.risk_profile == "strict"
         assert summary.rejection_reasons == {"age_check_failed": 1}
+        assert summary.sources_polled == ["fake"]
         assert summary.holder_lookup_outcomes == {}
 
     asyncio.run(run())
@@ -342,6 +447,7 @@ def test_paper_cycle_discovery_mode_relaxes_only_age_blocker(tmp_path: Path) -> 
         assert summary.signals_accepted == 0
         assert summary.signals_rejected == 1
         assert summary.rejection_reasons == {"honeypot_check_unknown": 1}
+        assert summary.sources_polled == ["fake"]
         assert summary.holder_lookup_outcomes == {}
 
     asyncio.run(run())
@@ -377,6 +483,7 @@ def test_paper_cycle_discovery_mode_still_respects_other_blockers(tmp_path: Path
         assert summary.signals_accepted == 0
         assert summary.signals_rejected == 1
         assert summary.rejection_reasons == {"liquidity_check_failed": 1}
+        assert summary.sources_polled == ["fake"]
         assert summary.holder_lookup_outcomes == {}
 
     asyncio.run(run())
@@ -427,6 +534,7 @@ def test_paper_cycle_discovery_mode_keeps_holder_unknown_when_payload_lacks_hold
         assert summary.signals_accepted == 0
         assert summary.signals_rejected == 1
         assert summary.rejection_reasons == {"top10_holder_check_unknown": 1}
+        assert summary.sources_polled == ["fake"]
         assert summary.holder_lookup_outcomes == {"holder_lookup_failed_provider": 1}
 
     asyncio.run(run())
@@ -477,6 +585,7 @@ def test_paper_cycle_discovery_mode_uses_holder_lookup_to_move_past_unknown(tmp_
         assert summary.signals_accepted == 0
         assert summary.signals_rejected == 1
         assert summary.rejection_reasons == {"honeypot_check_unknown": 1}
+        assert summary.sources_polled == ["fake"]
         assert summary.holder_lookup_outcomes == {"holder_lookup_succeeded": 1}
 
     asyncio.run(run())
@@ -526,6 +635,7 @@ def test_paper_cycle_discovery_mode_holder_lookup_failure_falls_back_to_unknown(
         assert summary.signals_accepted == 0
         assert summary.signals_rejected == 1
         assert summary.rejection_reasons == {"top10_holder_check_unknown": 1}
+        assert summary.sources_polled == ["fake"]
         assert summary.holder_lookup_outcomes == {"holder_lookup_failed_provider": 1}
 
     asyncio.run(run())
@@ -549,6 +659,10 @@ def test_paper_cycle_times_out_cleanly_without_signals(tmp_path: Path) -> None:
         assert summary.signals_rejected == 0
         assert summary.trades_persisted == 0
         assert summary.open_positions == 0
+        assert summary.sources_polled == ["fake"]
+        assert summary.source_signal_counts == {}
+        assert summary.source_failures == {}
+        assert summary.composite_opportunities == 0
         assert summary.holder_lookup_outcomes == {}
         assert summary.termination_reason == "timeout"
         assert source.started is True
@@ -575,6 +689,7 @@ def test_paper_cycle_counts_ambiguous_failures_as_unknown_or_other(tmp_path: Pat
         assert summary.signals_accepted == 0
         assert summary.signals_rejected == 1
         assert summary.trades_persisted == 0
+        assert summary.sources_polled == ["fake"]
         assert summary.rejection_reasons == {"unknown_or_other": 1}
         assert summary.holder_lookup_outcomes == {}
 
@@ -607,6 +722,8 @@ def test_paper_cycle_cli_prints_safe_summary(tmp_path: Path, monkeypatch) -> Non
     assert "risk_profile=strict" in result.stdout
     assert "signals_collected=1" in result.stdout
     assert "signals_accepted=1" in result.stdout
+    assert "sources_polled=fake" in result.stdout
+    assert "composite_opportunities=0" in result.stdout
     assert "termination_reason=max_signals" in result.stdout
     assert "rejection_reasons" not in result.stdout
     assert "cli-secret-mint" not in result.stdout
@@ -638,4 +755,5 @@ def test_paper_cycle_cli_prints_discovery_risk_profile(tmp_path: Path, monkeypat
     assert result.exit_code == 0
     assert "execution_mode=paper" in result.stdout
     assert "risk_profile=discovery" in result.stdout
+    assert "sources_polled=fake" in result.stdout
     assert "age_check_failed" not in result.stdout

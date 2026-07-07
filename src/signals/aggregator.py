@@ -28,6 +28,10 @@ class SignalAggregator:
         self.db = db
         self.dedup_window = timedelta(seconds=max(dedup_window_seconds, 0))
         self._latest_opportunities: list[Signal] = []
+        self._last_source_signal_counts: dict[str, int] = {}
+        self._last_source_failures: dict[str, int] = {}
+        self._last_raw_signal_count = 0
+        self._last_composite_count = 0
 
     async def start(self) -> None:
         await self._run_source_method("start")
@@ -41,25 +45,49 @@ class SignalAggregator:
     async def poll_all(self) -> list[Signal]:
         if not self.sources:
             self._latest_opportunities = []
+            self._last_source_signal_counts = {}
+            self._last_source_failures = {}
+            self._last_raw_signal_count = 0
+            self._last_composite_count = 0
             return []
 
         raw_signals: list[Signal] = []
+        self._last_source_signal_counts = {}
+        self._last_source_failures = {}
         results = await asyncio.gather(
             *(source.poll() for source in self.sources),
             return_exceptions=True,
         )
-        for result in results:
+        for source, result in zip(self.sources, results):
             if isinstance(result, Exception):
+                self._last_source_failures[source.name] = self._last_source_failures.get(source.name, 0) + 1
                 continue
+            self._last_source_signal_counts[source.name] = len(result)
             raw_signals.extend(result)
 
         opportunities = self._rank_signals(raw_signals)
         await self._log_signals(opportunities)
         self._latest_opportunities = opportunities
+        self._last_raw_signal_count = len(raw_signals)
+        self._last_composite_count = sum(
+            1
+            for signal in opportunities
+            if isinstance(signal.payload.get("source_count"), int) and signal.payload["source_count"] > 1
+        )
         return list(opportunities)
 
     async def get_top_opportunities(self, n: int = 10) -> list[Signal]:
         return list(self._latest_opportunities[: max(n, 0)])
+
+    def diagnostics(self) -> dict[str, object]:
+        return {
+            "sources_polled": [source.name for source in self.sources],
+            "source_signal_counts": dict(sorted(self._last_source_signal_counts.items())),
+            "source_failures": dict(sorted(self._last_source_failures.items())),
+            "raw_signal_count": self._last_raw_signal_count,
+            "composite_opportunities": self._last_composite_count,
+            "ranked_opportunities": len(self._latest_opportunities),
+        }
 
     async def _run_source_method(self, method_name: str) -> None:
         if not self.sources:

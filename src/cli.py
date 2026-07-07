@@ -21,8 +21,11 @@ from src.execution.paper import PaperExecutionAdapter
 from src.monitoring.dashboard import resolve_db_path
 from src.monitoring.health import check_health
 from src.risk.scorer import DiscoveryRiskScorer, assess_signal
+from src.signals.aggregator import SignalAggregator
 from src.signals.base import SignalSource
+from src.signals.onchain import OnChainMonitor
 from src.signals.pump_fun import build_monitor_from_env
+from src.signals.twitter import TwitterMonitor
 from src.signals.whale_tracker import WhaleWalletTracker
 from src.strategy.decision_engine import DecisionEngine
 from src.strategy.position_manager import PositionManager
@@ -44,6 +47,10 @@ class PaperCycleSummary:
     signals_rejected: int
     trades_persisted: int
     open_positions: int
+    sources_polled: list[str]
+    source_signal_counts: dict[str, int]
+    source_failures: dict[str, int]
+    composite_opportunities: int
     rejection_reasons: dict[str, int]
     holder_lookup_outcomes: dict[str, int]
     termination_reason: str
@@ -60,9 +67,17 @@ class PaperCycleSummary:
             f"signals_rejected={self.signals_rejected}",
             f"trades_persisted={self.trades_persisted}",
             f"open_positions={self.open_positions}",
+            f"sources_polled={','.join(self.sources_polled)}",
+            f"composite_opportunities={self.composite_opportunities}",
             f"termination_reason={self.termination_reason}",
             f"elapsed_seconds={self.elapsed_seconds:.3f}",
         ]
+        if self.source_signal_counts:
+            lines.append("source_signal_counts:")
+            lines.extend(f"  {source}={count}" for source, count in self.source_signal_counts.items())
+        if self.source_failures:
+            lines.append("source_failures:")
+            lines.extend(f"  {source}={count}" for source, count in self.source_failures.items())
         if self.rejection_reasons:
             lines.append("rejection_reasons:")
             lines.extend(f"  {reason}={count}" for reason, count in self.rejection_reasons.items())
@@ -73,7 +88,16 @@ class PaperCycleSummary:
 
 
 def build_signal_sources() -> list[SignalSource]:
-    return [build_monitor_from_env(), WhaleWalletTracker()]
+    return [
+        build_monitor_from_env(),
+        WhaleWalletTracker(),
+        OnChainMonitor(),
+        TwitterMonitor(),
+    ]
+
+
+def build_signal_aggregator(sources: list[SignalSource], db_path: Path) -> SignalAggregator:
+    return SignalAggregator(sources, db=db_path)
 
 
 def force_paper_settings(settings: Settings) -> Settings:
@@ -114,6 +138,13 @@ def extract_runtime_diagnostics(risk_scorer: Any) -> dict[str, int]:
     return {}
 
 
+def extract_aggregator_diagnostics(aggregator: SignalAggregator) -> dict[str, object]:
+    diagnostics = aggregator.diagnostics()
+    if not isinstance(diagnostics, dict):
+        return {}
+    return diagnostics
+
+
 def _count_rows(db_path: Path, table: str, where_clause: str | None = None, params: tuple[object, ...] = ()) -> int:
     query = f"SELECT COUNT(*) FROM {table}"
     if where_clause:
@@ -121,35 +152,6 @@ def _count_rows(db_path: Path, table: str, where_clause: str | None = None, para
     with sqlite3.connect(db_path) as connection:
         row = connection.execute(query, params).fetchone()
     return int(row[0]) if row is not None else 0
-
-
-async def _start_signal_sources(sources: list[SignalSource], rejection_reasons: Counter[str]) -> None:
-    for source in sources:
-        try:
-            await source.start()
-        except Exception as exc:  # pragma: no cover - defensive against provider/network errors
-            rejection_reasons["provider_warning"] += 1
-            logger.warning("Failed to start signal source %s: %s", source.name, exc)
-
-
-async def _stop_signal_sources(sources: list[SignalSource], rejection_reasons: Counter[str]) -> None:
-    for source in sources:
-        try:
-            await source.stop()
-        except Exception as exc:  # pragma: no cover - defensive against provider/network errors
-            rejection_reasons["provider_warning"] += 1
-            logger.warning("Failed to stop signal source %s: %s", source.name, exc)
-
-
-async def _poll_signal_sources(sources: list[SignalSource], rejection_reasons: Counter[str]) -> list[Any]:
-    signals: list[Any] = []
-    for source in sources:
-        try:
-            signals.extend(await source.poll())
-        except Exception as exc:  # pragma: no cover - defensive against provider/network errors
-            rejection_reasons["provider_warning"] += 1
-            logger.warning("Failed to poll signal source %s: %s", source.name, exc)
-    return signals
 
 
 async def run_bounded_paper_cycle(
@@ -168,6 +170,7 @@ async def run_bounded_paper_cycle(
     runtime_settings = apply_risk_profile(force_paper_settings(settings or load_settings()), normalized_risk_profile)
     runtime_db_path = resolve_db_path(db_path)
     signal_sources = list(sources) if sources is not None else build_signal_sources()
+    aggregator = build_signal_aggregator(signal_sources, runtime_db_path)
     execution_adapter = execution or PaperExecutionAdapter()
 
     await init_db(runtime_db_path)
@@ -185,18 +188,34 @@ async def run_bounded_paper_cycle(
     signals_collected = 0
     signals_accepted = 0
     signals_rejected = 0
+    source_signal_counts: Counter[str] = Counter()
+    source_failures: Counter[str] = Counter()
+    composite_opportunities = 0
     rejection_reasons: Counter[str] = Counter()
     termination_reason = "timeout"
 
-    await _start_signal_sources(signal_sources, rejection_reasons)
+    await aggregator.start()
     try:
         while signals_collected < max_signals:
             if monotonic() - start_at >= timeout_seconds:
                 break
 
             remaining_capacity = max_signals - signals_collected
-            batch = await _poll_signal_sources(signal_sources, rejection_reasons)
-            for signal in batch[:remaining_capacity]:
+            batch = await aggregator.poll_all()
+            aggregator_diagnostics = extract_aggregator_diagnostics(aggregator)
+            for source_name, count in aggregator_diagnostics.get("source_signal_counts", {}).items():
+                source_signal_counts[str(source_name)] += int(count)
+            for source_name, count in aggregator_diagnostics.get("source_failures", {}).items():
+                source_failures[str(source_name)] += int(count)
+
+            evaluated_batch = batch[:remaining_capacity]
+            composite_opportunities += sum(
+                1
+                for signal in evaluated_batch
+                if isinstance(signal.payload.get("source_count"), int) and signal.payload["source_count"] > 1
+            )
+
+            for signal in evaluated_batch:
                 signals_collected += 1
                 try:
                     decision = await engine.evaluate_signal_with_diagnostics(signal)
@@ -222,7 +241,7 @@ async def run_bounded_paper_cycle(
                 break
             await asyncio.sleep(min(max(poll_interval_s, 0.0), remaining_time))
     finally:
-        await _stop_signal_sources(signal_sources, rejection_reasons)
+        await aggregator.stop()
         await execution_adapter.close()
 
     holder_lookup_outcomes = extract_runtime_diagnostics(engine.risk_scorer)
@@ -237,6 +256,10 @@ async def run_bounded_paper_cycle(
         signals_rejected=signals_rejected,
         trades_persisted=max(_count_rows(runtime_db_path, "trades") - initial_trade_count, 0),
         open_positions=_count_rows(runtime_db_path, "positions", "status != ?", ("CLOSED",)),
+        sources_polled=[source.name for source in signal_sources],
+        source_signal_counts=dict(sorted(source_signal_counts.items())),
+        source_failures=dict(sorted(source_failures.items())),
+        composite_opportunities=composite_opportunities,
         rejection_reasons=dict(sorted(rejection_reasons.items())),
         holder_lookup_outcomes=holder_lookup_outcomes,
         termination_reason=termination_reason,
