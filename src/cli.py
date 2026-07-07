@@ -20,7 +20,7 @@ from src.execution.base import ExecutionAdapter
 from src.execution.paper import PaperExecutionAdapter
 from src.monitoring.dashboard import resolve_db_path
 from src.monitoring.health import check_health
-from src.risk.scorer import assess_token
+from src.risk.scorer import assess_signal
 from src.signals.base import SignalSource
 from src.signals.pump_fun import build_monitor_from_env
 from src.signals.whale_tracker import WhaleWalletTracker
@@ -134,7 +134,7 @@ async def run_bounded_paper_cycle(
 
     engine = DecisionEngine(
         execution_adapter,
-        risk_scorer or assess_token,
+        risk_scorer or assess_signal,
         PositionManager(runtime_db_path, runtime_settings),
         runtime_settings,
         db=runtime_db_path,

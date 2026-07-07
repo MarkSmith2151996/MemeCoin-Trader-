@@ -232,6 +232,48 @@ def test_paper_cycle_reports_stable_rejection_reason_counts(tmp_path: Path) -> N
     asyncio.run(run())
 
 
+def test_paper_cycle_default_scorer_enriches_pump_fun_liquidity(tmp_path: Path) -> None:
+    async def run() -> None:
+        db_path = tmp_path / "pump-fun-enrichment.db"
+        source = FakeSignalSource(
+            [
+                [
+                    Signal(
+                        source=SignalSourceEnum.PUMP_FUN,
+                        type=SignalType.NEW_POOL,
+                        mint_address="pump-enriched-mint",
+                        confidence=0.85,
+                        payload={
+                            "symbol": "PUMP",
+                            "vSolInBondingCurve": 30.1,
+                            "uniqueBuyers": 25,
+                            "top10HolderPct": 30.0,
+                            "creatorHoldingPct": 5.0,
+                            "mintAuthorityRevoked": True,
+                            "freezeAuthorityRevoked": True,
+                            "createdAt": "2026-07-06T00:00:00+00:00",
+                        },
+                    )
+                ]
+            ]
+        )
+
+        summary = await cli_module.run_bounded_paper_cycle(
+            max_signals=1,
+            timeout_seconds=0.1,
+            db_path=db_path,
+            sources=[source],
+            poll_interval_s=0.0,
+        )
+
+        assert summary.signals_collected == 1
+        assert summary.signals_accepted == 0
+        assert summary.signals_rejected == 1
+        assert summary.rejection_reasons == {"honeypot_check_unknown": 1}
+
+    asyncio.run(run())
+
+
 def test_paper_cycle_times_out_cleanly_without_signals(tmp_path: Path) -> None:
     async def run() -> None:
         db_path = tmp_path / "timeout.db"
