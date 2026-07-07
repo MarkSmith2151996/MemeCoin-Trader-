@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+from collections import Counter
 from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -33,6 +34,7 @@ CHECK_WEIGHTS = {
 
 @dataclass(slots=True)
 class HolderLookupResult:
+    status: str = "holder_lookup_succeeded"
     top10_holder_pct: float | None = None
     creator_holding_pct: float | None = None
     holder_count: int | None = None
@@ -51,8 +53,10 @@ class ReadOnlyHolderLookup:
         self._rpc_client_factory = rpc_client_factory or SolanaRpcClient
 
     async def fetch(self, mint_address: str) -> HolderLookupResult | None:
+        if not mint_address.strip():
+            return HolderLookupResult(status="holder_lookup_skipped_missing_mint")
         if not self._rpc_url:
-            return None
+            return HolderLookupResult(status="holder_lookup_failed_provider")
 
         client = self._rpc_client_factory(self._rpc_url, self._timeout_s)
         try:
@@ -63,11 +67,11 @@ class ReadOnlyHolderLookup:
 
         supply = _extract_token_balance((supply_result or {}).get("value") if isinstance(supply_result, Mapping) else supply_result)
         if supply is None or supply <= 0:
-            return None
+            return HolderLookupResult(status="holder_lookup_no_supply")
 
         largest_accounts = (largest_accounts_result or {}).get("value") if isinstance(largest_accounts_result, Mapping) else largest_accounts_result
-        if not isinstance(largest_accounts, list):
-            return None
+        if not isinstance(largest_accounts, list) or not largest_accounts:
+            return HolderLookupResult(status="holder_lookup_no_largest_accounts")
 
         top10_total = 0.0
         for account in largest_accounts[:10]:
@@ -78,9 +82,12 @@ class ReadOnlyHolderLookup:
                 top10_total += balance
 
         if top10_total <= 0:
-            return None
+            return HolderLookupResult(status="holder_lookup_no_largest_accounts")
 
-        return HolderLookupResult(top10_holder_pct=round((top10_total / supply) * 100, 6))
+        return HolderLookupResult(
+            status="holder_lookup_succeeded",
+            top10_holder_pct=round((top10_total / supply) * 100, 6),
+        )
 
 
 class DiscoveryRiskScorer:
@@ -88,25 +95,34 @@ class DiscoveryRiskScorer:
         self._config = config
         self._holder_lookup = holder_lookup or ReadOnlyHolderLookup()
         self._cache: dict[str, HolderLookupResult | None] = {}
+        self._lookup_outcomes: Counter[str] = Counter()
 
     async def assess_signal(self, signal: Signal) -> RiskAssessment:
         token = build_token_from_signal(signal)
-        token = await self._enrich_token(token)
-        return assess_token(token, self._config)
+        token, lookup_status = await self._enrich_token(token)
+        assessment = assess_token(token, self._config)
+        self._record_lookup_outcome(lookup_status, assessment)
+        return assessment
 
-    async def _enrich_token(self, token: TokenInfo) -> TokenInfo:
+    def diagnostics(self) -> dict[str, int]:
+        return dict(sorted(self._lookup_outcomes.items()))
+
+    async def _enrich_token(self, token: TokenInfo) -> tuple[TokenInfo, str | None]:
         if token.top10_holder_pct is not None:
-            return token
+            return token, None
 
         if token.mint_address not in self._cache:
             try:
                 self._cache[token.mint_address] = await self._holder_lookup.fetch(token.mint_address)
             except Exception:
-                self._cache[token.mint_address] = None
+                self._cache[token.mint_address] = HolderLookupResult(status="holder_lookup_failed_provider")
 
         lookup_result = self._cache[token.mint_address]
         if lookup_result is None:
-            return token
+            return token, "holder_lookup_failed_provider"
+
+        if lookup_result.status != "holder_lookup_succeeded":
+            return token, lookup_result.status
 
         updates: dict[str, float | int] = {}
         if token.top10_holder_pct is None and lookup_result.top10_holder_pct is not None:
@@ -116,8 +132,16 @@ class DiscoveryRiskScorer:
         if token.holder_count is None and lookup_result.holder_count is not None:
             updates["holder_count"] = lookup_result.holder_count
         if not updates:
-            return token
-        return token.model_copy(update=updates)
+            return token, "holder_lookup_succeeded"
+        return token.model_copy(update=updates), "holder_lookup_succeeded"
+
+    def _record_lookup_outcome(self, lookup_status: str | None, assessment: RiskAssessment) -> None:
+        if lookup_status is None:
+            return
+        if lookup_status == "holder_lookup_succeeded" and assessment.top10_holder_check == CheckResult.FAIL:
+            self._lookup_outcomes["holder_lookup_threshold_failed"] += 1
+            return
+        self._lookup_outcomes[lookup_status] += 1
 
 
 def assess_token(token: TokenInfo, config: RiskConfig | None = None) -> RiskAssessment:

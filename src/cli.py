@@ -45,6 +45,7 @@ class PaperCycleSummary:
     trades_persisted: int
     open_positions: int
     rejection_reasons: dict[str, int]
+    holder_lookup_outcomes: dict[str, int]
     termination_reason: str
     elapsed_seconds: float
 
@@ -65,6 +66,9 @@ class PaperCycleSummary:
         if self.rejection_reasons:
             lines.append("rejection_reasons:")
             lines.extend(f"  {reason}={count}" for reason, count in self.rejection_reasons.items())
+        if self.holder_lookup_outcomes:
+            lines.append("holder_lookup_outcomes:")
+            lines.extend(f"  {reason}={count}" for reason, count in self.holder_lookup_outcomes.items())
         return lines
 
 
@@ -99,6 +103,15 @@ def build_paper_cycle_risk_scorer(risk_profile: str, settings: Settings) -> Any:
     if normalized == "discovery":
         return DiscoveryRiskScorer(settings.risk)
     return assess_signal
+
+
+def extract_runtime_diagnostics(risk_scorer: Any) -> dict[str, int]:
+    diagnostics_fn = getattr(risk_scorer, "diagnostics", None)
+    if callable(diagnostics_fn):
+        diagnostics = diagnostics_fn()
+        if isinstance(diagnostics, dict):
+            return {str(key): int(value) for key, value in diagnostics.items()}
+    return {}
 
 
 def _count_rows(db_path: Path, table: str, where_clause: str | None = None, params: tuple[object, ...] = ()) -> int:
@@ -212,6 +225,8 @@ async def run_bounded_paper_cycle(
         await _stop_signal_sources(signal_sources, rejection_reasons)
         await execution_adapter.close()
 
+    holder_lookup_outcomes = extract_runtime_diagnostics(engine.risk_scorer)
+
     return PaperCycleSummary(
         execution_mode=runtime_settings.execution.mode,
         risk_profile=normalized_risk_profile,
@@ -223,6 +238,7 @@ async def run_bounded_paper_cycle(
         trades_persisted=max(_count_rows(runtime_db_path, "trades") - initial_trade_count, 0),
         open_positions=_count_rows(runtime_db_path, "positions", "status != ?", ("CLOSED",)),
         rejection_reasons=dict(sorted(rejection_reasons.items())),
+        holder_lookup_outcomes=holder_lookup_outcomes,
         termination_reason=termination_reason,
         elapsed_seconds=round(monotonic() - start_at, 3),
     )

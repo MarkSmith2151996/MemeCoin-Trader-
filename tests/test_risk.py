@@ -140,6 +140,7 @@ def test_read_only_holder_lookup_computes_top10_holder_pct_from_rpc() -> None:
     result = asyncio.run(lookup.fetch("mint"))
 
     assert result is not None
+    assert result.status == "holder_lookup_succeeded"
     assert result.top10_holder_pct == 60.0
     assert rpc_client.closed is True
 
@@ -210,3 +211,4 @@ def test_discovery_risk_scorer_populates_top10_holder_pct_from_lookup() -> None:
 
     assert assessment.top10_holder_check == CheckResult.PASS
     assert assessment.creator_holding_check == CheckResult.PASS
+    assert scorer.diagnostics() == {"holder_lookup_succeeded": 1}

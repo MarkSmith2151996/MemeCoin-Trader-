@@ -170,6 +170,7 @@ def test_paper_cycle_persists_accepted_and_rejected_fake_signals(tmp_path: Path)
         assert summary.trades_persisted == 1
         assert summary.open_positions == 1
         assert summary.rejection_reasons == {"honeypot_check_failed": 1}
+        assert summary.holder_lookup_outcomes == {}
         assert summary.termination_reason == "max_signals"
         assert source.started is True
         assert source.stopped is True
@@ -208,6 +209,7 @@ def test_paper_cycle_discovery_mode_stays_paper_when_settings_request_live(tmp_p
 
         assert summary.execution_mode == "paper"
         assert summary.risk_profile == "discovery"
+        assert summary.holder_lookup_outcomes == {}
         assert len(trades) == 1
         assert trades[0].mode == "paper"
 
@@ -237,6 +239,7 @@ def test_paper_cycle_stops_at_max_signals_bound(tmp_path: Path) -> None:
         assert summary.trades_persisted == 1
         assert summary.risk_profile == "strict"
         assert summary.rejection_reasons == {}
+        assert summary.holder_lookup_outcomes == {}
         assert summary.termination_reason == "max_signals"
         assert len(trades) == 1
         assert trades[0].mint_address == "mint-1"
@@ -273,6 +276,7 @@ def test_paper_cycle_reports_stable_rejection_reason_counts(tmp_path: Path) -> N
             "honeypot_check_failed": 2,
             "position_size_zero": 1,
         }
+        assert summary.holder_lookup_outcomes == {}
 
     asyncio.run(run())
 
@@ -304,6 +308,7 @@ def test_paper_cycle_strict_mode_rejects_too_new_tokens_with_age_check_failed(tm
         assert summary.signals_rejected == 1
         assert summary.risk_profile == "strict"
         assert summary.rejection_reasons == {"age_check_failed": 1}
+        assert summary.holder_lookup_outcomes == {}
 
     asyncio.run(run())
 
@@ -337,6 +342,7 @@ def test_paper_cycle_discovery_mode_relaxes_only_age_blocker(tmp_path: Path) -> 
         assert summary.signals_accepted == 0
         assert summary.signals_rejected == 1
         assert summary.rejection_reasons == {"honeypot_check_unknown": 1}
+        assert summary.holder_lookup_outcomes == {}
 
     asyncio.run(run())
 
@@ -371,6 +377,7 @@ def test_paper_cycle_discovery_mode_still_respects_other_blockers(tmp_path: Path
         assert summary.signals_accepted == 0
         assert summary.signals_rejected == 1
         assert summary.rejection_reasons == {"liquidity_check_failed": 1}
+        assert summary.holder_lookup_outcomes == {}
 
     asyncio.run(run())
 
@@ -399,12 +406,18 @@ def test_paper_cycle_discovery_mode_keeps_holder_unknown_when_payload_lacks_hold
             ]
         )
 
+        scorer = DiscoveryRiskScorer(
+            RiskConfig(min_age_minutes=0),
+            holder_lookup=FakeHolderLookup(error=RuntimeError("rpc unavailable")),
+        )
+
         summary = await cli_module.run_bounded_paper_cycle(
             max_signals=1,
             timeout_seconds=0.1,
             db_path=db_path,
             risk_profile="discovery",
             sources=[source],
+            risk_scorer=scorer,
             poll_interval_s=0.0,
         )
 
@@ -414,6 +427,7 @@ def test_paper_cycle_discovery_mode_keeps_holder_unknown_when_payload_lacks_hold
         assert summary.signals_accepted == 0
         assert summary.signals_rejected == 1
         assert summary.rejection_reasons == {"top10_holder_check_unknown": 1}
+        assert summary.holder_lookup_outcomes == {"holder_lookup_failed_provider": 1}
 
     asyncio.run(run())
 
@@ -463,6 +477,7 @@ def test_paper_cycle_discovery_mode_uses_holder_lookup_to_move_past_unknown(tmp_
         assert summary.signals_accepted == 0
         assert summary.signals_rejected == 1
         assert summary.rejection_reasons == {"honeypot_check_unknown": 1}
+        assert summary.holder_lookup_outcomes == {"holder_lookup_succeeded": 1}
 
     asyncio.run(run())
 
@@ -511,6 +526,7 @@ def test_paper_cycle_discovery_mode_holder_lookup_failure_falls_back_to_unknown(
         assert summary.signals_accepted == 0
         assert summary.signals_rejected == 1
         assert summary.rejection_reasons == {"top10_holder_check_unknown": 1}
+        assert summary.holder_lookup_outcomes == {"holder_lookup_failed_provider": 1}
 
     asyncio.run(run())
 
@@ -533,6 +549,7 @@ def test_paper_cycle_times_out_cleanly_without_signals(tmp_path: Path) -> None:
         assert summary.signals_rejected == 0
         assert summary.trades_persisted == 0
         assert summary.open_positions == 0
+        assert summary.holder_lookup_outcomes == {}
         assert summary.termination_reason == "timeout"
         assert source.started is True
         assert source.stopped is True
@@ -559,6 +576,7 @@ def test_paper_cycle_counts_ambiguous_failures_as_unknown_or_other(tmp_path: Pat
         assert summary.signals_rejected == 1
         assert summary.trades_persisted == 0
         assert summary.rejection_reasons == {"unknown_or_other": 1}
+        assert summary.holder_lookup_outcomes == {}
 
     asyncio.run(run())
 
