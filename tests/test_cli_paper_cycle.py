@@ -8,6 +8,7 @@ import src.cli as cli_module
 from src.core.config import RiskConfig
 from src.core.models import CheckResult, RiskAssessment, Signal, SignalSource as SignalSourceEnum, SignalType, TokenInfo
 from src.monitoring.dashboard import load_open_positions, load_recent_trades
+from src.risk.rugcheck import RugCheckResult
 from src.risk.scorer import DiscoveryRiskScorer, HolderLookupResult
 from src.signals.base import SignalSource
 
@@ -57,6 +58,19 @@ class FakeHolderLookup:
         if self._error is not None:
             raise self._error
         return self._result
+
+
+class FakeRugCheckClient:
+    def __init__(self, result: RugCheckResult | None = None, error: Exception | None = None) -> None:
+        self._result = result
+        self._error = error
+
+    async def fetch_report(self, mint_address: str) -> RugCheckResult:
+        if self._error is not None:
+            raise self._error
+        if self._result is not None:
+            return self._result
+        return RugCheckResult(mint_address=mint_address, provider_status="timeout", error="timed out")
 
 
 def build_assessment(mint_address: str, *, passes: bool, failed_field: str = "honeypot_check") -> RiskAssessment:
@@ -587,6 +601,73 @@ def test_paper_cycle_discovery_mode_uses_holder_lookup_to_move_past_unknown(tmp_
         assert summary.rejection_reasons == {"honeypot_check_unknown": 1}
         assert summary.sources_polled == ["fake"]
         assert summary.holder_lookup_outcomes == {"holder_lookup_succeeded": 1}
+
+    asyncio.run(run())
+
+
+def test_paper_cycle_discovery_mode_uses_rugcheck_and_stays_paper(tmp_path: Path) -> None:
+    async def run() -> None:
+        db_path = tmp_path / "discovery-rugcheck.db"
+        mint_address = "So11111111111111111111111111111111111111112"
+        source = FakeSignalSource(
+            [
+                [
+                    Signal(
+                        source=SignalSourceEnum.PUMP_FUN,
+                        type=SignalType.NEW_POOL,
+                        mint_address=mint_address,
+                        confidence=0.85,
+                        payload={
+                            "symbol": "PUMP",
+                            "vSolInBondingCurve": 30.1,
+                            "uniqueBuyers": 25,
+                            "creatorHoldingPct": 5.0,
+                            "createdAt": (datetime.now(UTC) - timedelta(minutes=10)).isoformat(),
+                        },
+                    )
+                ]
+            ]
+        )
+        scorer = DiscoveryRiskScorer(
+            RiskConfig(min_age_minutes=0),
+            rugcheck_client=FakeRugCheckClient(
+                RugCheckResult(
+                    mint_address=mint_address,
+                    found=True,
+                    mint_authority_revoked=True,
+                    freeze_authority_revoked=True,
+                    top_holder_pct=30.0,
+                    is_honeypot=False,
+                    liquidity_locked=True,
+                    liquidity_status="locked",
+                    risk_level="low",
+                    provider_status="ok",
+                )
+            ),
+        )
+
+        summary = await cli_module.run_bounded_paper_cycle(
+            max_signals=1,
+            timeout_seconds=0.1,
+            db_path=db_path,
+            risk_profile="discovery",
+            sources=[source],
+            risk_scorer=scorer,
+            poll_interval_s=0.0,
+        )
+
+        trades = load_recent_trades(db_path, limit=5)
+
+        assert summary.execution_mode == "paper"
+        assert summary.risk_profile == "discovery"
+        assert summary.signals_collected == 1
+        assert summary.signals_accepted == 1
+        assert summary.signals_rejected == 0
+        assert summary.rejection_reasons == {}
+        assert summary.holder_lookup_outcomes["rugcheck_used"] == 1
+        assert summary.holder_lookup_outcomes["rugcheck_used_honeypot_pass"] == 1
+        assert len(trades) == 1
+        assert trades[0].mode == "paper"
 
     asyncio.run(run())
 

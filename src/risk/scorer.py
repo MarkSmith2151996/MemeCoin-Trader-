@@ -18,6 +18,7 @@ from src.core.models import CheckResult, RiskAssessment, Signal, SignalSource, S
 from src.risk.contract_audit import check_freeze_authority, check_honeypot, check_mint_authority
 from src.risk.holders import check_creator_holding, check_top10_holders
 from src.risk.liquidity import check_age, check_liquidity, check_unique_buyers
+from src.risk.rugcheck import RugCheckClient, RugCheckResult
 
 
 CHECK_WEIGHTS = {
@@ -91,25 +92,41 @@ class ReadOnlyHolderLookup:
 
 
 class DiscoveryRiskScorer:
-    def __init__(self, config: RiskConfig, holder_lookup: ReadOnlyHolderLookup | None = None) -> None:
+    def __init__(
+        self,
+        config: RiskConfig,
+        holder_lookup: ReadOnlyHolderLookup | None = None,
+        rugcheck_client: RugCheckClient | None = None,
+        enable_holder_lookup: bool = True,
+    ) -> None:
         self._config = config
         self._holder_lookup = holder_lookup or ReadOnlyHolderLookup()
+        self._rugcheck_client = rugcheck_client
+        self._enable_holder_lookup = enable_holder_lookup
         self._cache: dict[str, HolderLookupResult | None] = {}
+        self._rugcheck_cache: dict[str, RugCheckResult | None] = {}
         self._lookup_outcomes: Counter[str] = Counter()
 
     async def assess_signal(self, signal: Signal) -> RiskAssessment:
         token = build_token_from_signal(signal)
-        token, lookup_status = await self._enrich_token(token)
+        token, lookup_status, rugcheck_result = await self._enrich_token(token)
         assessment = assess_token(token, self._config)
+        assessment = _apply_rugcheck_assessment(assessment, rugcheck_result)
         self._record_lookup_outcome(lookup_status, assessment)
+        self._record_rugcheck_outcome(rugcheck_result, assessment)
         return assessment
 
     def diagnostics(self) -> dict[str, int]:
         return dict(sorted(self._lookup_outcomes.items()))
 
-    async def _enrich_token(self, token: TokenInfo) -> tuple[TokenInfo, str | None]:
+    async def _enrich_token(self, token: TokenInfo) -> tuple[TokenInfo, str | None, RugCheckResult | None]:
+        rugcheck_result = await self._fetch_rugcheck(token)
+        token = _apply_rugcheck_token_fields(token, rugcheck_result)
+
         if token.top10_holder_pct is not None:
-            return token, None
+            return token, None, rugcheck_result
+        if not self._enable_holder_lookup:
+            return token, None, rugcheck_result
 
         if token.mint_address not in self._cache:
             try:
@@ -119,10 +136,10 @@ class DiscoveryRiskScorer:
 
         lookup_result = self._cache[token.mint_address]
         if lookup_result is None:
-            return token, "holder_lookup_failed_provider"
+            return token, "holder_lookup_failed_provider", rugcheck_result
 
         if lookup_result.status != "holder_lookup_succeeded":
-            return token, lookup_result.status
+            return token, lookup_result.status, rugcheck_result
 
         updates: dict[str, float | int] = {}
         if token.top10_holder_pct is None and lookup_result.top10_holder_pct is not None:
@@ -132,8 +149,26 @@ class DiscoveryRiskScorer:
         if token.holder_count is None and lookup_result.holder_count is not None:
             updates["holder_count"] = lookup_result.holder_count
         if not updates:
-            return token, "holder_lookup_succeeded"
-        return token.model_copy(update=updates), "holder_lookup_succeeded"
+            return token, "holder_lookup_succeeded", rugcheck_result
+        return token.model_copy(update=updates), "holder_lookup_succeeded", rugcheck_result
+
+    async def _fetch_rugcheck(self, token: TokenInfo) -> RugCheckResult | None:
+        if self._rugcheck_client is None:
+            return None
+        if not _looks_like_solana_mint(token.mint_address):
+            return None
+
+        if token.mint_address not in self._rugcheck_cache:
+            try:
+                self._rugcheck_cache[token.mint_address] = await self._rugcheck_client.fetch_report(token.mint_address)
+            except Exception:
+                self._rugcheck_cache[token.mint_address] = RugCheckResult(
+                    mint_address=token.mint_address,
+                    provider_status="provider_error",
+                    error="unexpected exception",
+                )
+
+        return self._rugcheck_cache[token.mint_address]
 
     def _record_lookup_outcome(self, lookup_status: str | None, assessment: RiskAssessment) -> None:
         if lookup_status is None:
@@ -142,6 +177,28 @@ class DiscoveryRiskScorer:
             self._lookup_outcomes["holder_lookup_threshold_failed"] += 1
             return
         self._lookup_outcomes[lookup_status] += 1
+
+    def _record_rugcheck_outcome(self, rugcheck_result: RugCheckResult | None, assessment: RiskAssessment) -> None:
+        if rugcheck_result is None:
+            return
+
+        provider_status = rugcheck_result.provider_status or "unknown"
+        if provider_status != "ok" or not rugcheck_result.found:
+            self._lookup_outcomes[f"rugcheck_failed_{provider_status}"] += 1
+            return
+
+        self._lookup_outcomes["rugcheck_used"] += 1
+        if rugcheck_result.top_holder_pct is not None:
+            self._lookup_outcomes["rugcheck_used_top_holder_pct"] += 1
+        if rugcheck_result.mint_authority_revoked is not None:
+            self._lookup_outcomes["rugcheck_used_mint_authority"] += 1
+        if rugcheck_result.freeze_authority_revoked is not None:
+            self._lookup_outcomes["rugcheck_used_freeze_authority"] += 1
+        if rugcheck_result.is_honeypot is not None:
+            outcome = "fail" if assessment.honeypot_check == CheckResult.FAIL else "pass"
+            self._lookup_outcomes[f"rugcheck_used_honeypot_{outcome}"] += 1
+        if rugcheck_result.risk_level:
+            self._lookup_outcomes[f"rugcheck_risk_level_{rugcheck_result.risk_level.lower()}"] += 1
 
 
 def assess_token(token: TokenInfo, config: RiskConfig | None = None) -> RiskAssessment:
@@ -172,6 +229,51 @@ def assess_token(token: TokenInfo, config: RiskConfig | None = None) -> RiskAsse
 
 def assess_signal(signal: Signal, config: RiskConfig | None = None) -> RiskAssessment:
     return assess_token(build_token_from_signal(signal), config)
+
+
+def _apply_rugcheck_token_fields(token: TokenInfo, rugcheck_result: RugCheckResult | None) -> TokenInfo:
+    if rugcheck_result is None or rugcheck_result.provider_status != "ok" or not rugcheck_result.found:
+        return token
+
+    updates: dict[str, object] = {}
+    if token.mint_authority_revoked is None and rugcheck_result.mint_authority_revoked is not None:
+        updates["mint_authority_revoked"] = rugcheck_result.mint_authority_revoked
+    if token.freeze_authority_revoked is None and rugcheck_result.freeze_authority_revoked is not None:
+        updates["freeze_authority_revoked"] = rugcheck_result.freeze_authority_revoked
+    if token.top10_holder_pct is None and rugcheck_result.top_holder_pct is not None:
+        updates["top10_holder_pct"] = rugcheck_result.top_holder_pct
+
+    if not updates:
+        return token
+    return token.model_copy(update=updates)
+
+
+def _apply_rugcheck_assessment(
+    assessment: RiskAssessment,
+    rugcheck_result: RugCheckResult | None,
+) -> RiskAssessment:
+    if rugcheck_result is None or rugcheck_result.provider_status != "ok" or not rugcheck_result.found:
+        return assessment
+    if rugcheck_result.is_honeypot is None:
+        return assessment
+
+    honeypot_check = CheckResult.FAIL if rugcheck_result.is_honeypot else CheckResult.PASS
+    reasons = [reason for reason in assessment.reasons if not reason.startswith("honeypot_check ")]
+    score = assessment.score
+    if honeypot_check == CheckResult.PASS and assessment.honeypot_check != CheckResult.PASS:
+        score += CHECK_WEIGHTS["honeypot_check"]
+    elif honeypot_check == CheckResult.FAIL and assessment.honeypot_check == CheckResult.PASS:
+        score -= CHECK_WEIGHTS["honeypot_check"]
+    if honeypot_check == CheckResult.FAIL:
+        reasons.append("honeypot_check failed")
+    return assessment.model_copy(update={"honeypot_check": honeypot_check, "score": score, "reasons": reasons})
+
+
+def _looks_like_solana_mint(mint_address: str) -> bool:
+    normalized = mint_address.strip()
+    if not 32 <= len(normalized) <= 44:
+        return False
+    return all(ch in "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz" for ch in normalized)
 
 
 def resolve_read_only_rpc_url(dotenv_path: str | Path | None = None) -> str:

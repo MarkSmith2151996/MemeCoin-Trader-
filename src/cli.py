@@ -20,7 +20,8 @@ from src.execution.base import ExecutionAdapter
 from src.execution.paper import PaperExecutionAdapter
 from src.monitoring.dashboard import resolve_db_path
 from src.monitoring.health import check_health
-from src.risk.scorer import DiscoveryRiskScorer, assess_signal
+from src.risk.rugcheck import RugCheckClient
+from src.risk.scorer import DiscoveryRiskScorer
 from src.signals.aggregator import SignalAggregator
 from src.signals.base import SignalSource
 from src.signals.onchain import OnChainMonitor
@@ -124,9 +125,11 @@ def normalize_risk_profile(risk_profile: str) -> str:
 
 def build_paper_cycle_risk_scorer(risk_profile: str, settings: Settings) -> Any:
     normalized = normalize_risk_profile(risk_profile)
-    if normalized == "discovery":
-        return DiscoveryRiskScorer(settings.risk)
-    return assess_signal
+    return DiscoveryRiskScorer(
+        settings.risk,
+        rugcheck_client=RugCheckClient(),
+        enable_holder_lookup=normalized == "discovery",
+    )
 
 
 def extract_runtime_diagnostics(risk_scorer: Any) -> dict[str, int]:

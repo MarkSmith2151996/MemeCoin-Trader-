@@ -3,6 +3,7 @@ from datetime import UTC, datetime, timedelta
 
 from src.core.config import RiskConfig
 from src.core.models import CheckResult, RiskAssessment, Signal, SignalSource, SignalType, TokenInfo
+from src.risk.rugcheck import RugCheckResult
 from src.risk.scorer import (
     DiscoveryRiskScorer,
     HolderLookupResult,
@@ -34,6 +35,19 @@ class FakeHolderLookup:
         if self._error is not None:
             raise self._error
         return self._result
+
+
+class FakeRugCheckClient:
+    def __init__(self, result: RugCheckResult | None = None, error: Exception | None = None) -> None:
+        self._result = result
+        self._error = error
+
+    async def fetch_report(self, mint_address: str) -> RugCheckResult:
+        if self._error is not None:
+            raise self._error
+        if self._result is not None:
+            return self._result
+        return RugCheckResult(mint_address=mint_address, provider_status="timeout", error="timed out")
 
 
 def test_risk_assessment_all_checks_pass() -> None:
@@ -212,3 +226,156 @@ def test_discovery_risk_scorer_populates_top10_holder_pct_from_lookup() -> None:
     assert assessment.top10_holder_check == CheckResult.PASS
     assert assessment.creator_holding_check == CheckResult.PASS
     assert scorer.diagnostics() == {"holder_lookup_succeeded": 1}
+
+
+def test_rugcheck_safe_data_populates_existing_scorer_fields() -> None:
+    mint_address = "So11111111111111111111111111111111111111112"
+    signal = Signal(
+        source=SignalSource.PUMP_FUN,
+        type=SignalType.NEW_POOL,
+        mint_address=mint_address,
+        payload={
+            "vSolInBondingCurve": 30.1,
+            "uniqueBuyers": 25,
+            "createdAt": (datetime.now(UTC) - timedelta(minutes=10)).isoformat(),
+        },
+    )
+    scorer = DiscoveryRiskScorer(
+        config=RiskConfig(min_age_minutes=0),
+        holder_lookup=FakeHolderLookup(error=RuntimeError("should not be used")),
+        rugcheck_client=FakeRugCheckClient(
+            RugCheckResult(
+                mint_address=mint_address,
+                found=True,
+                mint_authority_revoked=True,
+                freeze_authority_revoked=True,
+                top_holder_pct=30.0,
+                liquidity_locked=True,
+                liquidity_status="locked",
+                is_honeypot=False,
+                risk_score=12.0,
+                risk_level="low",
+                provider_status="ok",
+            )
+        ),
+        enable_holder_lookup=False,
+    )
+
+    assessment = asyncio.run(scorer.assess_signal(signal))
+
+    assert assessment.top10_holder_check == CheckResult.PASS
+    assert assessment.mint_authority_check == CheckResult.PASS
+    assert assessment.freeze_authority_check == CheckResult.PASS
+    assert assessment.honeypot_check == CheckResult.PASS
+    assert assessment.token is not None
+    assert assessment.token.top10_holder_pct == 30.0
+    assert assessment.token.mint_authority_revoked is True
+    assert assessment.token.freeze_authority_revoked is True
+    diagnostics = scorer.diagnostics()
+    assert diagnostics["rugcheck_used"] == 1
+    assert diagnostics["rugcheck_used_top_holder_pct"] == 1
+    assert diagnostics["rugcheck_used_honeypot_pass"] == 1
+    assert diagnostics["rugcheck_risk_level_low"] == 1
+
+
+def test_rugcheck_unsafe_data_fails_existing_checks_with_current_labels() -> None:
+    mint_address = "11111111111111111111111111111111"
+    signal = Signal(
+        source=SignalSource.PUMP_FUN,
+        type=SignalType.NEW_POOL,
+        mint_address=mint_address,
+        payload={
+            "vSolInBondingCurve": 30.1,
+            "uniqueBuyers": 25,
+            "createdAt": (datetime.now(UTC) - timedelta(minutes=10)).isoformat(),
+        },
+    )
+    scorer = DiscoveryRiskScorer(
+        config=RiskConfig(min_age_minutes=0),
+        rugcheck_client=FakeRugCheckClient(
+            RugCheckResult(
+                mint_address=mint_address,
+                found=True,
+                mint_authority_revoked=False,
+                freeze_authority_revoked=True,
+                top_holder_pct=91.0,
+                is_honeypot=True,
+                risk_level="high",
+                provider_status="ok",
+            )
+        ),
+        enable_holder_lookup=False,
+    )
+
+    assessment = asyncio.run(scorer.assess_signal(signal))
+
+    assert assessment.top10_holder_check == CheckResult.FAIL
+    assert assessment.mint_authority_check == CheckResult.FAIL
+    assert assessment.honeypot_check == CheckResult.FAIL
+    assert "top10_holder_check failed" in assessment.reasons
+    assert "mint_authority_check failed" in assessment.reasons
+    assert "honeypot_check failed" in assessment.reasons
+
+
+def test_rugcheck_unavailable_falls_back_to_existing_behavior() -> None:
+    mint_address = "22222222222222222222222222222222"
+    signal = Signal(
+        source=SignalSource.PUMP_FUN,
+        type=SignalType.NEW_POOL,
+        mint_address=mint_address,
+        payload={
+            "vSolInBondingCurve": 30.1,
+            "uniqueBuyers": 25,
+            "creatorHoldingPct": 5.0,
+            "createdAt": (datetime.now(UTC) - timedelta(minutes=10)).isoformat(),
+        },
+    )
+    scorer = DiscoveryRiskScorer(
+        config=RiskConfig(min_age_minutes=0),
+        holder_lookup=FakeHolderLookup(HolderLookupResult(top10_holder_pct=30.0)),
+        rugcheck_client=FakeRugCheckClient(error=RuntimeError("provider boom")),
+    )
+
+    assessment = asyncio.run(scorer.assess_signal(signal))
+
+    assert assessment.top10_holder_check == CheckResult.PASS
+    assert assessment.creator_holding_check == CheckResult.PASS
+    assert assessment.mint_authority_check == CheckResult.UNKNOWN
+    assert assessment.freeze_authority_check == CheckResult.UNKNOWN
+    assert assessment.honeypot_check == CheckResult.UNKNOWN
+    diagnostics = scorer.diagnostics()
+    assert diagnostics["holder_lookup_succeeded"] == 1
+    assert diagnostics["rugcheck_failed_provider_error"] == 1
+
+
+def test_strict_thresholds_are_unchanged_when_rugcheck_adds_safe_metadata() -> None:
+    mint_address = "33333333333333333333333333333333"
+    signal = Signal(
+        source=SignalSource.PUMP_FUN,
+        type=SignalType.NEW_POOL,
+        mint_address=mint_address,
+        payload={
+            "vSolInBondingCurve": 30.1,
+            "uniqueBuyers": 25,
+            "createdAt": datetime.now(UTC).isoformat(),
+        },
+    )
+    scorer = DiscoveryRiskScorer(
+        config=RiskConfig(),
+        rugcheck_client=FakeRugCheckClient(
+            RugCheckResult(
+                mint_address=mint_address,
+                found=True,
+                mint_authority_revoked=True,
+                freeze_authority_revoked=True,
+                top_holder_pct=30.0,
+                is_honeypot=False,
+                provider_status="ok",
+            )
+        ),
+        enable_holder_lookup=False,
+    )
+
+    assessment = asyncio.run(scorer.assess_signal(signal))
+
+    assert assessment.age_check == CheckResult.FAIL
