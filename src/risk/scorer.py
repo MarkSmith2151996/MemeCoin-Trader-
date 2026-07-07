@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import os
 from collections import Counter
 from collections.abc import Mapping
@@ -19,6 +20,11 @@ from src.risk.contract_audit import check_freeze_authority, check_honeypot, chec
 from src.risk.funding_analysis import FundingAnalysisResult, FundingTransferProvider, analyze_buyer_funding
 from src.risk.funding_provider import HeliusFundingProvider
 from src.risk.holders import check_creator_holding, check_top10_holders
+from src.risk.honeypot_simulation import (
+    HoneypotSimulationAdapter,
+    HoneypotSimulationRequest,
+    HoneypotSimulationResult,
+)
 from src.risk.liquidity import check_age, check_liquidity, check_unique_buyers
 from src.risk.rugcheck import RugCheckClient, RugCheckResult
 
@@ -100,6 +106,7 @@ class DiscoveryRiskScorer:
         holder_lookup: ReadOnlyHolderLookup | None = None,
         rugcheck_client: RugCheckClient | None = None,
         funding_provider: FundingTransferProvider | None = None,
+        honeypot_adapter: HoneypotSimulationAdapter | None = None,
         enable_holder_lookup: bool = True,
         enable_funding_analysis: bool = True,
     ) -> None:
@@ -107,6 +114,7 @@ class DiscoveryRiskScorer:
         self._holder_lookup = holder_lookup or ReadOnlyHolderLookup()
         self._rugcheck_client = rugcheck_client
         self._funding_provider = funding_provider or HeliusFundingProvider()
+        self._honeypot_adapter = honeypot_adapter
         self._enable_holder_lookup = enable_holder_lookup
         self._enable_funding_analysis = enable_funding_analysis
         self._cache: dict[str, HolderLookupResult | None] = {}
@@ -116,28 +124,37 @@ class DiscoveryRiskScorer:
 
     async def assess_signal(self, signal: Signal) -> RiskAssessment:
         token = build_token_from_signal(signal)
-        token, lookup_status, rugcheck_result = await self._enrich_token(token)
-        funding_result, missing_provider = await self._analyze_funding(signal, token)
+        rugcheck_result, funding_response = await asyncio.gather(
+            self._fetch_rugcheck(token),
+            self._analyze_funding(signal, token),
+        )
+
+        funding_result, missing_provider = funding_response
+        if rugcheck_result is not None or funding_result is not None:
+            self._lookup_outcomes["parallel_prechecks_used"] += 1
+        token, lookup_status = await self._enrich_token(token, rugcheck_result)
         token = _apply_funding_token_fields(token, funding_result)
         assessment = assess_token(token, self._config)
         assessment = _apply_rugcheck_assessment(assessment, rugcheck_result)
+        honeypot_result = await self._simulate_honeypot(signal, rugcheck_result)
+        assessment = _apply_honeypot_simulation_assessment(assessment, honeypot_result)
         assessment = _apply_funding_assessment(assessment, funding_result, missing_provider=missing_provider)
         self._record_lookup_outcome(lookup_status, assessment)
         self._record_rugcheck_outcome(rugcheck_result, assessment)
+        self._record_honeypot_simulation_outcome(honeypot_result, assessment)
         self._record_funding_outcome(signal, funding_result, missing_provider=missing_provider)
         return assessment
 
     def diagnostics(self) -> dict[str, int]:
         return dict(sorted(self._lookup_outcomes.items()))
 
-    async def _enrich_token(self, token: TokenInfo) -> tuple[TokenInfo, str | None, RugCheckResult | None]:
-        rugcheck_result = await self._fetch_rugcheck(token)
+    async def _enrich_token(self, token: TokenInfo, rugcheck_result: RugCheckResult | None) -> tuple[TokenInfo, str | None]:
         token = _apply_rugcheck_token_fields(token, rugcheck_result)
 
         if token.top10_holder_pct is not None:
-            return token, None, rugcheck_result
+            return token, None
         if not self._enable_holder_lookup:
-            return token, None, rugcheck_result
+            return token, None
 
         if token.mint_address not in self._cache:
             try:
@@ -147,10 +164,10 @@ class DiscoveryRiskScorer:
 
         lookup_result = self._cache[token.mint_address]
         if lookup_result is None:
-            return token, "holder_lookup_failed_provider", rugcheck_result
+            return token, "holder_lookup_failed_provider"
 
         if lookup_result.status != "holder_lookup_succeeded":
-            return token, lookup_result.status, rugcheck_result
+            return token, lookup_result.status
 
         updates: dict[str, float | int] = {}
         if token.top10_holder_pct is None and lookup_result.top10_holder_pct is not None:
@@ -160,8 +177,8 @@ class DiscoveryRiskScorer:
         if token.holder_count is None and lookup_result.holder_count is not None:
             updates["holder_count"] = lookup_result.holder_count
         if not updates:
-            return token, "holder_lookup_succeeded", rugcheck_result
-        return token.model_copy(update=updates), "holder_lookup_succeeded", rugcheck_result
+            return token, "holder_lookup_succeeded"
+        return token.model_copy(update=updates), "holder_lookup_succeeded"
 
     async def _fetch_rugcheck(self, token: TokenInfo) -> RugCheckResult | None:
         if self._rugcheck_client is None:
@@ -215,6 +232,32 @@ class DiscoveryRiskScorer:
             return None, False
         return cached
 
+    async def _simulate_honeypot(
+        self,
+        signal: Signal,
+        rugcheck_result: RugCheckResult | None,
+    ) -> HoneypotSimulationResult | None:
+        if self._honeypot_adapter is None:
+            return None
+        if rugcheck_result is not None and rugcheck_result.provider_status == "ok" and rugcheck_result.found and rugcheck_result.is_honeypot is not None:
+            return None
+
+        request = _build_honeypot_request(signal)
+        if request is None:
+            return None
+
+        try:
+            return await self._honeypot_adapter.simulate_sell(request)
+        except Exception:
+            return HoneypotSimulationResult(
+                ok=False,
+                sell_simulation_passed=False,
+                blocked_reason="provider error",
+                provider_error="unexpected exception",
+                provider_status="provider_error",
+                backend=request.backend,
+            )
+
     def _record_lookup_outcome(self, lookup_status: str | None, assessment: RiskAssessment) -> None:
         if lookup_status is None:
             return
@@ -244,6 +287,23 @@ class DiscoveryRiskScorer:
             self._lookup_outcomes[f"rugcheck_used_honeypot_{outcome}"] += 1
         if rugcheck_result.risk_level:
             self._lookup_outcomes[f"rugcheck_risk_level_{rugcheck_result.risk_level.lower()}"] += 1
+
+    def _record_honeypot_simulation_outcome(
+        self,
+        honeypot_result: HoneypotSimulationResult | None,
+        assessment: RiskAssessment,
+    ) -> None:
+        if honeypot_result is None:
+            return
+        self._lookup_outcomes["honeypot_simulation_used"] += 1
+        if not honeypot_result.ok:
+            self._lookup_outcomes[f"honeypot_simulation_{honeypot_result.provider_status}"] += 1
+            return
+        if assessment.honeypot_check == CheckResult.FAIL:
+            self._lookup_outcomes["honeypot_simulation_blocked"] += 1
+            return
+        if assessment.honeypot_check == CheckResult.PASS:
+            self._lookup_outcomes["honeypot_simulation_passed"] += 1
 
     def _record_funding_outcome(
         self,
@@ -337,6 +397,30 @@ def _apply_rugcheck_assessment(
         score += CHECK_WEIGHTS["honeypot_check"]
     elif honeypot_check == CheckResult.FAIL and assessment.honeypot_check == CheckResult.PASS:
         score -= CHECK_WEIGHTS["honeypot_check"]
+    if honeypot_check == CheckResult.FAIL:
+        reasons.append("honeypot_check failed")
+    return assessment.model_copy(update={"honeypot_check": honeypot_check, "score": score, "reasons": reasons})
+
+
+def _apply_honeypot_simulation_assessment(
+    assessment: RiskAssessment,
+    honeypot_result: HoneypotSimulationResult | None,
+) -> RiskAssessment:
+    if honeypot_result is None or not honeypot_result.ok:
+        return assessment
+
+    honeypot_check = CheckResult.PASS if honeypot_result.sell_simulation_passed else CheckResult.FAIL
+    current = assessment.honeypot_check
+    if current == CheckResult.FAIL:
+        return assessment
+
+    reasons = [reason for reason in assessment.reasons if not reason.startswith("honeypot_check ")]
+    score = assessment.score
+    if honeypot_check == CheckResult.PASS and current != CheckResult.PASS:
+        score += CHECK_WEIGHTS["honeypot_check"]
+    elif honeypot_check == CheckResult.FAIL and current == CheckResult.PASS:
+        score -= CHECK_WEIGHTS["honeypot_check"]
+
     if honeypot_check == CheckResult.FAIL:
         reasons.append("honeypot_check failed")
     return assessment.model_copy(update={"honeypot_check": honeypot_check, "score": score, "reasons": reasons})
@@ -468,6 +552,52 @@ def _normalize_wallet_list(value: object) -> list[str]:
             normalized.extend(_normalize_wallet_list(item))
         return normalized
     return []
+
+
+def _build_honeypot_request(signal: Signal) -> HoneypotSimulationRequest | None:
+    payload = signal.payload
+    candidates: list[object] = [payload]
+    for field_name in ("token", "coin"):
+        nested = payload.get(field_name)
+        if isinstance(nested, Mapping):
+            candidates.insert(0, nested)
+
+    transaction_payload = _first_value(
+        [candidate for candidate in candidates if isinstance(candidate, Mapping)],
+        "sellTransactionPayload",
+        "sell_transaction_payload",
+        "serializedSellTx",
+        "serialized_sell_tx",
+        "transactionPayload",
+        "transaction_payload",
+    )
+    if not isinstance(transaction_payload, (str, bytes)) or (isinstance(transaction_payload, str) and not transaction_payload.strip()) or (isinstance(transaction_payload, bytes) and len(transaction_payload) == 0):
+        return None
+
+    parsed_instructions_raw = _first_value(
+        [candidate for candidate in candidates if isinstance(candidate, Mapping)],
+        "parsedInstructions",
+        "parsed_instructions",
+        "sellParsedInstructions",
+        "sell_parsed_instructions",
+    )
+    parsed_instructions: tuple[Mapping[str, object], ...] = ()
+    if isinstance(parsed_instructions_raw, list):
+        parsed_instructions = tuple(item for item in parsed_instructions_raw if isinstance(item, Mapping))
+
+    backend = _first_str(
+        [candidate for candidate in candidates if isinstance(candidate, Mapping)],
+        "simulationBackend",
+        "simulation_backend",
+        "honeypotBackend",
+        "honeypot_backend",
+    ) or "helius"
+    return HoneypotSimulationRequest(
+        mint_address=signal.mint_address,
+        transaction_payload=transaction_payload,
+        backend=backend,
+        parsed_instructions=parsed_instructions,
+    )
 
 
 def resolve_read_only_rpc_url(dotenv_path: str | Path | None = None) -> str:

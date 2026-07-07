@@ -1,9 +1,11 @@
 import asyncio
 from datetime import UTC, datetime, timedelta
+from time import monotonic
 
 from src.core.config import RiskConfig
 from src.core.models import CheckResult, RiskAssessment, Signal, SignalSource, SignalType, TokenInfo
 from src.risk.funding_analysis import FundingAnalysisResult, InboundTransfer
+from src.risk.honeypot_simulation import HoneypotSimulationAdapter, HoneypotSimulationRequest
 from src.risk.rugcheck import RugCheckResult
 from src.risk.scorer import (
     DiscoveryRiskScorer,
@@ -69,6 +71,41 @@ class MissingProviderFundingProvider:
             transfers = None
 
         return Result()
+
+
+class SlowRugCheckClient(FakeRugCheckClient):
+    def __init__(self, delay_s: float, result: RugCheckResult) -> None:
+        super().__init__(result=result)
+        self._delay_s = delay_s
+
+    async def fetch_report(self, mint_address: str) -> RugCheckResult:
+        await asyncio.sleep(self._delay_s)
+        return await super().fetch_report(mint_address)
+
+
+class SlowFundingProvider(FakeFundingProvider):
+    def __init__(self, delay_s: float, transfers_by_wallet: dict[str, list[InboundTransfer] | None]) -> None:
+        super().__init__(transfers_by_wallet)
+        self._delay_s = delay_s
+
+    async def get_recent_inbound_transfers(self, wallet: str) -> list[InboundTransfer] | None:
+        await asyncio.sleep(self._delay_s)
+        return await super().get_recent_inbound_transfers(wallet)
+
+
+class RecordingSimulationProvider:
+    def __init__(self, result: object, delay_s: float = 0.0) -> None:
+        self.result = result
+        self.delay_s = delay_s
+        self.calls: list[tuple[str, HoneypotSimulationRequest]] = []
+
+    async def __call__(self, backend: str, request: HoneypotSimulationRequest) -> object:
+        self.calls.append((backend, request))
+        if self.delay_s:
+            await asyncio.sleep(self.delay_s)
+        if isinstance(self.result, Exception):
+            raise self.result
+        return self.result
 
 
 def test_risk_assessment_all_checks_pass() -> None:
@@ -529,3 +566,150 @@ def test_funding_analysis_missing_provider_does_not_crash_and_stays_conservative
     assert diagnostics["funding_analysis_used"] == 1
     assert diagnostics["funding_analysis_missing_provider"] == 1
     assert diagnostics["funding_analysis_unknown"] == 1
+
+
+def test_parallel_prechecks_preserve_results_for_safe_input() -> None:
+    mint_address = "So11111111111111111111111111111111111111112"
+    buyers = [f"buyer-{index}" for index in range(2)]
+    as_of = datetime.now(UTC) - timedelta(minutes=10)
+    transfers_by_wallet = {
+        wallet: [InboundTransfer(source_wallet=f"funder-{index}", observed_at=as_of)]
+        for index, wallet in enumerate(buyers)
+    }
+    signal = Signal(
+        source=SignalSource.PUMP_FUN,
+        type=SignalType.NEW_POOL,
+        mint_address=mint_address,
+        payload={
+            "vSolInBondingCurve": 30.1,
+            "uniqueBuyers": 25,
+            "createdAt": as_of.isoformat(),
+            "buyerWallets": buyers,
+        },
+    )
+    expected_scorer = DiscoveryRiskScorer(
+        config=RiskConfig(min_age_minutes=0),
+        rugcheck_client=FakeRugCheckClient(
+            RugCheckResult(
+                mint_address=mint_address,
+                found=True,
+                mint_authority_revoked=True,
+                freeze_authority_revoked=True,
+                top_holder_pct=30.0,
+                is_honeypot=False,
+                provider_status="ok",
+            )
+        ),
+        funding_provider=FakeFundingProvider(transfers_by_wallet),
+        enable_holder_lookup=False,
+    )
+    parallel_scorer = DiscoveryRiskScorer(
+        config=RiskConfig(min_age_minutes=0),
+        rugcheck_client=SlowRugCheckClient(
+            0.1,
+            RugCheckResult(
+                mint_address=mint_address,
+                found=True,
+                mint_authority_revoked=True,
+                freeze_authority_revoked=True,
+                top_holder_pct=30.0,
+                is_honeypot=False,
+                provider_status="ok",
+            ),
+        ),
+        funding_provider=SlowFundingProvider(0.1, transfers_by_wallet),
+        enable_holder_lookup=False,
+    )
+
+    expected = asyncio.run(expected_scorer.assess_signal(signal))
+    started_at = monotonic()
+    actual = asyncio.run(parallel_scorer.assess_signal(signal))
+    elapsed = monotonic() - started_at
+
+    assert actual.score == expected.score
+    assert actual.reasons == expected.reasons
+    assert actual.honeypot_check == expected.honeypot_check
+    assert actual.unique_buyers_check == expected.unique_buyers_check
+    assert actual.top10_holder_check == expected.top10_holder_check
+    assert elapsed < 0.28
+    assert parallel_scorer.diagnostics()["parallel_prechecks_used"] == 1
+
+
+def test_honeypot_simulation_blocked_result_fails_existing_honeypot_check() -> None:
+    provider = RecordingSimulationProvider({"success": False, "blockedReason": "sell blocked by program"})
+    scorer = DiscoveryRiskScorer(
+        config=RiskConfig(min_age_minutes=0),
+        rugcheck_client=FakeRugCheckClient(
+            RugCheckResult(
+                mint_address="mint",
+                found=True,
+                mint_authority_revoked=True,
+                freeze_authority_revoked=True,
+                top_holder_pct=30.0,
+                is_honeypot=None,
+                provider_status="ok",
+            )
+        ),
+        honeypot_adapter=HoneypotSimulationAdapter(provider=provider),
+        enable_holder_lookup=False,
+        enable_funding_analysis=False,
+    )
+    signal = Signal(
+        source=SignalSource.PUMP_FUN,
+        type=SignalType.NEW_POOL,
+        mint_address="mint",
+        payload={
+            "vSolInBondingCurve": 30.1,
+            "uniqueBuyers": 25,
+            "createdAt": (datetime.now(UTC) - timedelta(minutes=10)).isoformat(),
+            "sellTransactionPayload": "serialized-sell",
+        },
+    )
+
+    assessment = asyncio.run(scorer.assess_signal(signal))
+
+    assert assessment.honeypot_check == CheckResult.FAIL
+    assert "honeypot_check failed" in assessment.reasons
+    diagnostics = scorer.diagnostics()
+    assert diagnostics["honeypot_simulation_used"] == 1
+    assert diagnostics["honeypot_simulation_blocked"] == 1
+    assert len(provider.calls) == 1
+
+
+def test_honeypot_simulation_unavailable_falls_back_safely() -> None:
+    provider = RecordingSimulationProvider(RuntimeError("boom"))
+    scorer = DiscoveryRiskScorer(
+        config=RiskConfig(min_age_minutes=0),
+        rugcheck_client=FakeRugCheckClient(
+            RugCheckResult(
+                mint_address="mint",
+                found=True,
+                mint_authority_revoked=True,
+                freeze_authority_revoked=True,
+                top_holder_pct=30.0,
+                is_honeypot=None,
+                provider_status="ok",
+            )
+        ),
+        honeypot_adapter=HoneypotSimulationAdapter(provider=provider),
+        enable_holder_lookup=False,
+        enable_funding_analysis=False,
+    )
+    signal = Signal(
+        source=SignalSource.PUMP_FUN,
+        type=SignalType.NEW_POOL,
+        mint_address="mint",
+        payload={
+            "vSolInBondingCurve": 30.1,
+            "uniqueBuyers": 25,
+            "createdAt": (datetime.now(UTC) - timedelta(minutes=10)).isoformat(),
+            "sellTransactionPayload": "serialized-sell",
+        },
+    )
+
+    assessment = asyncio.run(scorer.assess_signal(signal))
+
+    assert assessment.honeypot_check == CheckResult.UNKNOWN
+    diagnostics = scorer.diagnostics()
+    assert diagnostics["honeypot_simulation_used"] == 1
+    assert diagnostics["honeypot_simulation_provider_error"] == 1
