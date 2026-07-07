@@ -362,6 +362,49 @@ def test_paper_cycle_discovery_mode_still_respects_other_blockers(tmp_path: Path
     asyncio.run(run())
 
 
+def test_paper_cycle_discovery_mode_keeps_holder_unknown_when_payload_lacks_holder_fields(tmp_path: Path) -> None:
+    async def run() -> None:
+        db_path = tmp_path / "discovery-holder-unknown.db"
+        source = FakeSignalSource(
+            [
+                [
+                    Signal(
+                        source=SignalSourceEnum.PUMP_FUN,
+                        type=SignalType.NEW_POOL,
+                        mint_address="discovery-holder-unknown-mint",
+                        confidence=0.85,
+                        payload={
+                            "symbol": "PUMP",
+                            "vSolInBondingCurve": 30.1,
+                            "uniqueBuyers": 25,
+                            "mintAuthorityRevoked": True,
+                            "freezeAuthorityRevoked": True,
+                            "createdAt": (datetime.now(UTC) - timedelta(minutes=10)).isoformat(),
+                        },
+                    )
+                ]
+            ]
+        )
+
+        summary = await cli_module.run_bounded_paper_cycle(
+            max_signals=1,
+            timeout_seconds=0.1,
+            db_path=db_path,
+            risk_profile="discovery",
+            sources=[source],
+            poll_interval_s=0.0,
+        )
+
+        assert summary.execution_mode == "paper"
+        assert summary.risk_profile == "discovery"
+        assert summary.signals_collected == 1
+        assert summary.signals_accepted == 0
+        assert summary.signals_rejected == 1
+        assert summary.rejection_reasons == {"top10_holder_check_unknown": 1}
+
+    asyncio.run(run())
+
+
 def test_paper_cycle_times_out_cleanly_without_signals(tmp_path: Path) -> None:
     async def run() -> None:
         db_path = tmp_path / "timeout.db"

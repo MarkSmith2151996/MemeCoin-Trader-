@@ -68,6 +68,25 @@ def test_build_token_from_pump_fun_signal_enriches_liquidity_fields() -> None:
     assert token.created_at is not None
 
 
+def test_build_token_from_signal_maps_holder_alias_variants() -> None:
+    signal = Signal(
+        source=SignalSource.PUMP_FUN,
+        type=SignalType.NEW_POOL,
+        mint_address="holder-mint",
+        payload={
+            "top10HolderPercent": 41.5,
+            "creatorPercent": 7.25,
+            "totalHolders": 1234,
+        },
+    )
+
+    token = build_token_from_signal(signal)
+
+    assert token.top10_holder_pct == 41.5
+    assert token.creator_holding_pct == 7.25
+    assert token.holder_count == 1234
+
+
 def test_assess_signal_uses_enriched_pump_fun_liquidity() -> None:
     signal = Signal(
         source=SignalSource.PUMP_FUN,
@@ -89,3 +108,23 @@ def test_assess_signal_uses_enriched_pump_fun_liquidity() -> None:
     assert assessment.liquidity_check == CheckResult.PASS
     assert assessment.age_check == CheckResult.PASS
     assert assessment.unique_buyers_check == CheckResult.PASS
+
+
+def test_assess_signal_keeps_holder_check_unknown_when_holder_fields_missing() -> None:
+    signal = Signal(
+        source=SignalSource.PUMP_FUN,
+        type=SignalType.NEW_POOL,
+        mint_address="missing-holder-mint",
+        payload={
+            "vSolInBondingCurve": 30.1,
+            "uniqueBuyers": 25,
+            "mintAuthorityRevoked": True,
+            "freezeAuthorityRevoked": True,
+            "createdAt": (datetime.now(UTC) - timedelta(minutes=10)).isoformat(),
+        },
+    )
+
+    assessment = assess_signal(signal)
+
+    assert assessment.top10_holder_check == CheckResult.UNKNOWN
+    assert assessment.creator_holding_check == CheckResult.UNKNOWN
