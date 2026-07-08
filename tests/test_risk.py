@@ -1170,7 +1170,7 @@ def test_authority_unknown_reason_includes_rugcheck_provider_status() -> None:
     scorer = DiscoveryRiskScorer(
         config=RiskConfig(),
         enable_holder_lookup=False,
-        holder_policy_mode="discovery",
+        holder_policy_mode="strict",
         rugcheck_client=FakeRugCheckClient(error=RuntimeError("boom")),
     )
 
@@ -1183,38 +1183,32 @@ def test_authority_unknown_reason_includes_rugcheck_provider_status() -> None:
 
 
 def test_authority_unknown_warning_does_not_override_holder_fail() -> None:
+    mint_address = "So11111111111111111111111111111111111111112"
     signal = Signal(
         source=SignalSource.PUMP_FUN,
         type=SignalType.NEW_POOL,
-        mint_address="authority-warning-holder-fail-mint",
+        mint_address=mint_address,
         payload={
             "vSolInBondingCurve": 30.1,
             "uniqueBuyers": 30,
-            "top10HolderPct": 90.0,
             "creatorHoldingPct": 5.0,
             "createdAt": datetime.now(UTC).isoformat(),
-            "risk_assessment": RiskAssessment(
-                token=TokenInfo(
-                    mint_address="authority-warning-holder-fail-mint",
-                    liquidity_sol=30.1,
-                    top10_holder_pct=90.0,
-                    creator_holding_pct=5.0,
-                    created_at=datetime.now(UTC),
-                ),
-                liquidity_check=CheckResult.PASS,
-                top10_holder_check=CheckResult.FAIL,
-                creator_holding_check=CheckResult.PASS,
-                age_check=CheckResult.PASS,
-                unique_buyers_check=CheckResult.PASS,
-                mint_authority_check=CheckResult.UNKNOWN,
-                freeze_authority_check=CheckResult.UNKNOWN,
-                honeypot_check=CheckResult.PASS,
-                score=60.0,
-                reasons=["top10_holder_check failed", "mint_authority_check unknown", "freeze_authority_check unknown"],
-            ),
         },
     )
-    scorer = DiscoveryRiskScorer(config=RiskConfig(), enable_holder_lookup=False, holder_policy_mode="discovery")
+    scorer = DiscoveryRiskScorer(
+        config=RiskConfig(),
+        enable_holder_lookup=False,
+        holder_policy_mode="discovery",
+        holder_lookup=FakeHolderLookup(error=RuntimeError("rpc unavailable")),
+        rugcheck_client=FakeRugCheckClient(
+            RugCheckResult(
+                mint_address=mint_address,
+                found=True,
+                top_holder_pct=120.0,
+                provider_status="ok",
+            )
+        ),
+    )
 
     assessment = asyncio.run(scorer.assess_signal(signal))
 
@@ -1390,42 +1384,36 @@ def test_known_safe_honeypot_result_passes_this_check() -> None:
 
 
 def test_honeypot_unknown_warning_does_not_override_holder_fail() -> None:
+    mint_address = "So11111111111111111111111111111111111111112"
     signal = Signal(
         source=SignalSource.PUMP_FUN,
         type=SignalType.NEW_POOL,
-        mint_address="honeypot-warning-holder-fail-mint",
+        mint_address=mint_address,
         payload={
             "vSolInBondingCurve": 30.1,
             "uniqueBuyers": 30,
-            "top10HolderPct": 90.0,
             "creatorHoldingPct": 5.0,
             "mintAuthorityRevoked": True,
             "freezeAuthorityRevoked": True,
             "createdAt": datetime.now(UTC).isoformat(),
-            "risk_assessment": RiskAssessment(
-                token=TokenInfo(
-                    mint_address="honeypot-warning-holder-fail-mint",
-                    liquidity_sol=30.1,
-                    top10_holder_pct=90.0,
-                    creator_holding_pct=5.0,
-                    mint_authority_revoked=True,
-                    freeze_authority_revoked=True,
-                    created_at=datetime.now(UTC),
-                ),
-                liquidity_check=CheckResult.PASS,
-                top10_holder_check=CheckResult.FAIL,
-                creator_holding_check=CheckResult.PASS,
-                age_check=CheckResult.PASS,
-                unique_buyers_check=CheckResult.PASS,
-                mint_authority_check=CheckResult.PASS,
-                freeze_authority_check=CheckResult.PASS,
-                honeypot_check=CheckResult.UNKNOWN,
-                score=60.0,
-                reasons=["top10_holder_check failed", "honeypot_check unknown"],
-            ),
         },
     )
-    scorer = DiscoveryRiskScorer(config=RiskConfig(), enable_holder_lookup=False, holder_policy_mode="discovery")
+    scorer = DiscoveryRiskScorer(
+        config=RiskConfig(),
+        enable_holder_lookup=False,
+        holder_policy_mode="discovery",
+        holder_lookup=FakeHolderLookup(error=RuntimeError("rpc unavailable")),
+        rugcheck_client=FakeRugCheckClient(
+            RugCheckResult(
+                mint_address=mint_address,
+                found=True,
+                mint_authority_revoked=True,
+                freeze_authority_revoked=True,
+                top_holder_pct=120.0,
+                provider_status="ok",
+            )
+        ),
+    )
 
     assessment = asyncio.run(scorer.assess_signal(signal))
 

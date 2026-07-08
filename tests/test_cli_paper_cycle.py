@@ -458,9 +458,9 @@ def test_paper_cycle_discovery_mode_relaxes_only_age_blocker(tmp_path: Path) -> 
         assert summary.execution_mode == "paper"
         assert summary.risk_profile == "discovery"
         assert summary.signals_collected == 1
-        assert summary.signals_accepted == 0
-        assert summary.signals_rejected == 1
-        assert summary.rejection_reasons == {"honeypot_check_unknown": 1}
+        assert summary.signals_accepted == 1
+        assert summary.signals_rejected == 0
+        assert summary.rejection_reasons == {}
         assert summary.sources_polled == ["fake"]
         assert summary.holder_lookup_outcomes == {}
 

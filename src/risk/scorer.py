@@ -1719,9 +1719,20 @@ def build_token_from_signal(signal: Signal) -> TokenInfo:
             "devHoldingPct",
             "devHoldingPercent",
         ),
-        mint_authority_revoked=_first_bool(candidates, "mint_authority_revoked", "mintAuthorityRevoked"),
-        freeze_authority_revoked=_first_bool(candidates, "freeze_authority_revoked", "freezeAuthorityRevoked"),
+        mint_authority_revoked=_authority_revoked_from_candidates(candidates, "mint"),
+        freeze_authority_revoked=_authority_revoked_from_candidates(candidates, "freeze"),
     )
+
+
+def _authority_revoked_from_candidates(candidates: list[Mapping[str, object]], authority_name: str) -> bool | None:
+    revoked = _first_bool(candidates, f"{authority_name}_authority_revoked", f"{authority_name}AuthorityRevoked")
+    if revoked is not None:
+        return revoked
+
+    active = _first_bool(candidates, f"{authority_name}_authority", f"{authority_name}Authority", f"is_{authority_name}able")
+    if active is not None:
+        return not active
+    return None
 
 
 def _created_at_from_signal(signal: Signal, candidates: list[Mapping[str, object]]) -> datetime | None:
