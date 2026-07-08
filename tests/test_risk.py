@@ -1265,6 +1265,222 @@ def test_authority_unknown_warning_does_not_override_creator_or_buyer_fail() -> 
     assert signal.payload["authority_policy"]["authority_policy_state"] == "unknown_conservative"
 
 
+def test_strict_mode_honeypot_unknown_stays_conservative() -> None:
+    signal = Signal(
+        source=SignalSource.PUMP_FUN,
+        type=SignalType.NEW_POOL,
+        mint_address="strict-honeypot-unknown-mint",
+        payload={
+            "vSolInBondingCurve": 30.1,
+            "uniqueBuyers": 30,
+            "top10HolderPct": 30.0,
+            "creatorHoldingPct": 5.0,
+            "mintAuthorityRevoked": True,
+            "freezeAuthorityRevoked": True,
+            "createdAt": datetime.now(UTC).isoformat(),
+        },
+    )
+    scorer = DiscoveryRiskScorer(config=RiskConfig(), enable_holder_lookup=False, holder_policy_mode="strict")
+
+    assessment = asyncio.run(scorer.assess_signal(signal))
+
+    assert assessment.honeypot_check == CheckResult.UNKNOWN
+    assert signal.payload["honeypot_policy"]["honeypot_policy_state"] == "unknown_conservative"
+
+
+def test_discovery_mode_honeypot_unknown_becomes_warning_when_other_checks_clean() -> None:
+    signal = Signal(
+        source=SignalSource.PUMP_FUN,
+        type=SignalType.NEW_POOL,
+        mint_address="discovery-honeypot-warning-mint",
+        payload={
+            "vSolInBondingCurve": 30.1,
+            "uniqueBuyers": 30,
+            "top10HolderPct": 30.0,
+            "creatorHoldingPct": 5.0,
+            "mintAuthorityRevoked": True,
+            "freezeAuthorityRevoked": True,
+            "createdAt": datetime.now(UTC).isoformat(),
+        },
+    )
+    scorer = DiscoveryRiskScorer(config=RiskConfig(), enable_holder_lookup=False, holder_policy_mode="discovery")
+
+    assessment = asyncio.run(scorer.assess_signal(signal))
+
+    assert assessment.honeypot_check == CheckResult.PASS
+    assert signal.payload["honeypot_policy"]["honeypot_policy_state"] == "unknown_warning"
+
+
+def test_known_honeypot_still_fails_in_all_modes() -> None:
+    mint_address = "So11111111111111111111111111111111111111112"
+    signal = Signal(
+        source=SignalSource.PUMP_FUN,
+        type=SignalType.NEW_POOL,
+        mint_address=mint_address,
+        payload={
+            "vSolInBondingCurve": 30.1,
+            "uniqueBuyers": 30,
+            "top10HolderPct": 30.0,
+            "creatorHoldingPct": 5.0,
+            "mintAuthorityRevoked": True,
+            "freezeAuthorityRevoked": True,
+            "createdAt": datetime.now(UTC).isoformat(),
+        },
+    )
+    scorer = DiscoveryRiskScorer(
+        config=RiskConfig(),
+        enable_holder_lookup=False,
+        holder_policy_mode="discovery",
+        rugcheck_client=FakeRugCheckClient(
+            RugCheckResult(
+                mint_address=mint_address,
+                found=True,
+                mint_authority_revoked=True,
+                freeze_authority_revoked=True,
+                top_holder_pct=30.0,
+                is_honeypot=True,
+                provider_status="ok",
+            )
+        ),
+    )
+
+    assessment = asyncio.run(scorer.assess_signal(signal))
+
+    assert assessment.honeypot_check == CheckResult.FAIL
+    assert signal.payload["honeypot_policy"]["honeypot_policy_state"] == "fail"
+
+
+def test_known_safe_honeypot_result_passes_this_check() -> None:
+    mint_address = "So11111111111111111111111111111111111111112"
+    signal = Signal(
+        source=SignalSource.PUMP_FUN,
+        type=SignalType.NEW_POOL,
+        mint_address=mint_address,
+        payload={
+            "vSolInBondingCurve": 30.1,
+            "uniqueBuyers": 30,
+            "top10HolderPct": 30.0,
+            "creatorHoldingPct": 5.0,
+            "mintAuthorityRevoked": True,
+            "freezeAuthorityRevoked": True,
+            "createdAt": datetime.now(UTC).isoformat(),
+        },
+    )
+    scorer = DiscoveryRiskScorer(
+        config=RiskConfig(),
+        enable_holder_lookup=False,
+        holder_policy_mode="discovery",
+        rugcheck_client=FakeRugCheckClient(
+            RugCheckResult(
+                mint_address=mint_address,
+                found=True,
+                mint_authority_revoked=True,
+                freeze_authority_revoked=True,
+                top_holder_pct=30.0,
+                is_honeypot=False,
+                provider_status="ok",
+            )
+        ),
+    )
+
+    assessment = asyncio.run(scorer.assess_signal(signal))
+
+    assert assessment.honeypot_check == CheckResult.PASS
+    assert signal.payload["honeypot_policy"]["honeypot_policy_state"] == "pass"
+
+
+def test_honeypot_unknown_warning_does_not_override_holder_fail() -> None:
+    signal = Signal(
+        source=SignalSource.PUMP_FUN,
+        type=SignalType.NEW_POOL,
+        mint_address="honeypot-warning-holder-fail-mint",
+        payload={
+            "vSolInBondingCurve": 30.1,
+            "uniqueBuyers": 30,
+            "top10HolderPct": 90.0,
+            "creatorHoldingPct": 5.0,
+            "mintAuthorityRevoked": True,
+            "freezeAuthorityRevoked": True,
+            "createdAt": datetime.now(UTC).isoformat(),
+            "risk_assessment": RiskAssessment(
+                token=TokenInfo(
+                    mint_address="honeypot-warning-holder-fail-mint",
+                    liquidity_sol=30.1,
+                    top10_holder_pct=90.0,
+                    creator_holding_pct=5.0,
+                    mint_authority_revoked=True,
+                    freeze_authority_revoked=True,
+                    created_at=datetime.now(UTC),
+                ),
+                liquidity_check=CheckResult.PASS,
+                top10_holder_check=CheckResult.FAIL,
+                creator_holding_check=CheckResult.PASS,
+                age_check=CheckResult.PASS,
+                unique_buyers_check=CheckResult.PASS,
+                mint_authority_check=CheckResult.PASS,
+                freeze_authority_check=CheckResult.PASS,
+                honeypot_check=CheckResult.UNKNOWN,
+                score=60.0,
+                reasons=["top10_holder_check failed", "honeypot_check unknown"],
+            ),
+        },
+    )
+    scorer = DiscoveryRiskScorer(config=RiskConfig(), enable_holder_lookup=False, holder_policy_mode="discovery")
+
+    assessment = asyncio.run(scorer.assess_signal(signal))
+
+    assert assessment.honeypot_check == CheckResult.UNKNOWN
+    assert signal.payload["honeypot_policy"]["honeypot_policy_state"] == "unknown_conservative"
+
+
+def test_honeypot_unknown_warning_does_not_override_liquidity_unknown() -> None:
+    signal = Signal(
+        source=SignalSource.PUMP_FUN,
+        type=SignalType.NEW_POOL,
+        mint_address="honeypot-warning-liquidity-unknown-mint",
+        payload={
+            "uniqueBuyers": 30,
+            "top10HolderPct": 30.0,
+            "creatorHoldingPct": 5.0,
+            "mintAuthorityRevoked": True,
+            "freezeAuthorityRevoked": True,
+            "createdAt": datetime.now(UTC).isoformat(),
+        },
+    )
+    scorer = DiscoveryRiskScorer(config=RiskConfig(), enable_holder_lookup=False, holder_policy_mode="discovery")
+
+    assessment = asyncio.run(scorer.assess_signal(signal))
+
+    assert assessment.liquidity_check == CheckResult.UNKNOWN
+    assert assessment.honeypot_check == CheckResult.UNKNOWN
+    assert signal.payload["honeypot_policy"]["honeypot_policy_state"] == "unknown_conservative"
+
+
+def test_honeypot_unknown_warning_does_not_override_creator_buyer_or_authority_fail() -> None:
+    signal = Signal(
+        source=SignalSource.PUMP_FUN,
+        type=SignalType.NEW_POOL,
+        mint_address="honeypot-warning-multi-fail-mint",
+        payload={
+            "vSolInBondingCurve": 30.1,
+            "uniqueBuyers": 3,
+            "top10HolderPct": 30.0,
+            "creatorHoldingPct": 25.0,
+            "mintAuthorityRevoked": False,
+            "freezeAuthorityRevoked": True,
+            "createdAt": datetime.now(UTC).isoformat(),
+        },
+    )
+    scorer = DiscoveryRiskScorer(config=RiskConfig(), enable_holder_lookup=False, holder_policy_mode="discovery")
+
+    assessment = asyncio.run(scorer.assess_signal(signal))
+
+    assert assessment.creator_holding_check == CheckResult.FAIL
+    assert assessment.unique_buyers_check == CheckResult.FAIL
+    assert assessment.mint_authority_check == CheckResult.FAIL
+    assert signal.payload["honeypot_policy"]["honeypot_policy_state"] == "unknown_conservative"
+
+
 def test_strict_mode_keeps_seconds_old_pumpfun_launch_as_age_fail_with_fresh_seconds_state() -> None:
     signal = Signal(
         source=SignalSource.PUMP_FUN,

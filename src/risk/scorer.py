@@ -172,6 +172,7 @@ class DiscoveryRiskScorer:
         assessment = _apply_rugcheck_assessment(assessment, rugcheck_result)
         honeypot_result = await self._simulate_honeypot(signal, rugcheck_result)
         assessment = _apply_honeypot_simulation_assessment(assessment, honeypot_result)
+        signal.payload["honeypot_diagnostics"] = _build_honeypot_diagnostics(rugcheck_result, honeypot_result, assessment)
         assessment = _apply_funding_assessment(assessment, funding_result, missing_provider=missing_provider)
         signal.payload["authority_diagnostics"] = _build_authority_diagnostics(signal.payload, token, rugcheck_result)
         signal.payload["unique_buyers_diagnostics"] = _build_unique_buyers_diagnostics(signal.payload, token, funding_result)
@@ -220,6 +221,18 @@ class DiscoveryRiskScorer:
             authority_diagnostics=signal.payload["authority_diagnostics"],
         )
         signal.payload["authority_policy"] = authority_policy
+        assessment, honeypot_policy = _apply_honeypot_policy_assessment(
+            assessment,
+            signal,
+            policy_mode=self._holder_policy_mode,
+            holder_policy=holder_policy,
+            age_policy=age_policy,
+            creator_policy=creator_policy,
+            unique_buyers_policy=unique_buyers_policy,
+            authority_policy=authority_policy,
+            honeypot_diagnostics=signal.payload["honeypot_diagnostics"],
+        )
+        signal.payload["honeypot_policy"] = honeypot_policy
         self._record_lookup_outcome(lookup_status, assessment)
         self._record_rugcheck_outcome(rugcheck_result, assessment)
         self._record_honeypot_simulation_outcome(honeypot_result, assessment)
@@ -700,6 +713,48 @@ def _build_authority_diagnostics(
         "freeze_authority_state": freeze_state,
         "authority_source": source,
         "authority_unknown_reason": unknown_reason,
+    }
+
+
+def _build_honeypot_diagnostics(
+    rugcheck_result: RugCheckResult | None,
+    honeypot_result: HoneypotSimulationResult | None,
+    assessment: RiskAssessment,
+) -> dict[str, object]:
+    if honeypot_result is not None:
+        state = "pass" if honeypot_result.ok and honeypot_result.sell_simulation_passed else "fail" if honeypot_result.ok else "unknown"
+        unknown_reason = None if honeypot_result.ok else honeypot_result.provider_error or honeypot_result.blocked_reason or "simulation unavailable"
+        return {
+            "honeypot_state": state,
+            "honeypot_source": f"simulation:{honeypot_result.backend}",
+            "honeypot_unknown_reason": unknown_reason,
+        }
+
+    if rugcheck_result is not None and rugcheck_result.provider_status == "ok" and rugcheck_result.found and rugcheck_result.is_honeypot is not None:
+        return {
+            "honeypot_state": "fail" if rugcheck_result.is_honeypot else "pass",
+            "honeypot_source": "rugcheck",
+            "honeypot_unknown_reason": None,
+        }
+
+    if rugcheck_result is not None and rugcheck_result.provider_status not in {"ok", "unknown"}:
+        return {
+            "honeypot_state": "unknown",
+            "honeypot_source": "rugcheck",
+            "honeypot_unknown_reason": f"rugcheck_status={rugcheck_result.provider_status}",
+        }
+
+    if assessment.honeypot_check == CheckResult.UNKNOWN:
+        return {
+            "honeypot_state": "unknown",
+            "honeypot_source": "none",
+            "honeypot_unknown_reason": "no RugCheck honeypot verdict or simulation result available",
+        }
+
+    return {
+        "honeypot_state": "pass" if assessment.honeypot_check == CheckResult.PASS else "fail",
+        "honeypot_source": "assessment",
+        "honeypot_unknown_reason": None,
     }
 
 
@@ -1273,6 +1328,75 @@ def _apply_authority_policy_assessment(
         "authority_policy_state": "unknown_conservative",
         "authority_policy_reason": "authority state is unknown and discovery-mode warning conditions were not met",
         "authority_policy_context_used": context_used,
+    }
+
+
+def _apply_honeypot_policy_assessment(
+    assessment: RiskAssessment,
+    signal: Signal,
+    *,
+    policy_mode: str,
+    holder_policy: Mapping[str, object],
+    age_policy: Mapping[str, object],
+    creator_policy: Mapping[str, object],
+    unique_buyers_policy: Mapping[str, object],
+    authority_policy: Mapping[str, object],
+    honeypot_diagnostics: Mapping[str, object],
+) -> tuple[RiskAssessment, dict[str, object]]:
+    context_used = False
+
+    if assessment.honeypot_check == CheckResult.PASS:
+        return assessment, {
+            "honeypot_policy_state": "pass",
+            "honeypot_policy_reason": "honeypot check passed",
+            "honeypot_policy_context_used": context_used,
+        }
+
+    if assessment.honeypot_check == CheckResult.FAIL:
+        return assessment, {
+            "honeypot_policy_state": "fail",
+            "honeypot_policy_reason": "honeypot or blocked sell simulation detected",
+            "honeypot_policy_context_used": context_used,
+        }
+
+    if policy_mode != "discovery":
+        return assessment, {
+            "honeypot_policy_state": "unknown_conservative",
+            "honeypot_policy_reason": "strict mode preserves conservative rejection for unknown honeypot state",
+            "honeypot_policy_context_used": context_used,
+        }
+
+    stage_hint = _signal_stage_hint(signal)
+    launch_like = stage_hint in {"new_pool", "pump"}
+    age_safe = age_policy.get("age_policy_state") in {"age_pass", "immature_warning"}
+    holder_safe = holder_policy.get("holder_policy_state") in {"pass", "fresh_launch_warning"}
+    creator_safe = creator_policy.get("creator_policy_state") in {"pass", "unknown_warning"}
+    buyer_safe = unique_buyers_policy.get("unique_buyers_policy_state") in {"pass", "unknown_warning"}
+    authority_safe = authority_policy.get("authority_policy_state") in {"pass", "unknown_warning"}
+    liquidity_safe = assessment.liquidity_check == CheckResult.PASS
+    missing_metadata = isinstance(honeypot_diagnostics.get("honeypot_unknown_reason"), str) and honeypot_diagnostics.get("honeypot_unknown_reason") != ""
+
+    if launch_like and age_safe and holder_safe and creator_safe and buyer_safe and authority_safe and liquidity_safe and missing_metadata:
+        context_used = True
+        updated_reasons = [reason for reason in assessment.reasons if reason != "honeypot_check unknown"]
+        updated_score = assessment.score + CHECK_WEIGHTS["honeypot_check"]
+        updated_assessment = assessment.model_copy(
+            update={
+                "honeypot_check": CheckResult.PASS,
+                "score": updated_score,
+                "reasons": updated_reasons,
+            }
+        )
+        return updated_assessment, {
+            "honeypot_policy_state": "unknown_warning",
+            "honeypot_policy_reason": "discovery-mode launch-stage token allowed past unknown honeypot state because other hard safety checks were clean enough",
+            "honeypot_policy_context_used": context_used,
+        }
+
+    return assessment, {
+        "honeypot_policy_state": "unknown_conservative",
+        "honeypot_policy_reason": "honeypot state is unknown and discovery-mode warning conditions were not met",
+        "honeypot_policy_context_used": context_used,
     }
 
 
