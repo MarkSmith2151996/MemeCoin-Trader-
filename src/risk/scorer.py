@@ -19,7 +19,7 @@ from src.core.models import CheckResult, RiskAssessment, Signal, SignalSource, S
 from src.risk.contract_audit import check_freeze_authority, check_honeypot, check_mint_authority
 from src.risk.funding_analysis import FundingAnalysisResult, FundingTransferProvider, analyze_buyer_funding
 from src.risk.funding_provider import HeliusFundingProvider
-from src.risk.holders import check_creator_holding, check_top10_holders, filtered_holder_accounts
+from src.risk.holders import analyze_holder_accounts, check_creator_holding, check_top10_holders
 from src.risk.honeypot_simulation import (
     HoneypotSimulationAdapter,
     HoneypotSimulationRequest,
@@ -49,6 +49,11 @@ class HolderLookupResult:
     top10_holder_pct: float | None = None
     creator_holding_pct: float | None = None
     holder_count: int | None = None
+    raw_account_count: int = 0
+    filtered_account_count: int = 0
+    retained_account_count: int = 0
+    top_filtered_accounts: tuple[dict[str, str], ...] = ()
+    top_retained_accounts: tuple[dict[str, str], ...] = ()
 
 
 class ReadOnlyHolderLookup:
@@ -64,6 +69,14 @@ class ReadOnlyHolderLookup:
         self._rpc_client_factory = rpc_client_factory or SolanaRpcClient
 
     async def fetch(self, mint_address: str) -> HolderLookupResult | None:
+        return await self.fetch_with_context(mint_address)
+
+    async def fetch_with_context(
+        self,
+        mint_address: str,
+        *,
+        extra_excluded_addresses: set[str] | None = None,
+    ) -> HolderLookupResult | None:
         if not mint_address.strip():
             return HolderLookupResult(status="holder_lookup_skipped_missing_mint")
         if not self._rpc_url:
@@ -85,7 +98,10 @@ class ReadOnlyHolderLookup:
             return HolderLookupResult(status="holder_lookup_no_largest_accounts")
 
         top10_total = 0.0
-        filtered_accounts = filtered_holder_accounts(largest_accounts)
+        filtered_accounts, account_diagnostics = analyze_holder_accounts(
+            largest_accounts,
+            extra_excluded_addresses=extra_excluded_addresses,
+        )
         for account in filtered_accounts[:10]:
             if not isinstance(account, Mapping):
                 continue
@@ -99,6 +115,11 @@ class ReadOnlyHolderLookup:
         return HolderLookupResult(
             status="holder_lookup_succeeded",
             top10_holder_pct=round((top10_total / supply) * 100, 6),
+            raw_account_count=int(account_diagnostics["raw_account_count"]),
+            filtered_account_count=int(account_diagnostics["filtered_account_count"]),
+            retained_account_count=int(account_diagnostics["retained_account_count"]),
+            top_filtered_accounts=tuple(account_diagnostics["top_filtered_accounts"]),
+            top_retained_accounts=tuple(account_diagnostics["top_retained_accounts"]),
         )
 
 
@@ -142,7 +163,7 @@ class DiscoveryRiskScorer:
         funding_result, missing_provider = funding_response
         if rugcheck_result is not None or funding_result is not None:
             self._lookup_outcomes["parallel_prechecks_used"] += 1
-        token, lookup_status, holder_diagnostics = await self._enrich_token(token, rugcheck_result)
+        token, lookup_status, holder_diagnostics = await self._enrich_token(token, rugcheck_result, signal.payload)
         signal.payload["holder_diagnostics"] = holder_diagnostics
         signal.payload["creator_diagnostics"] = _build_creator_diagnostics(signal.payload, token, rugcheck_result)
         token = _apply_funding_token_fields(token, funding_result)
@@ -171,9 +192,11 @@ class DiscoveryRiskScorer:
         self,
         token: TokenInfo,
         rugcheck_result: RugCheckResult | None,
+        payload: Mapping[str, object],
     ) -> tuple[TokenInfo, str | None, dict[str, object]]:
         rugcheck_top10_holder_pct = _rugcheck_top10_holder_pct(rugcheck_result)
         token = _apply_rugcheck_token_fields(token, rugcheck_result)
+        bonding_curve_addresses = _extract_bonding_curve_addresses(payload)
         holder_diagnostics = {
             "rugcheck_top10_holder_pct": rugcheck_top10_holder_pct,
             "local_filtered_top10_holder_pct": None,
@@ -181,6 +204,12 @@ class DiscoveryRiskScorer:
             "top10_holder_source": "signal_payload" if token.top10_holder_pct is not None else "unknown",
             "local_holder_lookup_attempted": False,
             "local_holder_lookup_status": None,
+            "local_holder_raw_account_count": 0,
+            "local_holder_filtered_account_count": 0,
+            "local_holder_retained_account_count": 0,
+            "local_holder_top_filtered_accounts": (),
+            "local_holder_top_retained_accounts": (),
+            "bonding_curve_addresses": sorted(bonding_curve_addresses),
         }
 
         if token.top10_holder_pct is not None:
@@ -190,14 +219,17 @@ class DiscoveryRiskScorer:
             holder_diagnostics["selected_top10_holder_pct"] = rugcheck_top10_holder_pct
             if rugcheck_top10_holder_pct > self._config.max_top10_holder_pct:
                 holder_diagnostics["local_holder_lookup_attempted"] = True
-                lookup_result = await self._fetch_holder_lookup(token.mint_address)
+                lookup_result = await self._fetch_holder_lookup(token.mint_address, extra_excluded_addresses=bonding_curve_addresses)
                 lookup_status = "holder_lookup_override_failed_provider" if lookup_result is None else lookup_result.status
                 holder_diagnostics["local_holder_lookup_status"] = lookup_status
                 if lookup_result is not None and lookup_result.top10_holder_pct is not None:
+                    _apply_holder_lookup_diagnostics(holder_diagnostics, lookup_result)
                     holder_diagnostics["local_filtered_top10_holder_pct"] = lookup_result.top10_holder_pct
                     holder_diagnostics["selected_top10_holder_pct"] = lookup_result.top10_holder_pct
                     holder_diagnostics["top10_holder_source"] = "local_filtered_override"
                     return _apply_holder_lookup_fields(token, lookup_result), "holder_lookup_local_override_succeeded", holder_diagnostics
+                if lookup_result is not None:
+                    _apply_holder_lookup_diagnostics(holder_diagnostics, lookup_result)
                 holder_diagnostics["top10_holder_source"] = "rugcheck_no_local_override"
                 return token.model_copy(update={"top10_holder_pct": rugcheck_top10_holder_pct}), lookup_status, holder_diagnostics
 
@@ -208,11 +240,12 @@ class DiscoveryRiskScorer:
             return token, None, holder_diagnostics
 
         holder_diagnostics["local_holder_lookup_attempted"] = True
-        lookup_result = await self._fetch_holder_lookup(token.mint_address)
+        lookup_result = await self._fetch_holder_lookup(token.mint_address, extra_excluded_addresses=bonding_curve_addresses)
         lookup_status = "holder_lookup_failed_provider" if lookup_result is None else lookup_result.status
         holder_diagnostics["local_holder_lookup_status"] = lookup_status
         if lookup_result is None:
             return token, lookup_status, holder_diagnostics
+        _apply_holder_lookup_diagnostics(holder_diagnostics, lookup_result)
 
         if lookup_result.status != "holder_lookup_succeeded":
             return token, lookup_result.status, holder_diagnostics
@@ -222,13 +255,26 @@ class DiscoveryRiskScorer:
         holder_diagnostics["top10_holder_source"] = "local_filtered_lookup"
         return _apply_holder_lookup_fields(token, lookup_result), "holder_lookup_succeeded", holder_diagnostics
 
-    async def _fetch_holder_lookup(self, mint_address: str) -> HolderLookupResult | None:
-        if mint_address not in self._cache:
+    async def _fetch_holder_lookup(
+        self,
+        mint_address: str,
+        *,
+        extra_excluded_addresses: set[str] | None = None,
+    ) -> HolderLookupResult | None:
+        cache_key = mint_address if not extra_excluded_addresses else f"{mint_address}|{'|'.join(sorted(extra_excluded_addresses))}"
+        if cache_key not in self._cache:
             try:
-                self._cache[mint_address] = await self._holder_lookup.fetch(mint_address)
+                fetch_with_context = getattr(self._holder_lookup, "fetch_with_context", None)
+                if callable(fetch_with_context):
+                    self._cache[cache_key] = await fetch_with_context(
+                        mint_address,
+                        extra_excluded_addresses=extra_excluded_addresses,
+                    )
+                else:
+                    self._cache[cache_key] = await self._holder_lookup.fetch(mint_address)
             except Exception:
-                self._cache[mint_address] = HolderLookupResult(status="holder_lookup_failed_provider")
-        return self._cache[mint_address]
+                self._cache[cache_key] = HolderLookupResult(status="holder_lookup_failed_provider")
+        return self._cache[cache_key]
 
     async def _enrich_liquidity(self, token: TokenInfo) -> tuple[TokenInfo, dict[str, object]]:
         payload_liquidity_usd = None
@@ -613,6 +659,40 @@ def _coerce_float_value(value: object) -> float | None:
         except ValueError:
             return None
     return None
+
+
+def _extract_bonding_curve_addresses(payload: Mapping[str, object]) -> set[str]:
+    addresses: set[str] = set()
+    candidates = [payload]
+    for field_name in ("token", "coin"):
+        nested = payload.get(field_name)
+        if isinstance(nested, Mapping):
+            candidates.append(nested)
+    for candidate in candidates:
+        for field_name in (
+            "bondingCurve",
+            "bondingCurveKey",
+            "associatedBondingCurve",
+            "associatedBondingCurveKey",
+            "bonding_curve",
+            "associated_bonding_curve",
+        ):
+            value = candidate.get(field_name)
+            if isinstance(value, str) and value.strip():
+                addresses.add(value.strip())
+    return addresses
+
+
+def _apply_holder_lookup_diagnostics(holder_diagnostics: dict[str, object], lookup_result: HolderLookupResult) -> None:
+    holder_diagnostics.update(
+        {
+            "local_holder_raw_account_count": lookup_result.raw_account_count,
+            "local_holder_filtered_account_count": lookup_result.filtered_account_count,
+            "local_holder_retained_account_count": lookup_result.retained_account_count,
+            "local_holder_top_filtered_accounts": lookup_result.top_filtered_accounts,
+            "local_holder_top_retained_accounts": lookup_result.top_retained_accounts,
+        }
+    )
 
 
 def _liquidity_unknown_reason(probe_result: object) -> str:

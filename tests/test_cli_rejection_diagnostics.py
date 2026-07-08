@@ -71,6 +71,12 @@ def _build_rejected_signal() -> Signal:
                 "local_filtered_top10_holder_pct": 42.0,
                 "selected_top10_holder_pct": 42.0,
                 "top10_holder_source": "local_filtered_override",
+                "bonding_curve_addresses": ["BondingCurve111111111111111111111111111111"],
+                "local_holder_raw_account_count": 2,
+                "local_holder_filtered_account_count": 1,
+                "local_holder_retained_account_count": 1,
+                "local_holder_top_filtered_accounts": [{"address": "BondingCurve111111111111111111111111111111", "classification": "bonding_curve_artifact"}],
+                "local_holder_top_retained_accounts": [{"address": "Holder11111111111111111111111111111111111", "classification": "retained"}],
             },
             "creator_diagnostics": {
                 "creator_holding_pct": None,
@@ -130,6 +136,8 @@ def test_run_bounded_paper_cycle_collects_per_token_rejection_diagnostics(tmp_pa
         assert diagnostic["selected_top10_holder_pct"] == 42.0
         assert diagnostic["top10_holder_source"] == "local_filtered_override"
         assert diagnostic["top10_holder_pct"] == 42.0
+        assert diagnostic["local_holder_filtered_account_count"] == 1
+        assert diagnostic["local_holder_top_filtered_accounts"][0]["classification"] == "bonding_curve_artifact"
         assert diagnostic["creator_holding_source"] == "unknown"
         assert diagnostic["creator_holding_state"] == "unknown"
         assert diagnostic["holder_policy_state"] == "fresh_launch_warning"
@@ -199,6 +207,7 @@ def test_rejection_report_and_cli_lines_stay_safe_with_missing_fields() -> None:
     assert "liquidity_source" in report
     assert "liquidity_data_state" in report
     assert "fallback_attempted" in report
+    assert "local_holder_top_filtered_accounts" in report
     assert "do-not-print" not in report
     assert "WalletSecret111" not in report
     assert "raw_data" not in report

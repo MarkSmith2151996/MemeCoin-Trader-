@@ -936,6 +936,130 @@ def test_rugcheck_failing_holder_uses_local_filtered_override_when_local_passes(
     assert scorer.diagnostics()["holder_lookup_local_override_succeeded"] == 1
 
 
+def test_local_holder_lookup_excludes_pumpfun_bonding_curve_artifact() -> None:
+    mint_address = "So11111111111111111111111111111111111111112"
+    bonding_curve_address = "BondingCurve111111111111111111111111111111"
+    rpc_client = FakeRpcClient(
+        {
+            "getTokenSupply": {"value": {"uiAmount": 100.0}},
+            "getTokenLargestAccounts": {
+                "value": [
+                    {
+                        "address": bonding_curve_address,
+                        "owner": "owner-curve",
+                        "uiAmount": 100.0,
+                    },
+                    {
+                        "address": "holder-1",
+                        "owner": "owner-1",
+                        "uiAmount": 10.0,
+                    },
+                ]
+            },
+        }
+    )
+    lookup = ReadOnlyHolderLookup(
+        rpc_url="https://example.invalid",
+        rpc_client_factory=lambda _url, _timeout: rpc_client,
+    )
+    signal = Signal(
+        source=SignalSource.PUMP_FUN,
+        type=SignalType.NEW_POOL,
+        mint_address=mint_address,
+        payload={
+            "vSolInBondingCurve": 30.1,
+            "uniqueBuyers": 25,
+            "creatorHoldingPct": 5.0,
+            "mintAuthorityRevoked": True,
+            "freezeAuthorityRevoked": True,
+            "createdAt": (datetime.now(UTC) - timedelta(minutes=10)).isoformat(),
+            "bondingCurveKey": bonding_curve_address,
+        },
+    )
+    scorer = DiscoveryRiskScorer(
+        config=RiskConfig(min_age_minutes=0),
+        holder_lookup=lookup,
+        rugcheck_client=FakeRugCheckClient(
+            RugCheckResult(
+                mint_address=mint_address,
+                found=True,
+                mint_authority_revoked=True,
+                freeze_authority_revoked=True,
+                top_holder_pct=100.0,
+                provider_status="ok",
+            )
+        ),
+        enable_holder_lookup=False,
+    )
+
+    assessment = asyncio.run(scorer.assess_signal(signal))
+
+    assert assessment.top10_holder_check == CheckResult.PASS
+    diagnostics = signal.payload["holder_diagnostics"]
+    assert diagnostics["local_filtered_top10_holder_pct"] == 10.0
+    assert diagnostics["top10_holder_source"] == "local_filtered_override"
+    assert diagnostics["local_holder_filtered_account_count"] == 1
+    assert diagnostics["local_holder_top_filtered_accounts"][0]["classification"] == "bonding_curve_artifact"
+
+
+def test_local_holder_lookup_keeps_user_owned_100pct_hard_fail() -> None:
+    mint_address = "11111111111111111111111111111111"
+    rpc_client = FakeRpcClient(
+        {
+            "getTokenSupply": {"value": {"uiAmount": 100.0}},
+            "getTokenLargestAccounts": {
+                "value": [
+                    {
+                        "address": "user-holder-token-account",
+                        "owner": "real-user-wallet",
+                        "uiAmount": 100.0,
+                    }
+                ]
+            },
+        }
+    )
+    lookup = ReadOnlyHolderLookup(
+        rpc_url="https://example.invalid",
+        rpc_client_factory=lambda _url, _timeout: rpc_client,
+    )
+    signal = Signal(
+        source=SignalSource.PUMP_FUN,
+        type=SignalType.NEW_POOL,
+        mint_address=mint_address,
+        payload={
+            "vSolInBondingCurve": 30.1,
+            "uniqueBuyers": 25,
+            "creatorHoldingPct": 5.0,
+            "mintAuthorityRevoked": True,
+            "freezeAuthorityRevoked": True,
+            "createdAt": (datetime.now(UTC) - timedelta(minutes=10)).isoformat(),
+        },
+    )
+    scorer = DiscoveryRiskScorer(
+        config=RiskConfig(min_age_minutes=0),
+        holder_lookup=lookup,
+        rugcheck_client=FakeRugCheckClient(
+            RugCheckResult(
+                mint_address=mint_address,
+                found=True,
+                mint_authority_revoked=True,
+                freeze_authority_revoked=True,
+                top_holder_pct=100.0,
+                provider_status="ok",
+            )
+        ),
+        enable_holder_lookup=False,
+    )
+
+    assessment = asyncio.run(scorer.assess_signal(signal))
+
+    assert assessment.top10_holder_check == CheckResult.FAIL
+    diagnostics = signal.payload["holder_diagnostics"]
+    assert diagnostics["local_filtered_top10_holder_pct"] == 100.0
+    assert diagnostics["local_holder_filtered_account_count"] == 0
+    assert diagnostics["local_holder_top_retained_accounts"][0]["classification"] == "retained"
+
+
 def test_rugcheck_failing_holder_keeps_local_override_when_local_still_fails() -> None:
     mint_address = "55555555555555555555555555555555"
     signal = Signal(

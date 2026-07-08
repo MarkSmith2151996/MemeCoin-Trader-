@@ -1,6 +1,6 @@
 import asyncio
 
-from src.risk.holders import filtered_holder_accounts, is_non_person_holder
+from src.risk.holders import analyze_holder_accounts, filtered_holder_accounts, is_non_person_holder
 from src.risk.scorer import ReadOnlyHolderLookup
 
 
@@ -47,6 +47,46 @@ def test_filtered_holder_accounts_keeps_normal_wallet_like_holder() -> None:
     filtered = filtered_holder_accounts(accounts)
 
     assert filtered == accounts
+
+
+def test_analyze_holder_accounts_excludes_pumpfun_bonding_curve_address() -> None:
+    accounts = [
+        {
+            "address": "bonding-curve-account",
+            "owner": "wallet-owner",
+            "uiAmount": 100.0,
+        },
+        {
+            "address": "holder-1",
+            "owner": "owner-1",
+            "uiAmount": 5.0,
+        },
+    ]
+
+    filtered, diagnostics = analyze_holder_accounts(
+        accounts,
+        extra_excluded_addresses={"bonding-curve-account"},
+    )
+
+    assert [account["address"] for account in filtered] == ["holder-1"]
+    assert diagnostics["filtered_account_count"] == 1
+    assert diagnostics["top_filtered_accounts"][0]["classification"] == "bonding_curve_artifact"
+
+
+def test_analyze_holder_accounts_keeps_user_wallet_with_100pct_holding() -> None:
+    accounts = [
+        {
+            "address": "user-wallet-token-account",
+            "owner": "real-user-wallet",
+            "uiAmount": 100.0,
+        }
+    ]
+
+    filtered, diagnostics = analyze_holder_accounts(accounts)
+
+    assert [account["address"] for account in filtered] == ["user-wallet-token-account"]
+    assert diagnostics["filtered_account_count"] == 0
+    assert diagnostics["top_retained_accounts"][0]["classification"] == "retained"
 
 
 def test_read_only_holder_lookup_recalculates_concentration_after_filtering() -> None:
