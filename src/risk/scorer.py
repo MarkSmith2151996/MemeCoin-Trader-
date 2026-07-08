@@ -25,7 +25,7 @@ from src.risk.honeypot_simulation import (
     HoneypotSimulationRequest,
     HoneypotSimulationResult,
 )
-from src.risk.liquidity import check_age, check_liquidity, check_unique_buyers
+from src.risk.liquidity import LiquidityProbe, check_age, check_liquidity, check_unique_buyers
 from src.risk.rugcheck import RugCheckClient, RugCheckResult
 
 
@@ -108,6 +108,7 @@ class DiscoveryRiskScorer:
         rugcheck_client: RugCheckClient | None = None,
         funding_provider: FundingTransferProvider | None = None,
         honeypot_adapter: HoneypotSimulationAdapter | None = None,
+        liquidity_probe: LiquidityProbe | None = None,
         enable_holder_lookup: bool = True,
         enable_funding_analysis: bool = True,
     ) -> None:
@@ -116,15 +117,18 @@ class DiscoveryRiskScorer:
         self._rugcheck_client = rugcheck_client
         self._funding_provider = funding_provider or HeliusFundingProvider()
         self._honeypot_adapter = honeypot_adapter
+        self._liquidity_probe = liquidity_probe or LiquidityProbe()
         self._enable_holder_lookup = enable_holder_lookup
         self._enable_funding_analysis = enable_funding_analysis
         self._cache: dict[str, HolderLookupResult | None] = {}
         self._rugcheck_cache: dict[str, RugCheckResult | None] = {}
         self._funding_cache: dict[str, tuple[FundingAnalysisResult, bool] | None] = {}
+        self._liquidity_cache: dict[str, dict[str, object]] = {}
         self._lookup_outcomes: Counter[str] = Counter()
 
     async def assess_signal(self, signal: Signal) -> RiskAssessment:
         token = build_token_from_signal(signal)
+        token = await self._enrich_liquidity(token)
         rugcheck_result, funding_response = await asyncio.gather(
             self._fetch_rugcheck(token),
             self._analyze_funding(signal, token),
@@ -180,6 +184,22 @@ class DiscoveryRiskScorer:
         if not updates:
             return token, "holder_lookup_succeeded"
         return token.model_copy(update=updates), "holder_lookup_succeeded"
+
+    async def _enrich_liquidity(self, token: TokenInfo) -> TokenInfo:
+        if token.liquidity_sol is not None:
+            return token
+
+        if token.mint_address not in self._liquidity_cache:
+            try:
+                self._liquidity_cache[token.mint_address] = await self._liquidity_probe.get_pool_info(token.mint_address)
+            except Exception:
+                self._liquidity_cache[token.mint_address] = {"pool_liquidity_sol": None, "source": "provider_error"}
+
+        probe_result = self._liquidity_cache[token.mint_address]
+        liquidity_sol = probe_result.get("pool_liquidity_sol") if isinstance(probe_result, Mapping) else None
+        if not isinstance(liquidity_sol, (int, float)):
+            return token
+        return token.model_copy(update={"liquidity_sol": float(liquidity_sol)})
 
     async def _fetch_rugcheck(self, token: TokenInfo) -> RugCheckResult | None:
         if self._rugcheck_client is None:

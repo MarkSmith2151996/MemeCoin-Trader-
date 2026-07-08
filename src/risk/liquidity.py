@@ -1,9 +1,166 @@
-"""Liquidity, age, and buyer checks."""
+"""Liquidity enrichment helpers plus liquidity, age, and buyer checks."""
 
 from __future__ import annotations
 
+from collections.abc import Mapping, Sequence
+
+import httpx
+
 from src.core.config import RiskConfig
 from src.core.models import CheckResult, TokenInfo
+
+DEXSCREENER_TOKEN_URL = "https://api.dexscreener.com/latest/dex/tokens/{mint_address}"
+JUPITER_QUOTE_URL = "https://quote-api.jup.ag/v6/quote"
+SOL_MINT = "So11111111111111111111111111111111111111112"
+
+
+class LiquidityProbe:
+    def __init__(
+        self,
+        *,
+        token_url_template: str = DEXSCREENER_TOKEN_URL,
+        jupiter_quote_url: str = JUPITER_QUOTE_URL,
+        timeout_s: float = 15.0,
+        client: httpx.AsyncClient | None = None,
+    ) -> None:
+        self._token_url_template = token_url_template
+        self._jupiter_quote_url = jupiter_quote_url
+        self._timeout_s = timeout_s
+        self._client = client
+
+    async def get_pool_info(self, mint_address: str) -> dict[str, object]:
+        result = await self._get_dexscreener(mint_address)
+        if result is not None and result.get("pool_liquidity_sol") is not None:
+            return result
+
+        result = await self._get_jupiter_liquidity_probe(mint_address)
+        if result is not None and result.get("pool_liquidity_sol") is not None:
+            return result
+
+        return {"pool_liquidity_sol": None, "source": "none"}
+
+    async def _get_dexscreener(self, mint_address: str) -> dict[str, object] | None:
+        payload = await self._get_json(self._token_url_template.format(mint_address=mint_address))
+        if not isinstance(payload, Mapping):
+            return None
+
+        pairs = payload.get("pairs")
+        if not isinstance(pairs, Sequence) or isinstance(pairs, (str, bytes, bytearray)):
+            return None
+
+        best_liquidity: float | None = None
+        for pair in pairs:
+            if not isinstance(pair, Mapping) or pair.get("chainId") != "solana":
+                continue
+            liquidity_sol = _extract_pair_liquidity_sol(pair)
+            if liquidity_sol is None:
+                continue
+            if best_liquidity is None or liquidity_sol > best_liquidity:
+                best_liquidity = liquidity_sol
+
+        if best_liquidity is None:
+            return None
+        return {"pool_liquidity_sol": best_liquidity, "source": "dexscreener"}
+
+    async def _get_jupiter_liquidity_probe(self, mint_address: str) -> dict[str, object] | None:
+        url = (
+            f"{self._jupiter_quote_url}?inputMint={mint_address}&outputMint={SOL_MINT}"
+            "&amount=1000000&slippageBps=1000"
+        )
+        payload = await self._get_json(url)
+        if not isinstance(payload, Mapping):
+            return None
+
+        route_plan = payload.get("routePlan")
+        if not isinstance(route_plan, Sequence) or isinstance(route_plan, (str, bytes, bytearray)) or not route_plan:
+            return None
+
+        explicit_liquidity = _extract_jupiter_liquidity_sol(payload)
+        if explicit_liquidity is not None:
+            return {"pool_liquidity_sol": explicit_liquidity, "source": "jupiter_fallback"}
+
+        out_amount = _coerce_float(payload.get("outAmount"))
+        if out_amount is None or out_amount <= 0:
+            return None
+        return {"pool_liquidity_sol": round(out_amount / 1_000_000_000, 9), "source": "jupiter_fallback"}
+
+    async def _get_json(self, url: str) -> object | None:
+        client = self._client
+        if client is None:
+            client = httpx.AsyncClient(timeout=self._timeout_s)
+            self._client = client
+        try:
+            response = await client.get(url)
+            response.raise_for_status()
+            return response.json()
+        except (httpx.HTTPError, ValueError):
+            return None
+
+
+def _extract_pair_liquidity_sol(pair: Mapping[str, object]) -> float | None:
+    direct_value = _coerce_float(
+        pair.get("poolLiquiditySol")
+        or pair.get("liquiditySol")
+        or pair.get("solLiquidity")
+    )
+    if direct_value is not None:
+        return direct_value
+
+    liquidity = pair.get("liquidity")
+    if not isinstance(liquidity, Mapping):
+        return None
+
+    base_token = pair.get("baseToken")
+    if isinstance(base_token, Mapping) and base_token.get("address") == SOL_MINT:
+        return _coerce_float(liquidity.get("base"))
+
+    quote_token = pair.get("quoteToken")
+    if isinstance(quote_token, Mapping) and quote_token.get("address") == SOL_MINT:
+        return _coerce_float(liquidity.get("quote"))
+
+    return None
+
+
+def _extract_jupiter_liquidity_sol(payload: Mapping[str, object]) -> float | None:
+    direct_value = _coerce_float(
+        payload.get("poolLiquiditySol")
+        or payload.get("liquiditySol")
+        or payload.get("solLiquidity")
+    )
+    if direct_value is not None:
+        return direct_value
+
+    route_plan = payload.get("routePlan")
+    if not isinstance(route_plan, Sequence) or isinstance(route_plan, (str, bytes, bytearray)):
+        return None
+
+    for step in route_plan:
+        if not isinstance(step, Mapping):
+            continue
+        swap_info = step.get("swapInfo")
+        if not isinstance(swap_info, Mapping):
+            continue
+        liquidity_sol = _coerce_float(
+            swap_info.get("poolLiquiditySol")
+            or swap_info.get("liquiditySol")
+            or swap_info.get("solLiquidity")
+        )
+        if liquidity_sol is not None:
+            return liquidity_sol
+    return None
+
+
+def _coerce_float(value: object) -> float | None:
+    if isinstance(value, bool) or value is None:
+        return None
+    if isinstance(value, (int, float)):
+        return float(value)
+    if isinstance(value, str):
+        try:
+            return float(value)
+        except ValueError:
+            return None
+    return None
 
 
 def check_liquidity(token: TokenInfo, config: RiskConfig) -> CheckResult:
