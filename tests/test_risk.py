@@ -664,6 +664,139 @@ def test_creator_holding_missing_stays_unknown_and_reason_is_recorded() -> None:
     assert diagnostics["creator_holding_unknown_reason"] == "no normalized creator holding in signal payload, RugCheck, or holder lookup"
 
 
+def test_strict_mode_keeps_seconds_old_pumpfun_launch_as_age_fail_with_fresh_seconds_state() -> None:
+    signal = Signal(
+        source=SignalSource.PUMP_FUN,
+        type=SignalType.NEW_POOL,
+        mint_address="strict-fresh-seconds-mint",
+        payload={
+            "vSolInBondingCurve": 30.1,
+            "uniqueBuyers": 25,
+            "top10HolderPct": 30.0,
+            "creatorHoldingPct": 5.0,
+            "mintAuthorityRevoked": True,
+            "freezeAuthorityRevoked": True,
+            "createdAt": datetime.now(UTC).isoformat(),
+        },
+    )
+    scorer = DiscoveryRiskScorer(enable_holder_lookup=False, enable_funding_analysis=False, config=RiskConfig())
+
+    assessment = asyncio.run(scorer.assess_signal(signal))
+
+    assert assessment.age_check == CheckResult.FAIL
+    assert signal.payload["age_policy"]["age_policy_state"] == "fresh_seconds"
+
+
+def test_discovery_mode_allows_seconds_old_pumpfun_launch_as_immature_warning() -> None:
+    signal = Signal(
+        source=SignalSource.PUMP_FUN,
+        type=SignalType.NEW_POOL,
+        mint_address="discovery-immature-warning-mint",
+        payload={
+            "vSolInBondingCurve": 30.1,
+            "uniqueBuyers": 25,
+            "top10HolderPct": 30.0,
+            "creatorHoldingPct": 5.0,
+            "mintAuthorityRevoked": True,
+            "freezeAuthorityRevoked": True,
+            "createdAt": datetime.now(UTC).isoformat(),
+            "risk_assessment": RiskAssessment(
+                token=TokenInfo(
+                    mint_address="discovery-immature-warning-mint",
+                    liquidity_sol=30.1,
+                    top10_holder_pct=30.0,
+                    creator_holding_pct=5.0,
+                    mint_authority_revoked=True,
+                    freeze_authority_revoked=True,
+                    created_at=datetime.now(UTC),
+                ),
+                liquidity_check=CheckResult.PASS,
+                top10_holder_check=CheckResult.PASS,
+                creator_holding_check=CheckResult.PASS,
+                age_check=CheckResult.FAIL,
+                unique_buyers_check=CheckResult.PASS,
+                mint_authority_check=CheckResult.PASS,
+                freeze_authority_check=CheckResult.PASS,
+                honeypot_check=CheckResult.PASS,
+                score=80.0,
+                reasons=["age_check failed"],
+            ),
+        },
+    )
+    scorer = DiscoveryRiskScorer(
+        enable_holder_lookup=False,
+        enable_funding_analysis=False,
+        holder_policy_mode="discovery",
+        config=RiskConfig(),
+    )
+
+    assessment = asyncio.run(scorer.assess_signal(signal))
+
+    assert assessment.age_check == CheckResult.PASS
+    assert signal.payload["age_policy"]["age_policy_state"] == "immature_warning"
+
+
+def test_missing_age_remains_unknown_with_age_policy_unknown() -> None:
+    signal = Signal(
+        source=SignalSource.WHALE_TRACKER,
+        type=SignalType.BUY,
+        mint_address="age-unknown-mint",
+        payload={
+            "liquidity_sol": 30.1,
+            "uniqueBuyers": 25,
+            "top10HolderPct": 30.0,
+            "creatorHoldingPct": 5.0,
+            "mintAuthorityRevoked": True,
+            "freezeAuthorityRevoked": True,
+        },
+    )
+    scorer = DiscoveryRiskScorer(enable_holder_lookup=False, enable_funding_analysis=False, config=RiskConfig(min_age_minutes=5))
+
+    assessment = asyncio.run(scorer.assess_signal(signal))
+
+    assert assessment.age_check == CheckResult.UNKNOWN
+    assert signal.payload["age_policy"]["age_policy_state"] == "age_unknown"
+
+
+def test_discovery_age_warning_does_not_override_holder_fail() -> None:
+    mint_address = "So11111111111111111111111111111111111111112"
+    signal = Signal(
+        source=SignalSource.PUMP_FUN,
+        type=SignalType.NEW_POOL,
+        mint_address=mint_address,
+        payload={
+            "vSolInBondingCurve": 30.1,
+            "uniqueBuyers": 25,
+            "creatorHoldingPct": 5.0,
+            "mintAuthorityRevoked": True,
+            "freezeAuthorityRevoked": True,
+            "createdAt": datetime.now(UTC).isoformat(),
+        },
+    )
+    scorer = DiscoveryRiskScorer(
+        enable_holder_lookup=False,
+        enable_funding_analysis=False,
+        holder_policy_mode="discovery",
+        config=RiskConfig(),
+        holder_lookup=FakeHolderLookup(error=RuntimeError("rpc unavailable")),
+        rugcheck_client=FakeRugCheckClient(
+            RugCheckResult(
+                mint_address=mint_address,
+                found=True,
+                mint_authority_revoked=True,
+                freeze_authority_revoked=True,
+                top_holder_pct=120.0,
+                provider_status="ok",
+            )
+        ),
+    )
+
+    assessment = asyncio.run(scorer.assess_signal(signal))
+
+    assert assessment.age_check == CheckResult.FAIL
+    assert signal.payload["age_policy"]["age_policy_state"] == "fresh_seconds"
+
+
 def test_strict_mode_keeps_high_holder_concentration_as_hard_fail() -> None:
     mint_address = "88888888888888888888888888888888"
     signal = Signal(

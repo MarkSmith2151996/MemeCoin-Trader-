@@ -41,6 +41,7 @@ CHECK_WEIGHTS = {
 }
 FRESH_LAUNCH_HOLDER_WARNING_AGE_MINUTES = 15.0
 FRESH_LAUNCH_HOLDER_WARNING_CAP_PCT = 100.0
+FRESH_LAUNCH_AGE_WARNING_MAX_MINUTES = 1.0
 
 
 @dataclass(slots=True)
@@ -172,13 +173,21 @@ class DiscoveryRiskScorer:
         honeypot_result = await self._simulate_honeypot(signal, rugcheck_result)
         assessment = _apply_honeypot_simulation_assessment(assessment, honeypot_result)
         assessment = _apply_funding_assessment(assessment, funding_result, missing_provider=missing_provider)
-        signal.payload["holder_policy"] = _build_holder_policy_diagnostics(
+        holder_policy = _build_holder_policy_diagnostics(
             signal,
             token,
             assessment,
             holder_diagnostics,
             policy_mode=self._holder_policy_mode,
         )
+        signal.payload["holder_policy"] = holder_policy
+        assessment, age_policy = _apply_age_policy_assessment(
+            assessment,
+            signal,
+            policy_mode=self._holder_policy_mode,
+            holder_policy=holder_policy,
+        )
+        signal.payload["age_policy"] = age_policy
         self._record_lookup_outcome(lookup_status, assessment)
         self._record_rugcheck_outcome(rugcheck_result, assessment)
         self._record_honeypot_simulation_outcome(honeypot_result, assessment)
@@ -787,6 +796,98 @@ def _signal_stage_hint(signal: Signal) -> str:
     if signal.type == SignalType.NEW_POOL:
         return "new_pool"
     return "unknown"
+
+
+def _apply_age_policy_assessment(
+    assessment: RiskAssessment,
+    signal: Signal,
+    *,
+    policy_mode: str,
+    holder_policy: Mapping[str, object],
+) -> tuple[RiskAssessment, dict[str, object]]:
+    token = assessment.token or TokenInfo(mint_address=signal.mint_address)
+    age_minutes = token.age_minutes
+    stage_hint = _signal_stage_hint(signal)
+    context_used = False
+
+    if assessment.age_check == CheckResult.UNKNOWN:
+        return assessment, {
+            "token_age_minutes": age_minutes,
+            "stage_hint": stage_hint,
+            "age_policy_state": "age_unknown",
+            "age_policy_reason": "token age unavailable",
+            "age_policy_context_used": context_used,
+        }
+
+    if assessment.age_check == CheckResult.PASS:
+        return assessment, {
+            "token_age_minutes": age_minutes,
+            "stage_hint": stage_hint,
+            "age_policy_state": "age_pass",
+            "age_policy_reason": "token age passed configured minimum",
+            "age_policy_context_used": context_used,
+        }
+
+    launch_like = stage_hint in {"new_pool", "pump"}
+    seconds_old = age_minutes is not None and age_minutes <= FRESH_LAUNCH_AGE_WARNING_MAX_MINUTES
+    if not launch_like:
+        return assessment, {
+            "token_age_minutes": age_minutes,
+            "stage_hint": stage_hint,
+            "age_policy_state": "age_fail_old",
+            "age_policy_reason": "token failed age check outside launch-stage context",
+            "age_policy_context_used": context_used,
+        }
+
+    if not seconds_old:
+        return assessment, {
+            "token_age_minutes": age_minutes,
+            "stage_hint": stage_hint,
+            "age_policy_state": "age_fail_old",
+            "age_policy_reason": "token is newer than minimum age but no longer seconds-old for launch-stage warning",
+            "age_policy_context_used": context_used,
+        }
+
+    if policy_mode != "discovery":
+        return assessment, {
+            "token_age_minutes": age_minutes,
+            "stage_hint": stage_hint,
+            "age_policy_state": "fresh_seconds",
+            "age_policy_reason": "strict mode preserves minimum age for seconds-old launch",
+            "age_policy_context_used": context_used,
+        }
+
+    holder_safe = holder_policy.get("holder_policy_state") in {"pass", "fresh_launch_warning"}
+    creator_safe = assessment.creator_holding_check != CheckResult.FAIL
+    liquidity_safe = assessment.liquidity_check == CheckResult.PASS
+    authority_safe = assessment.mint_authority_check != CheckResult.FAIL and assessment.freeze_authority_check != CheckResult.FAIL
+    honeypot_safe = assessment.honeypot_check != CheckResult.FAIL
+    if holder_safe and creator_safe and liquidity_safe and authority_safe and honeypot_safe:
+        context_used = True
+        updated_reasons = [reason for reason in assessment.reasons if reason != "age_check failed"]
+        updated_score = assessment.score + CHECK_WEIGHTS["age_check"]
+        updated_assessment = assessment.model_copy(
+            update={
+                "age_check": CheckResult.PASS,
+                "score": updated_score,
+                "reasons": updated_reasons,
+            }
+        )
+        return updated_assessment, {
+            "token_age_minutes": age_minutes,
+            "stage_hint": stage_hint,
+            "age_policy_state": "immature_warning",
+            "age_policy_reason": "discovery-mode seconds-old launch allowed past age as warning because other hard safety checks were not failing",
+            "age_policy_context_used": context_used,
+        }
+
+    return assessment, {
+        "token_age_minutes": age_minutes,
+        "stage_hint": stage_hint,
+        "age_policy_state": "fresh_seconds",
+        "age_policy_reason": "seconds-old launch still blocked because other hard safety checks were not clean enough for warning downgrade",
+        "age_policy_context_used": context_used,
+    }
 
 
 def _apply_holder_lookup_fields(token: TokenInfo, lookup_result: HolderLookupResult) -> TokenInfo:

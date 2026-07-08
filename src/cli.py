@@ -127,16 +127,17 @@ class PaperCycleSummary:
             return []
 
         lines = ["Rejected candidate diagnostics:"]
-        lines.append("  # | symbol | mint | source | failed_check | holder_policy | holder_source | top10_holder_pct | creator | liquidity | attention_hints")
+        lines.append("  # | symbol | mint | source | failed_check | holder_policy | age_policy | holder_source | top10_holder_pct | creator | liquidity | attention_hints")
         for diagnostic in self.rejected_candidate_diagnostics:
             lines.append(
-                "  {rank} | {symbol} | {mint_short} | {source} | {failed_check} | {holder_policy} | {holder_source} | {top10_holder_pct} | {creator} | {liquidity} | {attention_hints}".format(
+                "  {rank} | {symbol} | {mint_short} | {source} | {failed_check} | {holder_policy} | {age_policy} | {holder_source} | {top10_holder_pct} | {creator} | {liquidity} | {attention_hints}".format(
                     rank=diagnostic.get("rank", "?"),
                     symbol=diagnostic.get("symbol", "unknown"),
                     mint_short=diagnostic.get("mint_short", "unknown"),
                     source=diagnostic.get("source", "unknown"),
                     failed_check=diagnostic.get("failed_check", "unknown"),
                     holder_policy=diagnostic.get("holder_policy_state", "unknown"),
+                    age_policy=diagnostic.get("age_policy_state", "unknown"),
                     holder_source=diagnostic.get("top10_holder_source", "unknown"),
                     top10_holder_pct=diagnostic.get("top10_holder_pct", "unknown"),
                     creator=diagnostic.get("creator_holding_display", "unknown"),
@@ -168,10 +169,6 @@ def force_paper_settings(settings: Settings) -> Settings:
 
 def apply_risk_profile(settings: Settings, risk_profile: str) -> Settings:
     normalized = normalize_risk_profile(risk_profile)
-    if normalized == "discovery":
-        return settings.model_copy(
-            update={"risk": settings.risk.model_copy(update={"min_age_minutes": 0})}
-        )
     return settings
 
 
@@ -404,6 +401,7 @@ def _build_rejected_candidate_diagnostic(
     holder_diagnostics = payload.get("holder_diagnostics") if isinstance(payload.get("holder_diagnostics"), dict) else {}
     creator_diagnostics = payload.get("creator_diagnostics") if isinstance(payload.get("creator_diagnostics"), dict) else {}
     holder_policy = payload.get("holder_policy") if isinstance(payload.get("holder_policy"), dict) else {}
+    age_policy = payload.get("age_policy") if isinstance(payload.get("age_policy"), dict) else {}
     liquidity_diagnostics = payload.get("liquidity_diagnostics") if isinstance(payload.get("liquidity_diagnostics"), dict) else {}
     top10_result = _check_result_value(record, "top10_holder_check")
     liquidity_result = _check_result_value(record, "liquidity_check")
@@ -463,6 +461,11 @@ def _build_rejected_candidate_diagnostic(
         "token_age_minutes": holder_policy.get("token_age_minutes"),
         "stage_hint": holder_policy.get("stage_hint", "unknown"),
         "fresh_launch_context_used": bool(holder_policy.get("fresh_launch_context_used")),
+        "age_policy_state": age_policy.get("age_policy_state", "unknown"),
+        "age_policy_reason": age_policy.get("age_policy_reason", "unknown"),
+        "age_policy_context_used": bool(age_policy.get("age_policy_context_used")),
+        "age_policy_age_minutes": age_policy.get("token_age_minutes"),
+        "age_policy_stage_hint": age_policy.get("stage_hint", "unknown"),
         "selected_liquidity_sol": liquidity_diagnostics.get("selected_liquidity_sol", liquidity_value if liquidity_value is not None else "unknown"),
         "selected_liquidity_usd": liquidity_diagnostics.get("selected_liquidity_usd", "unknown"),
         "liquidity_source": liquidity_diagnostics.get("liquidity_source", "unknown"),
@@ -680,6 +683,11 @@ def build_rejection_diagnostic_report(summary: PaperCycleSummary) -> str:
                 f"token_age_minutes: {diagnostic.get('token_age_minutes', 'unknown') if diagnostic.get('token_age_minutes') is not None else 'unknown'}",
                 f"stage_hint: {diagnostic.get('stage_hint', 'unknown')}",
                 f"fresh_launch_context_used: {diagnostic.get('fresh_launch_context_used', False)}",
+                f"age_policy_state: {diagnostic.get('age_policy_state', 'unknown')}",
+                f"age_policy_reason: {diagnostic.get('age_policy_reason', 'unknown')}",
+                f"age_policy_context_used: {diagnostic.get('age_policy_context_used', False)}",
+                f"age_policy_age_minutes: {diagnostic.get('age_policy_age_minutes', 'unknown') if diagnostic.get('age_policy_age_minutes') is not None else 'unknown'}",
+                f"age_policy_stage_hint: {diagnostic.get('age_policy_stage_hint', 'unknown')}",
                 f"selected_liquidity_sol: {diagnostic.get('selected_liquidity_sol', 'unknown')}",
                 f"selected_liquidity_usd: {diagnostic.get('selected_liquidity_usd', 'unknown')}",
                 f"liquidity_source: {diagnostic.get('liquidity_source', 'unknown')}",
