@@ -103,7 +103,7 @@ def _build_rejected_signal() -> Signal:
             "authority_diagnostics": {
                 "mint_authority_state": "unknown",
                 "freeze_authority_state": "unknown",
-                "authority_source": "signal_or_unknown",
+                "authority_source": "unknown",
                 "authority_unknown_reason": "mint authority state unavailable; freeze authority state unavailable",
             },
             "authority_policy": {
@@ -177,6 +177,7 @@ def test_run_bounded_paper_cycle_collects_per_token_rejection_diagnostics(tmp_pa
         assert diagnostic["creator_policy_state"] == "unknown_warning"
         assert diagnostic["unique_buyers_policy_state"] == "unknown_warning"
         assert diagnostic["authority_policy_state"] == "unknown_warning"
+        assert diagnostic["authority_source"] == "unknown"
         assert diagnostic["holder_policy_state"] == "fresh_launch_warning"
         assert diagnostic["age_policy_state"] == "immature_warning"
         assert diagnostic["selected_liquidity_sol"] == 4.0
@@ -248,6 +249,7 @@ def test_rejection_report_and_cli_lines_stay_safe_with_missing_fields() -> None:
     assert "creator_policy_reason" in report
     assert "unique_buyers_policy_reason" in report
     assert "authority_policy_reason" in report
+    assert "authority_unknown_reason" in report
     assert "age_policy_reason" in report
     assert "holder_policy_reason" in report
     assert "liquidity_source" in report

@@ -173,7 +173,7 @@ class DiscoveryRiskScorer:
         honeypot_result = await self._simulate_honeypot(signal, rugcheck_result)
         assessment = _apply_honeypot_simulation_assessment(assessment, honeypot_result)
         assessment = _apply_funding_assessment(assessment, funding_result, missing_provider=missing_provider)
-        signal.payload["authority_diagnostics"] = _build_authority_diagnostics(token, rugcheck_result)
+        signal.payload["authority_diagnostics"] = _build_authority_diagnostics(signal.payload, token, rugcheck_result)
         signal.payload["unique_buyers_diagnostics"] = _build_unique_buyers_diagnostics(signal.payload, token, funding_result)
         holder_policy = _build_holder_policy_diagnostics(
             signal,
@@ -668,8 +668,19 @@ def _build_creator_diagnostics(
     }
 
 
-def _build_authority_diagnostics(token: TokenInfo, rugcheck_result: RugCheckResult | None) -> dict[str, object]:
-    source = "rugcheck" if rugcheck_result is not None and rugcheck_result.provider_status == "ok" and rugcheck_result.found else "signal_or_unknown"
+def _build_authority_diagnostics(
+    payload: Mapping[str, object],
+    token: TokenInfo,
+    rugcheck_result: RugCheckResult | None,
+) -> dict[str, object]:
+    signal_mint_state = _signal_authority_state(payload, "mint")
+    signal_freeze_state = _signal_authority_state(payload, "freeze")
+    rugcheck_available = rugcheck_result is not None and rugcheck_result.provider_status == "ok" and rugcheck_result.found
+    source = "unknown"
+    if signal_mint_state != "unknown" or signal_freeze_state != "unknown":
+        source = "signal_payload"
+    elif rugcheck_available:
+        source = "rugcheck"
     mint_state = _authority_state(token.mint_authority_revoked)
     freeze_state = _authority_state(token.freeze_authority_revoked)
     unknown_reason = None
@@ -679,6 +690,10 @@ def _build_authority_diagnostics(token: TokenInfo, rugcheck_result: RugCheckResu
             reasons.append("mint authority state unavailable")
         if freeze_state == "unknown":
             reasons.append("freeze authority state unavailable")
+        if not rugcheck_available and rugcheck_result is not None:
+            reasons.append(f"rugcheck_status={rugcheck_result.provider_status}")
+        if source == "unknown":
+            reasons.append("no normalized signal or RugCheck authority fields")
         unknown_reason = "; ".join(reasons)
     return {
         "mint_authority_state": mint_state,
@@ -686,6 +701,32 @@ def _build_authority_diagnostics(token: TokenInfo, rugcheck_result: RugCheckResu
         "authority_source": source,
         "authority_unknown_reason": unknown_reason,
     }
+
+
+def _signal_authority_state(payload: Mapping[str, object], authority_name: str) -> str:
+    revoked = _extract_bool_from_mapping(
+        payload,
+        (
+            f"{authority_name}_authority_revoked",
+            f"{authority_name}AuthorityRevoked",
+            f"authorities.{authority_name}AuthorityRevoked",
+        ),
+    )
+    if revoked is not None:
+        return _authority_state(revoked)
+
+    enabled = _extract_bool_from_mapping(
+        payload,
+        (
+            f"{authority_name}_authority",
+            f"{authority_name}Authority",
+            f"authorities.{authority_name}Authority",
+            f"is_{authority_name}able",
+        ),
+    )
+    if enabled is not None:
+        return "active" if enabled else "revoked"
+    return "unknown"
 
 
 def _build_unique_buyers_diagnostics(
@@ -774,6 +815,15 @@ def _extract_int_from_mapping(mapping: Mapping[str, object], paths: tuple[str, .
     return None
 
 
+def _extract_bool_from_mapping(mapping: Mapping[str, object], paths: tuple[str, ...]) -> bool | None:
+    for path in paths:
+        value = _extract_value_from_mapping(mapping, path)
+        parsed = _coerce_bool_value(value)
+        if parsed is not None:
+            return parsed
+    return None
+
+
 def _coerce_int_value(value: object) -> int | None:
     if isinstance(value, bool) or value is None:
         return None
@@ -781,6 +831,20 @@ def _coerce_int_value(value: object) -> int | None:
         return int(value)
     except (TypeError, ValueError):
         return None
+
+
+def _coerce_bool_value(value: object) -> bool | None:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)) and value in (0, 1):
+        return bool(value)
+    if isinstance(value, str):
+        lowered = value.strip().lower()
+        if lowered in {"true", "yes", "active", "mintable", "freezable"}:
+            return True
+        if lowered in {"false", "no", "revoked", "immutable", "not_mintable", "not_freezable"}:
+            return False
+    return None
 
 
 def _extract_bonding_curve_addresses(payload: Mapping[str, object]) -> set[str]:

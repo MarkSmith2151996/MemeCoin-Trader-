@@ -1102,6 +1102,86 @@ def test_known_revoked_authority_passes_this_check() -> None:
     assert signal.payload["authority_policy"]["authority_policy_state"] == "pass"
 
 
+def test_signal_payload_authority_metadata_sets_source_and_passes() -> None:
+    signal = Signal(
+        source=SignalSource.PUMP_FUN,
+        type=SignalType.NEW_POOL,
+        mint_address="signal-authority-pass-mint",
+        payload={
+            "vSolInBondingCurve": 30.1,
+            "uniqueBuyers": 30,
+            "top10HolderPct": 30.0,
+            "creatorHoldingPct": 5.0,
+            "mintAuthorityRevoked": True,
+            "freezeAuthorityRevoked": True,
+            "createdAt": datetime.now(UTC).isoformat(),
+        },
+    )
+    scorer = DiscoveryRiskScorer(config=RiskConfig(), enable_holder_lookup=False, holder_policy_mode="discovery")
+
+    assessment = asyncio.run(scorer.assess_signal(signal))
+
+    assert assessment.mint_authority_check == CheckResult.PASS
+    diagnostics = signal.payload["authority_diagnostics"]
+    assert diagnostics["mint_authority_state"] == "revoked"
+    assert diagnostics["freeze_authority_state"] == "revoked"
+    assert diagnostics["authority_source"] == "signal_payload"
+
+
+def test_signal_payload_active_authority_alias_fails() -> None:
+    signal = Signal(
+        source=SignalSource.PUMP_FUN,
+        type=SignalType.NEW_POOL,
+        mint_address="signal-authority-active-mint",
+        payload={
+            "vSolInBondingCurve": 30.1,
+            "uniqueBuyers": 30,
+            "top10HolderPct": 30.0,
+            "creatorHoldingPct": 5.0,
+            "mintAuthority": True,
+            "freezeAuthority": False,
+            "createdAt": datetime.now(UTC).isoformat(),
+        },
+    )
+    scorer = DiscoveryRiskScorer(config=RiskConfig(), enable_holder_lookup=False, holder_policy_mode="discovery")
+
+    assessment = asyncio.run(scorer.assess_signal(signal))
+
+    assert assessment.mint_authority_check == CheckResult.FAIL
+    diagnostics = signal.payload["authority_diagnostics"]
+    assert diagnostics["mint_authority_state"] == "active"
+    assert diagnostics["authority_source"] == "signal_payload"
+
+
+def test_authority_unknown_reason_includes_rugcheck_provider_status() -> None:
+    mint_address = "So11111111111111111111111111111111111111112"
+    signal = Signal(
+        source=SignalSource.PUMP_FUN,
+        type=SignalType.NEW_POOL,
+        mint_address=mint_address,
+        payload={
+            "vSolInBondingCurve": 30.1,
+            "uniqueBuyers": 30,
+            "top10HolderPct": 30.0,
+            "creatorHoldingPct": 5.0,
+            "createdAt": datetime.now(UTC).isoformat(),
+        },
+    )
+    scorer = DiscoveryRiskScorer(
+        config=RiskConfig(),
+        enable_holder_lookup=False,
+        holder_policy_mode="discovery",
+        rugcheck_client=FakeRugCheckClient(error=RuntimeError("boom")),
+    )
+
+    assessment = asyncio.run(scorer.assess_signal(signal))
+
+    assert assessment.mint_authority_check == CheckResult.UNKNOWN
+    diagnostics = signal.payload["authority_diagnostics"]
+    assert diagnostics["authority_source"] == "unknown"
+    assert "rugcheck_status=provider_error" in diagnostics["authority_unknown_reason"]
+
+
 def test_authority_unknown_warning_does_not_override_holder_fail() -> None:
     signal = Signal(
         source=SignalSource.PUMP_FUN,
