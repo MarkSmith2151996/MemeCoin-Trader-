@@ -173,6 +173,7 @@ class DiscoveryRiskScorer:
         honeypot_result = await self._simulate_honeypot(signal, rugcheck_result)
         assessment = _apply_honeypot_simulation_assessment(assessment, honeypot_result)
         assessment = _apply_funding_assessment(assessment, funding_result, missing_provider=missing_provider)
+        signal.payload["unique_buyers_diagnostics"] = _build_unique_buyers_diagnostics(signal.payload, token, funding_result)
         holder_policy = _build_holder_policy_diagnostics(
             signal,
             token,
@@ -197,6 +198,16 @@ class DiscoveryRiskScorer:
             creator_diagnostics=signal.payload["creator_diagnostics"],
         )
         signal.payload["creator_policy"] = creator_policy
+        assessment, unique_buyers_policy = _apply_unique_buyers_policy_assessment(
+            assessment,
+            signal,
+            policy_mode=self._holder_policy_mode,
+            holder_policy=holder_policy,
+            age_policy=age_policy,
+            creator_policy=creator_policy,
+            unique_buyers_diagnostics=signal.payload["unique_buyers_diagnostics"],
+        )
+        signal.payload["unique_buyers_policy"] = unique_buyers_policy
         self._record_lookup_outcome(lookup_status, assessment)
         self._record_rugcheck_outcome(rugcheck_result, assessment)
         self._record_honeypot_simulation_outcome(honeypot_result, assessment)
@@ -645,6 +656,49 @@ def _build_creator_diagnostics(
     }
 
 
+def _build_unique_buyers_diagnostics(
+    payload: Mapping[str, object],
+    token: TokenInfo,
+    funding_result: FundingAnalysisResult | None,
+) -> dict[str, object]:
+    signal_unique_buyers = _extract_int_from_mapping(
+        payload,
+        (
+            "unique_buyers",
+            "uniqueBuyers",
+            "buyerCount",
+            "uniqueBuyerCount",
+        ),
+    )
+    if signal_unique_buyers is not None:
+        return {
+            "unique_buyers_count": signal_unique_buyers,
+            "unique_buyers_source": "signal_payload",
+            "unique_buyers_state": "known",
+            "unique_buyers_unknown_reason": None,
+        }
+    if funding_result is not None and funding_result.total_buyers > 0:
+        return {
+            "unique_buyers_count": funding_result.total_buyers,
+            "unique_buyers_source": "funding_analysis",
+            "unique_buyers_state": "known",
+            "unique_buyers_unknown_reason": None,
+        }
+    if token.unique_buyers is not None:
+        return {
+            "unique_buyers_count": token.unique_buyers,
+            "unique_buyers_source": "enriched_unknown",
+            "unique_buyers_state": "known",
+            "unique_buyers_unknown_reason": None,
+        }
+    return {
+        "unique_buyers_count": None,
+        "unique_buyers_source": "unknown",
+        "unique_buyers_state": "unknown",
+        "unique_buyers_unknown_reason": "no normalized unique buyer count in signal payload or funding analysis",
+    }
+
+
 def _extract_float_from_mapping(mapping: Mapping[str, object], paths: tuple[str, ...]) -> float | None:
     for path in paths:
         value = _extract_value_from_mapping(mapping, path)
@@ -677,6 +731,24 @@ def _coerce_float_value(value: object) -> float | None:
         except ValueError:
             return None
     return None
+
+
+def _extract_int_from_mapping(mapping: Mapping[str, object], paths: tuple[str, ...]) -> int | None:
+    for path in paths:
+        value = _extract_value_from_mapping(mapping, path)
+        parsed = _coerce_int_value(value)
+        if parsed is not None:
+            return parsed
+    return None
+
+
+def _coerce_int_value(value: object) -> int | None:
+    if isinstance(value, bool) or value is None:
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
 
 
 def _extract_bonding_curve_addresses(payload: Mapping[str, object]) -> set[str]:
@@ -963,6 +1035,73 @@ def _apply_creator_policy_assessment(
         "creator_policy_state": "unknown_conservative",
         "creator_policy_reason": "creator holding is unknown and discovery-mode warning conditions were not met",
         "creator_policy_context_used": context_used,
+    }
+
+
+def _apply_unique_buyers_policy_assessment(
+    assessment: RiskAssessment,
+    signal: Signal,
+    *,
+    policy_mode: str,
+    holder_policy: Mapping[str, object],
+    age_policy: Mapping[str, object],
+    creator_policy: Mapping[str, object],
+    unique_buyers_diagnostics: Mapping[str, object],
+) -> tuple[RiskAssessment, dict[str, object]]:
+    context_used = False
+
+    if assessment.unique_buyers_check == CheckResult.PASS:
+        return assessment, {
+            "unique_buyers_policy_state": "pass",
+            "unique_buyers_policy_reason": "unique buyer count passed configured threshold",
+            "unique_buyers_policy_context_used": context_used,
+        }
+
+    if assessment.unique_buyers_check == CheckResult.FAIL:
+        return assessment, {
+            "unique_buyers_policy_state": "fail",
+            "unique_buyers_policy_reason": "unique buyer count failed configured threshold",
+            "unique_buyers_policy_context_used": context_used,
+        }
+
+    if policy_mode != "discovery":
+        return assessment, {
+            "unique_buyers_policy_state": "unknown_conservative",
+            "unique_buyers_policy_reason": "strict mode preserves conservative rejection for unknown unique buyer count",
+            "unique_buyers_policy_context_used": context_used,
+        }
+
+    stage_hint = _signal_stage_hint(signal)
+    launch_like = stage_hint in {"new_pool", "pump"}
+    age_safe = age_policy.get("age_policy_state") in {"age_pass", "immature_warning"}
+    holder_safe = holder_policy.get("holder_policy_state") in {"pass", "fresh_launch_warning"}
+    creator_safe = creator_policy.get("creator_policy_state") in {"pass", "unknown_warning"}
+    liquidity_safe = assessment.liquidity_check == CheckResult.PASS
+    authority_safe = assessment.mint_authority_check != CheckResult.FAIL and assessment.freeze_authority_check != CheckResult.FAIL
+    honeypot_safe = assessment.honeypot_check != CheckResult.FAIL
+    missing_metadata = isinstance(unique_buyers_diagnostics.get("unique_buyers_unknown_reason"), str) and unique_buyers_diagnostics.get("unique_buyers_unknown_reason") != ""
+
+    if launch_like and age_safe and holder_safe and creator_safe and liquidity_safe and authority_safe and honeypot_safe and missing_metadata:
+        context_used = True
+        updated_reasons = [reason for reason in assessment.reasons if reason != "unique_buyers_check unknown"]
+        updated_score = assessment.score + CHECK_WEIGHTS["unique_buyers_check"]
+        updated_assessment = assessment.model_copy(
+            update={
+                "unique_buyers_check": CheckResult.PASS,
+                "score": updated_score,
+                "reasons": updated_reasons,
+            }
+        )
+        return updated_assessment, {
+            "unique_buyers_policy_state": "unknown_warning",
+            "unique_buyers_policy_reason": "discovery-mode launch-stage token allowed past unknown unique buyer count because other hard safety checks were clean enough",
+            "unique_buyers_policy_context_used": context_used,
+        }
+
+    return assessment, {
+        "unique_buyers_policy_state": "unknown_conservative",
+        "unique_buyers_policy_reason": "unique buyer count is unknown and discovery-mode warning conditions were not met",
+        "unique_buyers_policy_context_used": context_used,
     }
 
 

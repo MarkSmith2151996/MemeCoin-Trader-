@@ -127,10 +127,10 @@ class PaperCycleSummary:
             return []
 
         lines = ["Rejected candidate diagnostics:"]
-        lines.append("  # | symbol | mint | source | failed_check | holder_policy | age_policy | creator_policy | holder_source | top10_holder_pct | creator | liquidity | attention_hints")
+        lines.append("  # | symbol | mint | source | failed_check | holder_policy | age_policy | creator_policy | buyer_policy | holder_source | top10_holder_pct | creator | liquidity | attention_hints")
         for diagnostic in self.rejected_candidate_diagnostics:
             lines.append(
-                "  {rank} | {symbol} | {mint_short} | {source} | {failed_check} | {holder_policy} | {age_policy} | {creator_policy} | {holder_source} | {top10_holder_pct} | {creator} | {liquidity} | {attention_hints}".format(
+                "  {rank} | {symbol} | {mint_short} | {source} | {failed_check} | {holder_policy} | {age_policy} | {creator_policy} | {buyer_policy} | {holder_source} | {top10_holder_pct} | {creator} | {liquidity} | {attention_hints}".format(
                     rank=diagnostic.get("rank", "?"),
                     symbol=diagnostic.get("symbol", "unknown"),
                     mint_short=diagnostic.get("mint_short", "unknown"),
@@ -139,6 +139,7 @@ class PaperCycleSummary:
                     holder_policy=diagnostic.get("holder_policy_state", "unknown"),
                     age_policy=diagnostic.get("age_policy_state", "unknown"),
                     creator_policy=diagnostic.get("creator_policy_state", "unknown"),
+                    buyer_policy=diagnostic.get("unique_buyers_policy_state", "unknown"),
                     holder_source=diagnostic.get("top10_holder_source", "unknown"),
                     top10_holder_pct=diagnostic.get("top10_holder_pct", "unknown"),
                     creator=diagnostic.get("creator_holding_display", "unknown"),
@@ -402,6 +403,8 @@ def _build_rejected_candidate_diagnostic(
     holder_diagnostics = payload.get("holder_diagnostics") if isinstance(payload.get("holder_diagnostics"), dict) else {}
     creator_diagnostics = payload.get("creator_diagnostics") if isinstance(payload.get("creator_diagnostics"), dict) else {}
     creator_policy = payload.get("creator_policy") if isinstance(payload.get("creator_policy"), dict) else {}
+    unique_buyers_diagnostics = payload.get("unique_buyers_diagnostics") if isinstance(payload.get("unique_buyers_diagnostics"), dict) else {}
+    unique_buyers_policy = payload.get("unique_buyers_policy") if isinstance(payload.get("unique_buyers_policy"), dict) else {}
     holder_policy = payload.get("holder_policy") if isinstance(payload.get("holder_policy"), dict) else {}
     age_policy = payload.get("age_policy") if isinstance(payload.get("age_policy"), dict) else {}
     liquidity_diagnostics = payload.get("liquidity_diagnostics") if isinstance(payload.get("liquidity_diagnostics"), dict) else {}
@@ -461,6 +464,13 @@ def _build_rejected_candidate_diagnostic(
         "creator_policy_state": creator_policy.get("creator_policy_state", "unknown"),
         "creator_policy_reason": creator_policy.get("creator_policy_reason", "unknown"),
         "creator_policy_context_used": bool(creator_policy.get("creator_policy_context_used")),
+        "unique_buyers_count": unique_buyers_diagnostics.get("unique_buyers_count", "unknown"),
+        "unique_buyers_source": unique_buyers_diagnostics.get("unique_buyers_source", "unknown"),
+        "unique_buyers_state": unique_buyers_diagnostics.get("unique_buyers_state", "unknown"),
+        "unique_buyers_unknown_reason": unique_buyers_diagnostics.get("unique_buyers_unknown_reason"),
+        "unique_buyers_policy_state": unique_buyers_policy.get("unique_buyers_policy_state", "unknown"),
+        "unique_buyers_policy_reason": unique_buyers_policy.get("unique_buyers_policy_reason", "unknown"),
+        "unique_buyers_policy_context_used": bool(unique_buyers_policy.get("unique_buyers_policy_context_used")),
         "holder_policy_state": holder_policy.get("holder_policy_state", "unknown"),
         "holder_policy_reason": holder_policy.get("holder_policy_reason", "unknown"),
         "token_age_minutes": holder_policy.get("token_age_minutes"),
@@ -686,6 +696,13 @@ def build_rejection_diagnostic_report(summary: PaperCycleSummary) -> str:
                 f"creator_policy_state: {diagnostic.get('creator_policy_state', 'unknown')}",
                 f"creator_policy_reason: {diagnostic.get('creator_policy_reason', 'unknown')}",
                 f"creator_policy_context_used: {diagnostic.get('creator_policy_context_used', False)}",
+                f"unique_buyers_count: {diagnostic.get('unique_buyers_count', 'unknown')}",
+                f"unique_buyers_source: {diagnostic.get('unique_buyers_source', 'unknown')}",
+                f"unique_buyers_state: {diagnostic.get('unique_buyers_state', 'unknown')}",
+                f"unique_buyers_unknown_reason: {diagnostic.get('unique_buyers_unknown_reason', 'unknown')}",
+                f"unique_buyers_policy_state: {diagnostic.get('unique_buyers_policy_state', 'unknown')}",
+                f"unique_buyers_policy_reason: {diagnostic.get('unique_buyers_policy_reason', 'unknown')}",
+                f"unique_buyers_policy_context_used: {diagnostic.get('unique_buyers_policy_context_used', False)}",
                 f"holder_policy_state: {diagnostic.get('holder_policy_state', 'unknown')}",
                 f"holder_policy_reason: {diagnostic.get('holder_policy_reason', 'unknown')}",
                 f"token_age_minutes: {diagnostic.get('token_age_minutes', 'unknown') if diagnostic.get('token_age_minutes') is not None else 'unknown'}",
