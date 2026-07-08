@@ -406,6 +406,272 @@ def test_all_liquidity_sources_missing_stays_unknown_with_reason() -> None:
     assert diagnostics["liquidity_unknown_reason"] == "dexscreener=provider_missing; jupiter=no_route"
 
 
+def test_attention_scoring_clean_fresh_launch_scores_higher_than_metadata_poor_candidate() -> None:
+    rich_signal = Signal(
+        source=SignalSource.PUMP_FUN,
+        type=SignalType.NEW_POOL,
+        mint_address="attention-rich-mint",
+        confidence=0.9,
+        payload={
+            "symbol": "RICH",
+            "name": "Rich Launch",
+            "vSolInBondingCurve": 60.0,
+            "uniqueBuyers": 40,
+            "top10HolderPct": 30.0,
+            "creatorHoldingPct": 5.0,
+            "mintAuthorityRevoked": True,
+            "freezeAuthorityRevoked": True,
+            "marketCapUsd": 25000.0,
+            "createdAt": datetime.now(UTC).isoformat(),
+            "metrics": {"volume_m5": 500.0, "buys_m5": 20, "sells_m5": 5},
+            "social_credibility": {"highest_tier": "high", "unique_accounts": 4},
+        },
+    )
+    sparse_signal = Signal(
+        source=SignalSource.WHALE_TRACKER,
+        type=SignalType.BUY,
+        mint_address="attention-sparse-mint",
+        confidence=0.5,
+        payload={"createdAt": datetime.now(UTC).isoformat()},
+    )
+    scorer = DiscoveryRiskScorer(config=RiskConfig(min_age_minutes=0), enable_holder_lookup=False, enable_funding_analysis=False)
+
+    rich_assessment = asyncio.run(scorer.assess_signal(rich_signal))
+    asyncio.run(scorer.assess_signal(sparse_signal))
+
+    assert rich_assessment.top10_holder_check == CheckResult.PASS
+    assert rich_signal.payload["attention_diagnostics"]["attention_score"] > sparse_signal.payload["attention_diagnostics"]["attention_score"]
+    assert "pumpfun-launch" in rich_signal.payload["attention_diagnostics"]["narrative_tags"]
+
+
+def test_attention_scoring_missing_social_penalizes_without_auto_fail() -> None:
+    signal = Signal(
+        source=SignalSource.PUMP_FUN,
+        type=SignalType.NEW_POOL,
+        mint_address="attention-social-missing-mint",
+        payload={
+            "symbol": "NOSOC",
+            "vSolInBondingCurve": 30.0,
+            "uniqueBuyers": 25,
+            "top10HolderPct": 30.0,
+            "creatorHoldingPct": 5.0,
+            "mintAuthorityRevoked": True,
+            "freezeAuthorityRevoked": True,
+            "createdAt": datetime.now(UTC).isoformat(),
+        },
+    )
+    scorer = DiscoveryRiskScorer(config=RiskConfig(min_age_minutes=0), enable_holder_lookup=False, enable_funding_analysis=False)
+
+    assessment = asyncio.run(scorer.assess_signal(signal))
+
+    assert assessment.top10_holder_check == CheckResult.PASS
+    diagnostics = signal.payload["attention_diagnostics"]
+    assert diagnostics["social_signal_state"] == "missing"
+    assert diagnostics["attention_score"] >= 0
+
+
+def test_attention_scoring_stale_candidate_scores_lower() -> None:
+    fresh_signal = Signal(
+        source=SignalSource.PUMP_FUN,
+        type=SignalType.NEW_POOL,
+        mint_address="attention-fresh-mint",
+        payload={
+            "symbol": "FRESH",
+            "vSolInBondingCurve": 30.0,
+            "uniqueBuyers": 25,
+            "top10HolderPct": 30.0,
+            "creatorHoldingPct": 5.0,
+            "mintAuthorityRevoked": True,
+            "freezeAuthorityRevoked": True,
+            "createdAt": datetime.now(UTC).isoformat(),
+        },
+    )
+    stale_signal = Signal(
+        source=SignalSource.PUMP_FUN,
+        type=SignalType.NEW_POOL,
+        mint_address="attention-stale-mint",
+        payload={
+            "symbol": "STALE",
+            "vSolInBondingCurve": 30.0,
+            "uniqueBuyers": 25,
+            "top10HolderPct": 30.0,
+            "creatorHoldingPct": 5.0,
+            "mintAuthorityRevoked": True,
+            "freezeAuthorityRevoked": True,
+            "createdAt": (datetime.now(UTC) - timedelta(minutes=2)).isoformat(),
+        },
+    )
+    scorer = DiscoveryRiskScorer(config=RiskConfig(), enable_holder_lookup=False, enable_funding_analysis=False, holder_policy_mode="strict")
+
+    asyncio.run(scorer.assess_signal(fresh_signal))
+    asyncio.run(scorer.assess_signal(stale_signal))
+
+    assert stale_signal.payload["attention_diagnostics"]["attention_score"] < fresh_signal.payload["attention_diagnostics"]["attention_score"]
+
+
+def test_attention_score_does_not_override_hard_failure() -> None:
+    signal = Signal(
+        source=SignalSource.PUMP_FUN,
+        type=SignalType.NEW_POOL,
+        mint_address="attention-hard-fail-mint",
+        confidence=1.0,
+        payload={
+            "symbol": "RISKY",
+            "name": "Risky Launch",
+            "vSolInBondingCurve": 60.0,
+            "uniqueBuyers": 40,
+            "top10HolderPct": 90.0,
+            "creatorHoldingPct": 5.0,
+            "mintAuthorityRevoked": True,
+            "freezeAuthorityRevoked": True,
+            "marketCapUsd": 25000.0,
+            "createdAt": datetime.now(UTC).isoformat(),
+            "metrics": {"volume_m5": 500.0, "buys_m5": 20, "sells_m5": 5},
+            "social_credibility": {"highest_tier": "high", "unique_accounts": 4},
+        },
+    )
+    scorer = DiscoveryRiskScorer(config=RiskConfig(min_age_minutes=0), enable_holder_lookup=False, enable_funding_analysis=False)
+
+    assessment = asyncio.run(scorer.assess_signal(signal))
+
+    assert signal.payload["attention_diagnostics"]["attention_score"] > 0
+    assert assessment.top10_holder_check == CheckResult.FAIL
+
+
+def test_attention_scoring_clean_fresh_launch_scores_higher_than_metadata_poor_candidate() -> None:
+    rich_signal = Signal(
+        source=SignalSource.PUMP_FUN,
+        type=SignalType.NEW_POOL,
+        mint_address="attention-rich-mint",
+        confidence=0.9,
+        payload={
+            "symbol": "RICH",
+            "name": "Rich Launch",
+            "vSolInBondingCurve": 60.0,
+            "uniqueBuyers": 40,
+            "top10HolderPct": 20.0,
+            "creatorHoldingPct": 5.0,
+            "mintAuthorityRevoked": True,
+            "freezeAuthorityRevoked": True,
+            "marketCapUsd": 25000.0,
+            "createdAt": datetime.now(UTC).isoformat(),
+            "metrics": {"volume_m5": 500.0, "buys_m5": 20, "sells_m5": 5},
+            "social_credibility": {"highest_tier": "high", "unique_accounts": 4},
+        },
+    )
+    sparse_signal = Signal(
+        source=SignalSource.WHALE_TRACKER,
+        type=SignalType.BUY,
+        mint_address="attention-sparse-mint",
+        confidence=0.5,
+        payload={
+            "createdAt": datetime.now(UTC).isoformat(),
+        },
+    )
+    scorer = DiscoveryRiskScorer(config=RiskConfig(min_age_minutes=0), enable_holder_lookup=False, enable_funding_analysis=False)
+
+    rich_assessment = asyncio.run(scorer.assess_signal(rich_signal))
+    sparse_assessment = asyncio.run(scorer.assess_signal(sparse_signal))
+
+    assert rich_assessment.top10_holder_check == CheckResult.PASS
+    assert rich_signal.payload["attention_diagnostics"]["attention_score"] > sparse_signal.payload["attention_diagnostics"]["attention_score"]
+    assert "pumpfun-launch" in rich_signal.payload["attention_diagnostics"]["narrative_tags"]
+
+
+def test_attention_scoring_missing_social_penalizes_without_auto_fail() -> None:
+    signal = Signal(
+        source=SignalSource.PUMP_FUN,
+        type=SignalType.NEW_POOL,
+        mint_address="attention-social-missing-mint",
+        payload={
+            "symbol": "NOSOC",
+            "vSolInBondingCurve": 30.0,
+            "uniqueBuyers": 25,
+            "top10HolderPct": 30.0,
+            "creatorHoldingPct": 5.0,
+            "mintAuthorityRevoked": True,
+            "freezeAuthorityRevoked": True,
+            "createdAt": datetime.now(UTC).isoformat(),
+        },
+    )
+    scorer = DiscoveryRiskScorer(config=RiskConfig(min_age_minutes=0), enable_holder_lookup=False, enable_funding_analysis=False)
+
+    assessment = asyncio.run(scorer.assess_signal(signal))
+
+    assert assessment.top10_holder_check == CheckResult.PASS
+    diagnostics = signal.payload["attention_diagnostics"]
+    assert diagnostics["social_signal_state"] == "missing"
+    assert diagnostics["attention_score"] >= 0
+
+
+def test_attention_scoring_stale_candidate_scores_lower() -> None:
+    fresh_signal = Signal(
+        source=SignalSource.PUMP_FUN,
+        type=SignalType.NEW_POOL,
+        mint_address="attention-fresh-mint",
+        payload={
+            "symbol": "FRESH",
+            "vSolInBondingCurve": 30.0,
+            "uniqueBuyers": 25,
+            "top10HolderPct": 30.0,
+            "creatorHoldingPct": 5.0,
+            "mintAuthorityRevoked": True,
+            "freezeAuthorityRevoked": True,
+            "createdAt": datetime.now(UTC).isoformat(),
+        },
+    )
+    stale_signal = Signal(
+        source=SignalSource.PUMP_FUN,
+        type=SignalType.NEW_POOL,
+        mint_address="attention-stale-mint",
+        payload={
+            "symbol": "STALE",
+            "vSolInBondingCurve": 30.0,
+            "uniqueBuyers": 25,
+            "top10HolderPct": 30.0,
+            "creatorHoldingPct": 5.0,
+            "mintAuthorityRevoked": True,
+            "freezeAuthorityRevoked": True,
+            "createdAt": (datetime.now(UTC) - timedelta(minutes=2)).isoformat(),
+        },
+    )
+    scorer = DiscoveryRiskScorer(config=RiskConfig(), enable_holder_lookup=False, enable_funding_analysis=False, holder_policy_mode="strict")
+
+    asyncio.run(scorer.assess_signal(fresh_signal))
+    asyncio.run(scorer.assess_signal(stale_signal))
+
+    assert stale_signal.payload["attention_diagnostics"]["attention_score"] < fresh_signal.payload["attention_diagnostics"]["attention_score"]
+
+
+def test_attention_score_does_not_override_hard_failure() -> None:
+    signal = Signal(
+        source=SignalSource.PUMP_FUN,
+        type=SignalType.NEW_POOL,
+        mint_address="attention-hard-fail-mint",
+        confidence=1.0,
+        payload={
+            "symbol": "RISKY",
+            "name": "Risky Launch",
+            "vSolInBondingCurve": 60.0,
+            "uniqueBuyers": 40,
+            "top10HolderPct": 90.0,
+            "creatorHoldingPct": 5.0,
+            "mintAuthorityRevoked": True,
+            "freezeAuthorityRevoked": True,
+            "marketCapUsd": 25000.0,
+            "createdAt": datetime.now(UTC).isoformat(),
+            "metrics": {"volume_m5": 500.0, "buys_m5": 20, "sells_m5": 5},
+            "social_credibility": {"highest_tier": "high", "unique_accounts": 4},
+        },
+    )
+    scorer = DiscoveryRiskScorer(config=RiskConfig(min_age_minutes=0), enable_holder_lookup=False, enable_funding_analysis=False)
+
+    assessment = asyncio.run(scorer.assess_signal(signal))
+
+    assert signal.payload["attention_diagnostics"]["attention_score"] > 0
+    assert assessment.top10_holder_check == CheckResult.FAIL
+
+
 def test_assess_signal_keeps_holder_check_unknown_when_holder_fields_missing() -> None:
     signal = Signal(
         source=SignalSource.PUMP_FUN,

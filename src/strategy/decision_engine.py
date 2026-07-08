@@ -167,6 +167,12 @@ class DecisionEngine:
                     "signal_weight": signal.weight,
                     "risk_score": risk.score,
                     "risk_reasons": risk.reasons,
+                    "attention_score": _signal_attention_value(signal.payload, "attention_score"),
+                    "attention_tier": _signal_attention_value(signal.payload, "attention_tier"),
+                    "attention_reasons": _signal_attention_value(signal.payload, "attention_reasons"),
+                    "narrative_tags": _signal_attention_value(signal.payload, "narrative_tags"),
+                    "social_signal_state": _signal_attention_value(signal.payload, "social_signal_state"),
+                    "metadata_completeness_state": _signal_attention_value(signal.payload, "metadata_completeness_state"),
                 },
             }
         )
@@ -539,3 +545,10 @@ class DecisionEngine:
             return float(value)
         except (TypeError, ValueError):
             return None
+
+
+def _signal_attention_value(payload: dict[str, object], key: str) -> object:
+    diagnostics = payload.get("attention_diagnostics")
+    if isinstance(diagnostics, dict):
+        return diagnostics.get(key)
+    return None

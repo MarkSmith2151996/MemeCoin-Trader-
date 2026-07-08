@@ -127,15 +127,16 @@ class PaperCycleSummary:
             return []
 
         lines = ["Rejected candidate diagnostics:"]
-        lines.append("  # | symbol | mint | source | failed_check | holder_policy | age_policy | creator_policy | buyer_policy | authority_policy | honeypot_policy | holder_source | top10_holder_pct | creator | liquidity | attention_hints")
+        lines.append("  # | symbol | mint | source | failed_check | attn | holder_policy | age_policy | creator_policy | buyer_policy | authority_policy | honeypot_policy | holder_source | top10_holder_pct | creator | liquidity | attention_hints")
         for diagnostic in self.rejected_candidate_diagnostics:
             lines.append(
-                "  {rank} | {symbol} | {mint_short} | {source} | {failed_check} | {holder_policy} | {age_policy} | {creator_policy} | {buyer_policy} | {authority_policy} | {honeypot_policy} | {holder_source} | {top10_holder_pct} | {creator} | {liquidity} | {attention_hints}".format(
+                "  {rank} | {symbol} | {mint_short} | {source} | {failed_check} | {attn} | {holder_policy} | {age_policy} | {creator_policy} | {buyer_policy} | {authority_policy} | {honeypot_policy} | {holder_source} | {top10_holder_pct} | {creator} | {liquidity} | {attention_hints}".format(
                     rank=diagnostic.get("rank", "?"),
                     symbol=diagnostic.get("symbol", "unknown"),
                     mint_short=diagnostic.get("mint_short", "unknown"),
                     source=diagnostic.get("source", "unknown"),
                     failed_check=diagnostic.get("failed_check", "unknown"),
+                    attn=f"{diagnostic.get('attention_score', 0)}/{diagnostic.get('attention_tier', 'ignore')}",
                     holder_policy=diagnostic.get("holder_policy_state", "unknown"),
                     age_policy=diagnostic.get("age_policy_state", "unknown"),
                     creator_policy=diagnostic.get("creator_policy_state", "unknown"),
@@ -402,6 +403,7 @@ def _build_rejected_candidate_diagnostic(
     token_section = payload.get("token") if isinstance(payload.get("token"), dict) else {}
     metrics = payload.get("metrics") if isinstance(payload.get("metrics"), dict) else {}
     social = payload.get("social_credibility") if isinstance(payload.get("social_credibility"), dict) else {}
+    attention_diagnostics = payload.get("attention_diagnostics") if isinstance(payload.get("attention_diagnostics"), dict) else {}
     holder_diagnostics = payload.get("holder_diagnostics") if isinstance(payload.get("holder_diagnostics"), dict) else {}
     creator_diagnostics = payload.get("creator_diagnostics") if isinstance(payload.get("creator_diagnostics"), dict) else {}
     creator_policy = payload.get("creator_policy") if isinstance(payload.get("creator_policy"), dict) else {}
@@ -445,6 +447,12 @@ def _build_rejected_candidate_diagnostic(
         "failed_check": (record.failed_check if record is not None and record.failed_check is not None else _format_rejection_reason(decision.rejection_reason)),
         "rejection_reason": decision.rejection_reason or "unknown_or_other",
         "risk_score": record.risk_score if record is not None else None,
+        "attention_score": attention_diagnostics.get("attention_score", 0),
+        "attention_tier": attention_diagnostics.get("attention_tier", "ignore"),
+        "attention_reasons": tuple(attention_diagnostics.get("attention_reasons", ())),
+        "narrative_tags": tuple(attention_diagnostics.get("narrative_tags", ())),
+        "social_signal_state": attention_diagnostics.get("social_signal_state", "missing"),
+        "metadata_completeness_state": attention_diagnostics.get("metadata_completeness_state", "sparse"),
         "rugcheck_top10_holder_pct": holder_diagnostics.get("rugcheck_top10_holder_pct", "unknown"),
         "local_filtered_top10_holder_pct": holder_diagnostics.get("local_filtered_top10_holder_pct", "unknown"),
         "selected_top10_holder_pct": holder_diagnostics.get(
@@ -697,6 +705,12 @@ def build_rejection_diagnostic_report(summary: PaperCycleSummary) -> str:
                 f"failed_check: {diagnostic.get('failed_check', 'unknown')}",
                 f"rejection_reason: {diagnostic.get('rejection_reason', 'unknown')}",
                 f"risk_score: {diagnostic.get('risk_score', 'unknown') if diagnostic.get('risk_score') is not None else 'unknown'}",
+                f"attention_score: {diagnostic.get('attention_score', 0)}",
+                f"attention_tier: {diagnostic.get('attention_tier', 'ignore')}",
+                f"attention_reasons: {diagnostic.get('attention_reasons', ())}",
+                f"narrative_tags: {diagnostic.get('narrative_tags', ())}",
+                f"social_signal_state: {diagnostic.get('social_signal_state', 'missing')}",
+                f"metadata_completeness_state: {diagnostic.get('metadata_completeness_state', 'sparse')}",
                 f"rugcheck_top10_holder_pct: {diagnostic.get('rugcheck_top10_holder_pct', 'unknown')}",
                 f"local_filtered_top10_holder_pct: {diagnostic.get('local_filtered_top10_holder_pct', 'unknown')}",
                 f"selected_top10_holder_pct: {diagnostic.get('selected_top10_holder_pct', 'unknown')}",

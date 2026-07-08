@@ -66,6 +66,14 @@ def _build_rejected_signal() -> Signal:
             "marketCapUsd": 12345.0,
             "metrics": {"volume_m5": 321.0, "buys_m5": 8, "sells_m5": 3},
             "social_credibility": {"highest_tier": "medium", "unique_accounts": 2},
+            "attention_diagnostics": {
+                "attention_score": 68,
+                "attention_tier": "candidate",
+                "attention_reasons": ["launch-stage signal", "pump.fun source"],
+                "narrative_tags": ["pumpfun", "pumpfun-launch"],
+                "social_signal_state": "present",
+                "metadata_completeness_state": "rich",
+            },
             "holder_diagnostics": {
                 "rugcheck_top10_holder_pct": 91.0,
                 "local_filtered_top10_holder_pct": 42.0,
@@ -174,6 +182,8 @@ def test_run_bounded_paper_cycle_collects_per_token_rejection_diagnostics(tmp_pa
         assert len(summary.rejected_candidate_diagnostics) == 1
         diagnostic = summary.rejected_candidate_diagnostics[0]
         assert diagnostic["symbol"] == "REKT"
+        assert diagnostic["attention_score"] == 68
+        assert diagnostic["attention_tier"] == "candidate"
         assert diagnostic["failed_check"] == "liquidity_check"
         assert diagnostic["rugcheck_top10_holder_pct"] == 91.0
         assert diagnostic["local_filtered_top10_holder_pct"] == 42.0
@@ -247,6 +257,7 @@ def test_rejection_report_and_cli_lines_stay_safe_with_missing_fields() -> None:
     report = cli_module.build_rejection_diagnostic_report(summary)
 
     assert cli_lines[0] == "Rejected candidate diagnostics:"
+    assert "attn" in cli_lines[1]
     assert "failed_check" in cli_lines[1]
     assert "holder_policy" in cli_lines[1]
     assert "age_policy" in cli_lines[1]
@@ -258,6 +269,9 @@ def test_rejection_report_and_cli_lines_stay_safe_with_missing_fields() -> None:
     assert "creator" in cli_lines[1]
     assert "liquidity_check" in cli_lines[2]
     assert "creator_holding_unknown_reason" in report
+    assert "attention_score" in report
+    assert "attention_tier" in report
+    assert "narrative_tags" in report
     assert "creator_policy_reason" in report
     assert "unique_buyers_policy_reason" in report
     assert "authority_policy_reason" in report

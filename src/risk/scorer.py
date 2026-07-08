@@ -233,6 +233,17 @@ class DiscoveryRiskScorer:
             honeypot_diagnostics=signal.payload["honeypot_diagnostics"],
         )
         signal.payload["honeypot_policy"] = honeypot_policy
+        signal.payload["attention_diagnostics"] = _build_attention_diagnostics(
+            signal,
+            token,
+            holder_policy=holder_policy,
+            age_policy=age_policy,
+            creator_policy=creator_policy,
+            unique_buyers_policy=unique_buyers_policy,
+            authority_policy=authority_policy,
+            honeypot_policy=honeypot_policy,
+            liquidity_diagnostics=signal.payload["liquidity_diagnostics"],
+        )
         self._record_lookup_outcome(lookup_status, assessment)
         self._record_rugcheck_outcome(rugcheck_result, assessment)
         self._record_honeypot_simulation_outcome(honeypot_result, assessment)
@@ -1398,6 +1409,179 @@ def _apply_honeypot_policy_assessment(
         "honeypot_policy_reason": "honeypot state is unknown and discovery-mode warning conditions were not met",
         "honeypot_policy_context_used": context_used,
     }
+
+
+def _build_attention_diagnostics(
+    signal: Signal,
+    token: TokenInfo,
+    *,
+    holder_policy: Mapping[str, object],
+    age_policy: Mapping[str, object],
+    creator_policy: Mapping[str, object],
+    unique_buyers_policy: Mapping[str, object],
+    authority_policy: Mapping[str, object],
+    honeypot_policy: Mapping[str, object],
+    liquidity_diagnostics: Mapping[str, object],
+) -> dict[str, object]:
+    score = 0
+    reasons: list[str] = []
+    tags: list[str] = []
+
+    stage_hint = _signal_stage_hint(signal)
+    if stage_hint in {"new_pool", "pump"}:
+        score += 20
+        reasons.append("launch-stage signal")
+        tags.append("pumpfun-launch")
+    elif stage_hint == "graduation":
+        score += 22
+        reasons.append("graduation-stage signal")
+        tags.append("graduation")
+
+    if signal.source == SignalSource.PUMP_FUN:
+        score += 8
+        reasons.append("pump.fun source")
+        tags.append("pumpfun")
+    elif signal.source == SignalSource.ONCHAIN:
+        score += 6
+        reasons.append("on-chain source")
+        tags.append("onchain")
+    elif signal.source == SignalSource.WHALE_TRACKER:
+        score += 5
+        reasons.append("whale source")
+        tags.append("whale-flow")
+
+    age_state = str(age_policy.get("age_policy_state") or "unknown")
+    if age_state == "immature_warning":
+        score += 15
+        reasons.append("seconds-old launch under observation")
+        tags.append("fresh-launch")
+    elif age_state == "age_pass":
+        score += 8
+        reasons.append("age passed")
+    elif age_state == "age_fail_old":
+        score -= 10
+        reasons.append("stale age profile")
+        tags.append("stale")
+
+    holder_state = str(holder_policy.get("holder_policy_state") or "unknown")
+    if holder_state == "pass":
+        score += 12
+        reasons.append("holder concentration passed")
+    elif holder_state == "fresh_launch_warning":
+        score += 8
+        reasons.append("holder profile acceptable for launch-stage watch")
+
+    creator_state = str(creator_policy.get("creator_policy_state") or "unknown")
+    if creator_state == "pass":
+        score += 10
+        reasons.append("creator profile passed")
+    elif creator_state == "unknown_warning":
+        score += 5
+        reasons.append("creator metadata incomplete but watchable")
+
+    buyer_state = str(unique_buyers_policy.get("unique_buyers_policy_state") or "unknown")
+    if buyer_state == "pass":
+        score += 10
+        reasons.append("unique buyer profile passed")
+    elif buyer_state == "unknown_warning":
+        score += 5
+        reasons.append("buyer metadata incomplete but watchable")
+
+    authority_state = str(authority_policy.get("authority_policy_state") or "unknown")
+    if authority_state == "pass":
+        score += 8
+        reasons.append("authority profile passed")
+    elif authority_state == "unknown_warning":
+        score += 4
+        reasons.append("authority metadata incomplete but watchable")
+
+    honeypot_state = str(honeypot_policy.get("honeypot_policy_state") or "unknown")
+    if honeypot_state == "pass":
+        score += 12
+        reasons.append("honeypot profile passed")
+    elif honeypot_state == "unknown_warning":
+        score += 4
+        reasons.append("honeypot metadata incomplete but watchable")
+
+    liquidity_value = liquidity_diagnostics.get("selected_liquidity_sol")
+    if isinstance(liquidity_value, (int, float)):
+        if liquidity_value >= 50:
+            score += 10
+            reasons.append("strong liquidity")
+            tags.append("liquid")
+        elif liquidity_value >= 10:
+            score += 5
+            reasons.append("sufficient liquidity")
+        else:
+            score -= 5
+            reasons.append("thin liquidity")
+
+    social_hint = _social_signal_state(signal.payload)
+    if social_hint == "present":
+        score += 8
+        reasons.append("social metadata present")
+        tags.append("social")
+    else:
+        score -= 4
+        reasons.append("social metadata missing")
+
+    volume_hint = signal.payload.get("metrics", {}).get("volume_m5") if isinstance(signal.payload.get("metrics"), Mapping) else None
+    if isinstance(volume_hint, (int, float)) and volume_hint > 0:
+        score += 6
+        reasons.append("volume data present")
+        tags.append("volume")
+
+    buy_sell_hint = signal.payload.get("metrics", {}) if isinstance(signal.payload.get("metrics"), Mapping) else {}
+    buys = buy_sell_hint.get("buys_m5") if isinstance(buy_sell_hint, Mapping) else None
+    sells = buy_sell_hint.get("sells_m5") if isinstance(buy_sell_hint, Mapping) else None
+    if isinstance(buys, (int, float)) and isinstance(sells, (int, float)) and buys > sells:
+        score += 4
+        reasons.append("positive buy/sell pressure")
+        tags.append("buy-pressure")
+
+    completeness_known = 0
+    for value in (
+        token.symbol,
+        token.name,
+        token.market_cap_usd,
+        volume_hint,
+        liquidity_value,
+        signal.payload.get("social_credibility"),
+    ):
+        if value is not None:
+            completeness_known += 1
+    if completeness_known >= 5:
+        metadata_completeness_state = "rich"
+    elif completeness_known >= 3:
+        metadata_completeness_state = "partial"
+    else:
+        metadata_completeness_state = "sparse"
+
+    score = max(0, min(int(round(score)), 100))
+    if score >= 75:
+        tier = "strong_watch"
+    elif score >= 50:
+        tier = "candidate"
+    elif score >= 25:
+        tier = "watch"
+    else:
+        tier = "ignore"
+
+    return {
+        "attention_score": score,
+        "attention_tier": tier,
+        "attention_reasons": reasons,
+        "narrative_tags": sorted(set(tags)),
+        "social_signal_state": social_hint,
+        "metadata_completeness_state": metadata_completeness_state,
+    }
+
+
+def _social_signal_state(payload: Mapping[str, object]) -> str:
+    social = payload.get("social_credibility")
+    if isinstance(social, Mapping) and social:
+        return "present"
+    return "missing"
 
 
 def _authority_state(revoked: bool | None) -> str:

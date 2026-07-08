@@ -581,6 +581,7 @@ def test_paper_cycle_discovery_mode_uses_holder_lookup_to_move_past_unknown(tmp_
         scorer = DiscoveryRiskScorer(
             RiskConfig(min_age_minutes=0),
             holder_lookup=FakeHolderLookup(HolderLookupResult(top10_holder_pct=30.0)),
+            holder_policy_mode="discovery",
         )
 
         summary = await cli_module.run_bounded_paper_cycle(
@@ -596,9 +597,9 @@ def test_paper_cycle_discovery_mode_uses_holder_lookup_to_move_past_unknown(tmp_
         assert summary.execution_mode == "paper"
         assert summary.risk_profile == "discovery"
         assert summary.signals_collected == 1
-        assert summary.signals_accepted == 0
-        assert summary.signals_rejected == 1
-        assert summary.rejection_reasons == {"honeypot_check_unknown": 1}
+        assert summary.signals_accepted == 1
+        assert summary.signals_rejected == 0
+        assert summary.rejection_reasons == {}
         assert summary.sources_polled == ["fake"]
         assert summary.holder_lookup_outcomes == {"holder_lookup_succeeded": 1}
 
