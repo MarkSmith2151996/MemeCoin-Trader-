@@ -28,7 +28,7 @@ from src.signals.onchain import OnChainMonitor
 from src.signals.pump_fun import build_monitor_from_env
 from src.signals.twitter import TwitterMonitor
 from src.signals.whale_tracker import WhaleWalletTracker
-from src.strategy.decision_engine import DecisionEngine
+from src.strategy.decision_engine import DecisionEngine, RejectionRecord
 from src.strategy.position_manager import PositionManager
 
 app = typer.Typer(help="Memecoin Trader CLI")
@@ -53,6 +53,11 @@ class PaperCycleSummary:
     source_failures: dict[str, int]
     composite_opportunities: int
     rejection_reasons: dict[str, int]
+    candidates_evaluated: int
+    passed_risk_checks: int
+    summary_rejection_reasons: dict[str, int]
+    source_evaluated_counts: dict[str, int]
+    source_pass_counts: dict[str, int]
     holder_lookup_outcomes: dict[str, int]
     termination_reason: str
     elapsed_seconds: float
@@ -85,6 +90,29 @@ class PaperCycleSummary:
         if self.holder_lookup_outcomes:
             lines.append("holder_lookup_outcomes:")
             lines.extend(f"  {reason}={count}" for reason, count in self.holder_lookup_outcomes.items())
+        lines.extend(self.summary_table_lines())
+        return lines
+
+    def summary_table_lines(self) -> list[str]:
+        lines = [
+            "═══ Paper Cycle Summary ═══",
+            f"Signals collected:     {self.signals_collected}",
+            f"Candidates evaluated:  {self.candidates_evaluated}",
+            f"Passed risk checks:    {self.passed_risk_checks}",
+            f"Rejected:              {self.candidates_evaluated - self.passed_risk_checks}",
+        ]
+        for reason, count in self.summary_rejection_reasons.items():
+            lines.append(f"  - {reason}: {count}")
+        lines.append("By source:")
+        for source, count in self.source_evaluated_counts.items():
+            passed = self.source_pass_counts.get(source, 0)
+            lines.append(f"  - {source}: {count} ({passed} passed)")
+        lines.extend(
+            [
+                f"Paper trades executed: {self.trades_persisted}",
+                "═══════════════════════════",
+            ]
+        )
         return lines
 
 
@@ -195,6 +223,10 @@ async def run_bounded_paper_cycle(
     source_failures: Counter[str] = Counter()
     composite_opportunities = 0
     rejection_reasons: Counter[str] = Counter()
+    evaluated_by_source: Counter[str] = Counter()
+    passed_risk_by_source: Counter[str] = Counter()
+    summary_rejection_reasons: Counter[str] = Counter()
+    passed_risk_checks = 0
     termination_reason = "timeout"
 
     await aggregator.start()
@@ -220,20 +252,35 @@ async def run_bounded_paper_cycle(
 
             for signal in evaluated_batch:
                 signals_collected += 1
+                evaluated_by_source[signal.source.value] += 1
                 try:
                     decision = await engine.evaluate_signal_with_diagnostics(signal)
                 except Exception as exc:  # pragma: no cover - defensive against future decision/runtime failures
                     logger.warning("Failed to evaluate signal during paper-cycle: %s", exc)
                     signals_rejected += 1
                     rejection_reasons["unknown_or_other"] += 1
+                    summary_rejection_reasons["unknown_or_other"] += 1
                     continue
+
+                record = _extract_rejection_record(decision.metadata)
+                if record is not None:
+                    if record.outcome == "passed":
+                        passed_risk_checks += 1
+                        passed_risk_by_source[record.signal_source] += 1
+                    elif record.failed_check is not None:
+                        summary_rejection_reasons[_format_failed_check(record.failed_check)] += 1
 
                 if decision.trade is None:
                     signals_rejected += 1
                     rejection_reasons[decision.rejection_reason or "unknown_or_other"] += 1
+                    if record is None:
+                        summary_rejection_reasons[_format_rejection_reason(decision.rejection_reason)] += 1
                     continue
 
                 signals_accepted += 1
+                if record is None:
+                    passed_risk_checks += 1
+                    passed_risk_by_source[signal.source.value] += 1
 
             if signals_collected >= max_signals:
                 termination_reason = "max_signals"
@@ -264,10 +311,41 @@ async def run_bounded_paper_cycle(
         source_failures=dict(sorted(source_failures.items())),
         composite_opportunities=composite_opportunities,
         rejection_reasons=dict(sorted(rejection_reasons.items())),
+        candidates_evaluated=signals_accepted + signals_rejected,
+        passed_risk_checks=passed_risk_checks,
+        summary_rejection_reasons=dict(sorted(summary_rejection_reasons.items())),
+        source_evaluated_counts=dict(sorted(evaluated_by_source.items())),
+        source_pass_counts=dict(sorted(passed_risk_by_source.items())),
         holder_lookup_outcomes=holder_lookup_outcomes,
         termination_reason=termination_reason,
         elapsed_seconds=round(monotonic() - start_at, 3),
     )
+
+
+def _extract_rejection_record(metadata: dict[str, object]) -> RejectionRecord | None:
+    raw_record = metadata.get("rejection_record")
+    if isinstance(raw_record, RejectionRecord):
+        return raw_record
+    if isinstance(raw_record, dict):
+        try:
+            return RejectionRecord(**raw_record)
+        except TypeError:
+            return None
+    return None
+
+
+def _format_failed_check(failed_check: str) -> str:
+    return failed_check.removesuffix("_check")
+
+
+def _format_rejection_reason(rejection_reason: str | None) -> str:
+    if not rejection_reason:
+        return "unknown_or_other"
+    if rejection_reason.endswith("_failed"):
+        return rejection_reason.removesuffix("_failed").removesuffix("_check")
+    if rejection_reason.endswith("_unknown"):
+        return rejection_reason.removesuffix("_check_unknown") + "_unknown"
+    return rejection_reason
 
 
 @app.command()
