@@ -1012,6 +1012,179 @@ def test_unique_buyers_unknown_warning_does_not_override_creator_fail() -> None:
     assert signal.payload["unique_buyers_policy"]["unique_buyers_policy_state"] == "unknown_conservative"
 
 
+def test_strict_mode_authority_unknown_stays_conservative() -> None:
+    signal = Signal(
+        source=SignalSource.PUMP_FUN,
+        type=SignalType.NEW_POOL,
+        mint_address="strict-authority-unknown-mint",
+        payload={
+            "vSolInBondingCurve": 30.1,
+            "uniqueBuyers": 30,
+            "top10HolderPct": 30.0,
+            "creatorHoldingPct": 5.0,
+            "createdAt": datetime.now(UTC).isoformat(),
+        },
+    )
+    scorer = DiscoveryRiskScorer(config=RiskConfig(), enable_holder_lookup=False, holder_policy_mode="strict")
+
+    assessment = asyncio.run(scorer.assess_signal(signal))
+
+    assert assessment.mint_authority_check == CheckResult.UNKNOWN
+    assert signal.payload["authority_policy"]["authority_policy_state"] == "unknown_conservative"
+
+
+def test_discovery_mode_authority_unknown_becomes_warning_when_other_checks_clean() -> None:
+    signal = Signal(
+        source=SignalSource.PUMP_FUN,
+        type=SignalType.NEW_POOL,
+        mint_address="discovery-authority-warning-mint",
+        payload={
+            "vSolInBondingCurve": 30.1,
+            "uniqueBuyers": 30,
+            "top10HolderPct": 30.0,
+            "creatorHoldingPct": 5.0,
+            "createdAt": datetime.now(UTC).isoformat(),
+        },
+    )
+    scorer = DiscoveryRiskScorer(config=RiskConfig(), enable_holder_lookup=False, holder_policy_mode="discovery")
+
+    assessment = asyncio.run(scorer.assess_signal(signal))
+
+    assert assessment.mint_authority_check == CheckResult.PASS
+    assert assessment.freeze_authority_check == CheckResult.PASS
+    assert signal.payload["authority_policy"]["authority_policy_state"] == "unknown_warning"
+
+
+def test_known_active_mint_authority_still_fails_in_all_modes() -> None:
+    signal = Signal(
+        source=SignalSource.PUMP_FUN,
+        type=SignalType.NEW_POOL,
+        mint_address="authority-fail-mint",
+        payload={
+            "vSolInBondingCurve": 30.1,
+            "uniqueBuyers": 30,
+            "top10HolderPct": 30.0,
+            "creatorHoldingPct": 5.0,
+            "mintAuthorityRevoked": False,
+            "freezeAuthorityRevoked": True,
+            "createdAt": datetime.now(UTC).isoformat(),
+        },
+    )
+    scorer = DiscoveryRiskScorer(config=RiskConfig(), enable_holder_lookup=False, holder_policy_mode="discovery")
+
+    assessment = asyncio.run(scorer.assess_signal(signal))
+
+    assert assessment.mint_authority_check == CheckResult.FAIL
+    assert signal.payload["authority_policy"]["authority_policy_state"] == "fail"
+
+
+def test_known_revoked_authority_passes_this_check() -> None:
+    signal = Signal(
+        source=SignalSource.PUMP_FUN,
+        type=SignalType.NEW_POOL,
+        mint_address="authority-pass-mint",
+        payload={
+            "vSolInBondingCurve": 30.1,
+            "uniqueBuyers": 30,
+            "top10HolderPct": 30.0,
+            "creatorHoldingPct": 5.0,
+            "mintAuthorityRevoked": True,
+            "freezeAuthorityRevoked": True,
+            "createdAt": datetime.now(UTC).isoformat(),
+        },
+    )
+    scorer = DiscoveryRiskScorer(config=RiskConfig(), enable_holder_lookup=False, holder_policy_mode="discovery")
+
+    assessment = asyncio.run(scorer.assess_signal(signal))
+
+    assert assessment.mint_authority_check == CheckResult.PASS
+    assert assessment.freeze_authority_check == CheckResult.PASS
+    assert signal.payload["authority_policy"]["authority_policy_state"] == "pass"
+
+
+def test_authority_unknown_warning_does_not_override_holder_fail() -> None:
+    signal = Signal(
+        source=SignalSource.PUMP_FUN,
+        type=SignalType.NEW_POOL,
+        mint_address="authority-warning-holder-fail-mint",
+        payload={
+            "vSolInBondingCurve": 30.1,
+            "uniqueBuyers": 30,
+            "top10HolderPct": 90.0,
+            "creatorHoldingPct": 5.0,
+            "createdAt": datetime.now(UTC).isoformat(),
+            "risk_assessment": RiskAssessment(
+                token=TokenInfo(
+                    mint_address="authority-warning-holder-fail-mint",
+                    liquidity_sol=30.1,
+                    top10_holder_pct=90.0,
+                    creator_holding_pct=5.0,
+                    created_at=datetime.now(UTC),
+                ),
+                liquidity_check=CheckResult.PASS,
+                top10_holder_check=CheckResult.FAIL,
+                creator_holding_check=CheckResult.PASS,
+                age_check=CheckResult.PASS,
+                unique_buyers_check=CheckResult.PASS,
+                mint_authority_check=CheckResult.UNKNOWN,
+                freeze_authority_check=CheckResult.UNKNOWN,
+                honeypot_check=CheckResult.PASS,
+                score=60.0,
+                reasons=["top10_holder_check failed", "mint_authority_check unknown", "freeze_authority_check unknown"],
+            ),
+        },
+    )
+    scorer = DiscoveryRiskScorer(config=RiskConfig(), enable_holder_lookup=False, holder_policy_mode="discovery")
+
+    assessment = asyncio.run(scorer.assess_signal(signal))
+
+    assert assessment.mint_authority_check == CheckResult.UNKNOWN
+    assert signal.payload["authority_policy"]["authority_policy_state"] == "unknown_conservative"
+
+
+def test_authority_unknown_warning_does_not_override_liquidity_unknown() -> None:
+    signal = Signal(
+        source=SignalSource.PUMP_FUN,
+        type=SignalType.NEW_POOL,
+        mint_address="authority-warning-liquidity-unknown-mint",
+        payload={
+            "uniqueBuyers": 30,
+            "top10HolderPct": 30.0,
+            "creatorHoldingPct": 5.0,
+            "createdAt": datetime.now(UTC).isoformat(),
+        },
+    )
+    scorer = DiscoveryRiskScorer(config=RiskConfig(), enable_holder_lookup=False, holder_policy_mode="discovery")
+
+    assessment = asyncio.run(scorer.assess_signal(signal))
+
+    assert assessment.liquidity_check == CheckResult.UNKNOWN
+    assert assessment.mint_authority_check == CheckResult.UNKNOWN
+    assert signal.payload["authority_policy"]["authority_policy_state"] == "unknown_conservative"
+
+
+def test_authority_unknown_warning_does_not_override_creator_or_buyer_fail() -> None:
+    signal = Signal(
+        source=SignalSource.PUMP_FUN,
+        type=SignalType.NEW_POOL,
+        mint_address="authority-warning-creator-fail-mint",
+        payload={
+            "vSolInBondingCurve": 30.1,
+            "uniqueBuyers": 3,
+            "top10HolderPct": 30.0,
+            "creatorHoldingPct": 25.0,
+            "createdAt": datetime.now(UTC).isoformat(),
+        },
+    )
+    scorer = DiscoveryRiskScorer(config=RiskConfig(), enable_holder_lookup=False, holder_policy_mode="discovery")
+
+    assessment = asyncio.run(scorer.assess_signal(signal))
+
+    assert assessment.creator_holding_check == CheckResult.FAIL
+    assert assessment.unique_buyers_check == CheckResult.FAIL
+    assert signal.payload["authority_policy"]["authority_policy_state"] == "unknown_conservative"
+
+
 def test_strict_mode_keeps_seconds_old_pumpfun_launch_as_age_fail_with_fresh_seconds_state() -> None:
     signal = Signal(
         source=SignalSource.PUMP_FUN,

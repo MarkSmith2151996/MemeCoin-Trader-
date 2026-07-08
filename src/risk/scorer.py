@@ -173,6 +173,7 @@ class DiscoveryRiskScorer:
         honeypot_result = await self._simulate_honeypot(signal, rugcheck_result)
         assessment = _apply_honeypot_simulation_assessment(assessment, honeypot_result)
         assessment = _apply_funding_assessment(assessment, funding_result, missing_provider=missing_provider)
+        signal.payload["authority_diagnostics"] = _build_authority_diagnostics(token, rugcheck_result)
         signal.payload["unique_buyers_diagnostics"] = _build_unique_buyers_diagnostics(signal.payload, token, funding_result)
         holder_policy = _build_holder_policy_diagnostics(
             signal,
@@ -208,6 +209,17 @@ class DiscoveryRiskScorer:
             unique_buyers_diagnostics=signal.payload["unique_buyers_diagnostics"],
         )
         signal.payload["unique_buyers_policy"] = unique_buyers_policy
+        assessment, authority_policy = _apply_authority_policy_assessment(
+            assessment,
+            signal,
+            policy_mode=self._holder_policy_mode,
+            holder_policy=holder_policy,
+            age_policy=age_policy,
+            creator_policy=creator_policy,
+            unique_buyers_policy=unique_buyers_policy,
+            authority_diagnostics=signal.payload["authority_diagnostics"],
+        )
+        signal.payload["authority_policy"] = authority_policy
         self._record_lookup_outcome(lookup_status, assessment)
         self._record_rugcheck_outcome(rugcheck_result, assessment)
         self._record_honeypot_simulation_outcome(honeypot_result, assessment)
@@ -653,6 +665,26 @@ def _build_creator_diagnostics(
         "creator_holding_source": "unknown",
         "creator_holding_state": "unknown",
         "creator_holding_unknown_reason": "no normalized creator holding in signal payload, RugCheck, or holder lookup",
+    }
+
+
+def _build_authority_diagnostics(token: TokenInfo, rugcheck_result: RugCheckResult | None) -> dict[str, object]:
+    source = "rugcheck" if rugcheck_result is not None and rugcheck_result.provider_status == "ok" and rugcheck_result.found else "signal_or_unknown"
+    mint_state = _authority_state(token.mint_authority_revoked)
+    freeze_state = _authority_state(token.freeze_authority_revoked)
+    unknown_reason = None
+    if mint_state == "unknown" or freeze_state == "unknown":
+        reasons: list[str] = []
+        if mint_state == "unknown":
+            reasons.append("mint authority state unavailable")
+        if freeze_state == "unknown":
+            reasons.append("freeze authority state unavailable")
+        unknown_reason = "; ".join(reasons)
+    return {
+        "mint_authority_state": mint_state,
+        "freeze_authority_state": freeze_state,
+        "authority_source": source,
+        "authority_unknown_reason": unknown_reason,
     }
 
 
@@ -1103,6 +1135,87 @@ def _apply_unique_buyers_policy_assessment(
         "unique_buyers_policy_reason": "unique buyer count is unknown and discovery-mode warning conditions were not met",
         "unique_buyers_policy_context_used": context_used,
     }
+
+
+def _apply_authority_policy_assessment(
+    assessment: RiskAssessment,
+    signal: Signal,
+    *,
+    policy_mode: str,
+    holder_policy: Mapping[str, object],
+    age_policy: Mapping[str, object],
+    creator_policy: Mapping[str, object],
+    unique_buyers_policy: Mapping[str, object],
+    authority_diagnostics: Mapping[str, object],
+) -> tuple[RiskAssessment, dict[str, object]]:
+    context_used = False
+    mint_check = assessment.mint_authority_check
+    freeze_check = assessment.freeze_authority_check
+
+    if mint_check == CheckResult.PASS and freeze_check == CheckResult.PASS:
+        return assessment, {
+            "authority_policy_state": "pass",
+            "authority_policy_reason": "mint and freeze authority checks passed",
+            "authority_policy_context_used": context_used,
+        }
+
+    if mint_check == CheckResult.FAIL or freeze_check == CheckResult.FAIL:
+        return assessment, {
+            "authority_policy_state": "fail",
+            "authority_policy_reason": "known dangerous authority state present",
+            "authority_policy_context_used": context_used,
+        }
+
+    if policy_mode != "discovery":
+        return assessment, {
+            "authority_policy_state": "unknown_conservative",
+            "authority_policy_reason": "strict mode preserves conservative rejection for unknown authority state",
+            "authority_policy_context_used": context_used,
+        }
+
+    stage_hint = _signal_stage_hint(signal)
+    launch_like = stage_hint in {"new_pool", "pump"}
+    age_safe = age_policy.get("age_policy_state") in {"age_pass", "immature_warning"}
+    holder_safe = holder_policy.get("holder_policy_state") in {"pass", "fresh_launch_warning"}
+    creator_safe = creator_policy.get("creator_policy_state") in {"pass", "unknown_warning"}
+    buyer_safe = unique_buyers_policy.get("unique_buyers_policy_state") in {"pass", "unknown_warning"}
+    liquidity_safe = assessment.liquidity_check == CheckResult.PASS
+    honeypot_safe = assessment.honeypot_check != CheckResult.FAIL
+    missing_metadata = isinstance(authority_diagnostics.get("authority_unknown_reason"), str) and authority_diagnostics.get("authority_unknown_reason") != ""
+
+    if launch_like and age_safe and holder_safe and creator_safe and buyer_safe and liquidity_safe and honeypot_safe and missing_metadata:
+        context_used = True
+        updated_reasons = [reason for reason in assessment.reasons if reason not in {"mint_authority_check unknown", "freeze_authority_check unknown"}]
+        updated_score = assessment.score
+        if mint_check != CheckResult.PASS:
+            updated_score += CHECK_WEIGHTS["mint_authority_check"]
+        if freeze_check != CheckResult.PASS:
+            updated_score += CHECK_WEIGHTS["freeze_authority_check"]
+        updated_assessment = assessment.model_copy(
+            update={
+                "mint_authority_check": CheckResult.PASS,
+                "freeze_authority_check": CheckResult.PASS,
+                "score": updated_score,
+                "reasons": updated_reasons,
+            }
+        )
+        return updated_assessment, {
+            "authority_policy_state": "unknown_warning",
+            "authority_policy_reason": "discovery-mode launch-stage token allowed past unknown authority state because other hard safety checks were clean enough",
+            "authority_policy_context_used": context_used,
+        }
+
+    return assessment, {
+        "authority_policy_state": "unknown_conservative",
+        "authority_policy_reason": "authority state is unknown and discovery-mode warning conditions were not met",
+        "authority_policy_context_used": context_used,
+    }
+
+
+def _authority_state(revoked: bool | None) -> str:
+    if revoked is None:
+        return "unknown"
+    return "revoked" if revoked else "active"
 
 
 def _apply_holder_lookup_fields(token: TokenInfo, lookup_result: HolderLookupResult) -> TokenInfo:
