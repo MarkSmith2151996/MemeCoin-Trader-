@@ -334,6 +334,8 @@ def test_rugcheck_safe_data_populates_existing_scorer_fields() -> None:
     assert diagnostics["rugcheck_used_top_holder_pct"] == 1
     assert diagnostics["rugcheck_used_honeypot_pass"] == 1
     assert diagnostics["rugcheck_risk_level_low"] == 1
+    assert signal.payload["holder_diagnostics"]["top10_holder_source"] == "rugcheck"
+    assert signal.payload["holder_diagnostics"]["selected_top10_holder_pct"] == 30.0
 
 
 def test_rugcheck_unsafe_data_fails_existing_checks_with_current_labels() -> None:
@@ -373,6 +375,166 @@ def test_rugcheck_unsafe_data_fails_existing_checks_with_current_labels() -> Non
     assert "top10_holder_check failed" in assessment.reasons
     assert "mint_authority_check failed" in assessment.reasons
     assert "honeypot_check failed" in assessment.reasons
+
+
+def test_rugcheck_failing_holder_uses_local_filtered_override_when_local_passes() -> None:
+    mint_address = "44444444444444444444444444444444"
+    signal = Signal(
+        source=SignalSource.PUMP_FUN,
+        type=SignalType.NEW_POOL,
+        mint_address=mint_address,
+        payload={
+            "vSolInBondingCurve": 30.1,
+            "uniqueBuyers": 25,
+            "createdAt": (datetime.now(UTC) - timedelta(minutes=10)).isoformat(),
+        },
+    )
+    scorer = DiscoveryRiskScorer(
+        config=RiskConfig(min_age_minutes=0),
+        holder_lookup=FakeHolderLookup(HolderLookupResult(top10_holder_pct=30.0)),
+        rugcheck_client=FakeRugCheckClient(
+            RugCheckResult(
+                mint_address=mint_address,
+                found=True,
+                mint_authority_revoked=True,
+                freeze_authority_revoked=True,
+                top_holder_pct=91.0,
+                provider_status="ok",
+            )
+        ),
+        enable_holder_lookup=False,
+    )
+
+    assessment = asyncio.run(scorer.assess_signal(signal))
+
+    assert assessment.top10_holder_check == CheckResult.PASS
+    assert assessment.token is not None
+    assert assessment.token.top10_holder_pct == 30.0
+    diagnostics = signal.payload["holder_diagnostics"]
+    assert diagnostics["rugcheck_top10_holder_pct"] == 91.0
+    assert diagnostics["local_filtered_top10_holder_pct"] == 30.0
+    assert diagnostics["selected_top10_holder_pct"] == 30.0
+    assert diagnostics["top10_holder_source"] == "local_filtered_override"
+    assert scorer.diagnostics()["holder_lookup_local_override_succeeded"] == 1
+
+
+def test_rugcheck_failing_holder_keeps_local_override_when_local_still_fails() -> None:
+    mint_address = "55555555555555555555555555555555"
+    signal = Signal(
+        source=SignalSource.PUMP_FUN,
+        type=SignalType.NEW_POOL,
+        mint_address=mint_address,
+        payload={
+            "vSolInBondingCurve": 30.1,
+            "uniqueBuyers": 25,
+            "createdAt": (datetime.now(UTC) - timedelta(minutes=10)).isoformat(),
+        },
+    )
+    scorer = DiscoveryRiskScorer(
+        config=RiskConfig(min_age_minutes=0),
+        holder_lookup=FakeHolderLookup(HolderLookupResult(top10_holder_pct=75.0)),
+        rugcheck_client=FakeRugCheckClient(
+            RugCheckResult(
+                mint_address=mint_address,
+                found=True,
+                mint_authority_revoked=True,
+                freeze_authority_revoked=True,
+                top_holder_pct=120.0,
+                provider_status="ok",
+            )
+        ),
+        enable_holder_lookup=False,
+    )
+
+    assessment = asyncio.run(scorer.assess_signal(signal))
+
+    assert assessment.top10_holder_check == CheckResult.FAIL
+    assert assessment.token is not None
+    assert assessment.token.top10_holder_pct == 75.0
+    diagnostics = signal.payload["holder_diagnostics"]
+    assert diagnostics["rugcheck_top10_holder_pct"] == 120.0
+    assert diagnostics["local_filtered_top10_holder_pct"] == 75.0
+    assert diagnostics["selected_top10_holder_pct"] == 75.0
+    assert diagnostics["top10_holder_source"] == "local_filtered_override"
+
+
+def test_rugcheck_failing_holder_stays_conservative_when_local_lookup_unavailable() -> None:
+    mint_address = "66666666666666666666666666666666"
+    signal = Signal(
+        source=SignalSource.PUMP_FUN,
+        type=SignalType.NEW_POOL,
+        mint_address=mint_address,
+        payload={
+            "vSolInBondingCurve": 30.1,
+            "uniqueBuyers": 25,
+            "createdAt": (datetime.now(UTC) - timedelta(minutes=10)).isoformat(),
+        },
+    )
+    scorer = DiscoveryRiskScorer(
+        config=RiskConfig(min_age_minutes=0),
+        holder_lookup=FakeHolderLookup(error=RuntimeError("provider boom")),
+        rugcheck_client=FakeRugCheckClient(
+            RugCheckResult(
+                mint_address=mint_address,
+                found=True,
+                mint_authority_revoked=True,
+                freeze_authority_revoked=True,
+                top_holder_pct=91.0,
+                provider_status="ok",
+            )
+        ),
+        enable_holder_lookup=False,
+    )
+
+    assessment = asyncio.run(scorer.assess_signal(signal))
+
+    assert assessment.top10_holder_check == CheckResult.FAIL
+    assert assessment.token is not None
+    assert assessment.token.top10_holder_pct == 91.0
+    diagnostics = signal.payload["holder_diagnostics"]
+    assert diagnostics["rugcheck_top10_holder_pct"] == 91.0
+    assert diagnostics["local_filtered_top10_holder_pct"] is None
+    assert diagnostics["selected_top10_holder_pct"] == 91.0
+    assert diagnostics["top10_holder_source"] == "rugcheck_no_local_override"
+
+
+def test_rugcheck_missing_holder_keeps_existing_local_lookup_behavior() -> None:
+    mint_address = "77777777777777777777777777777777"
+    signal = Signal(
+        source=SignalSource.PUMP_FUN,
+        type=SignalType.NEW_POOL,
+        mint_address=mint_address,
+        payload={
+            "vSolInBondingCurve": 30.1,
+            "uniqueBuyers": 25,
+            "createdAt": (datetime.now(UTC) - timedelta(minutes=10)).isoformat(),
+        },
+    )
+    scorer = DiscoveryRiskScorer(
+        config=RiskConfig(min_age_minutes=0),
+        holder_lookup=FakeHolderLookup(HolderLookupResult(top10_holder_pct=30.0)),
+        rugcheck_client=FakeRugCheckClient(
+            RugCheckResult(
+                mint_address=mint_address,
+                found=True,
+                mint_authority_revoked=True,
+                freeze_authority_revoked=True,
+                top_holder_pct=None,
+                provider_status="ok",
+            )
+        ),
+    )
+
+    assessment = asyncio.run(scorer.assess_signal(signal))
+
+    assert assessment.top10_holder_check == CheckResult.PASS
+    assert assessment.token is not None
+    assert assessment.token.top10_holder_pct == 30.0
+    diagnostics = signal.payload["holder_diagnostics"]
+    assert diagnostics["rugcheck_top10_holder_pct"] is None
+    assert diagnostics["local_filtered_top10_holder_pct"] == 30.0
+    assert diagnostics["selected_top10_holder_pct"] == 30.0
+    assert diagnostics["top10_holder_source"] == "local_filtered_lookup"
 
 
 def test_rugcheck_unavailable_falls_back_to_existing_behavior() -> None:

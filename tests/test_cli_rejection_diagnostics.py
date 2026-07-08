@@ -66,6 +66,12 @@ def _build_rejected_signal() -> Signal:
             "marketCapUsd": 12345.0,
             "metrics": {"volume_m5": 321.0, "buys_m5": 8, "sells_m5": 3},
             "social_credibility": {"highest_tier": "medium", "unique_accounts": 2},
+            "holder_diagnostics": {
+                "rugcheck_top10_holder_pct": 91.0,
+                "local_filtered_top10_holder_pct": 42.0,
+                "selected_top10_holder_pct": 42.0,
+                "top10_holder_source": "local_filtered_override",
+            },
             "raw_data": {"secret": "do-not-print", "buyerWallets": ["WalletSecret111"]},
             "risk_assessment": assessment,
         },
@@ -91,7 +97,11 @@ def test_run_bounded_paper_cycle_collects_per_token_rejection_diagnostics(tmp_pa
         diagnostic = summary.rejected_candidate_diagnostics[0]
         assert diagnostic["symbol"] == "REKT"
         assert diagnostic["failed_check"] == "liquidity_check"
-        assert diagnostic["top10_holder_pct"] == 72.5
+        assert diagnostic["rugcheck_top10_holder_pct"] == 91.0
+        assert diagnostic["local_filtered_top10_holder_pct"] == 42.0
+        assert diagnostic["selected_top10_holder_pct"] == 42.0
+        assert diagnostic["top10_holder_source"] == "local_filtered_override"
+        assert diagnostic["top10_holder_pct"] == 42.0
         assert diagnostic["liquidity_state"] == "fail"
         assert diagnostic["liquidity_display"] == "4.0000"
         assert "mc=12345.00" in diagnostic["attention_hints"]
@@ -143,6 +153,7 @@ def test_rejection_report_and_cli_lines_stay_safe_with_missing_fields() -> None:
 
     assert cli_lines[0] == "Rejected candidate diagnostics:"
     assert "failed_check" in cli_lines[1]
+    assert "holder_source" in cli_lines[1]
     assert "liquidity_check" in cli_lines[2]
     assert "do-not-print" not in report
     assert "WalletSecret111" not in report

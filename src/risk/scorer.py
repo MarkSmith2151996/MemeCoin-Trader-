@@ -137,7 +137,8 @@ class DiscoveryRiskScorer:
         funding_result, missing_provider = funding_response
         if rugcheck_result is not None or funding_result is not None:
             self._lookup_outcomes["parallel_prechecks_used"] += 1
-        token, lookup_status = await self._enrich_token(token, rugcheck_result)
+        token, lookup_status, holder_diagnostics = await self._enrich_token(token, rugcheck_result)
+        signal.payload["holder_diagnostics"] = holder_diagnostics
         token = _apply_funding_token_fields(token, funding_result)
         assessment = assess_token(token, self._config)
         assessment = _apply_rugcheck_assessment(assessment, rugcheck_result)
@@ -153,37 +154,68 @@ class DiscoveryRiskScorer:
     def diagnostics(self) -> dict[str, int]:
         return dict(sorted(self._lookup_outcomes.items()))
 
-    async def _enrich_token(self, token: TokenInfo, rugcheck_result: RugCheckResult | None) -> tuple[TokenInfo, str | None]:
+    async def _enrich_token(
+        self,
+        token: TokenInfo,
+        rugcheck_result: RugCheckResult | None,
+    ) -> tuple[TokenInfo, str | None, dict[str, object]]:
+        rugcheck_top10_holder_pct = _rugcheck_top10_holder_pct(rugcheck_result)
         token = _apply_rugcheck_token_fields(token, rugcheck_result)
+        holder_diagnostics = {
+            "rugcheck_top10_holder_pct": rugcheck_top10_holder_pct,
+            "local_filtered_top10_holder_pct": None,
+            "selected_top10_holder_pct": token.top10_holder_pct,
+            "top10_holder_source": "signal_payload" if token.top10_holder_pct is not None else "unknown",
+            "local_holder_lookup_attempted": False,
+            "local_holder_lookup_status": None,
+        }
 
         if token.top10_holder_pct is not None:
-            return token, None
+            return token, None, holder_diagnostics
+
+        if rugcheck_top10_holder_pct is not None:
+            holder_diagnostics["selected_top10_holder_pct"] = rugcheck_top10_holder_pct
+            if rugcheck_top10_holder_pct > self._config.max_top10_holder_pct:
+                holder_diagnostics["local_holder_lookup_attempted"] = True
+                lookup_result = await self._fetch_holder_lookup(token.mint_address)
+                lookup_status = "holder_lookup_override_failed_provider" if lookup_result is None else lookup_result.status
+                holder_diagnostics["local_holder_lookup_status"] = lookup_status
+                if lookup_result is not None and lookup_result.top10_holder_pct is not None:
+                    holder_diagnostics["local_filtered_top10_holder_pct"] = lookup_result.top10_holder_pct
+                    holder_diagnostics["selected_top10_holder_pct"] = lookup_result.top10_holder_pct
+                    holder_diagnostics["top10_holder_source"] = "local_filtered_override"
+                    return _apply_holder_lookup_fields(token, lookup_result), "holder_lookup_local_override_succeeded", holder_diagnostics
+                holder_diagnostics["top10_holder_source"] = "rugcheck_no_local_override"
+                return token.model_copy(update={"top10_holder_pct": rugcheck_top10_holder_pct}), lookup_status, holder_diagnostics
+
+            holder_diagnostics["top10_holder_source"] = "rugcheck"
+            return token.model_copy(update={"top10_holder_pct": rugcheck_top10_holder_pct}), None, holder_diagnostics
+
         if not self._enable_holder_lookup:
-            return token, None
+            return token, None, holder_diagnostics
 
-        if token.mint_address not in self._cache:
-            try:
-                self._cache[token.mint_address] = await self._holder_lookup.fetch(token.mint_address)
-            except Exception:
-                self._cache[token.mint_address] = HolderLookupResult(status="holder_lookup_failed_provider")
-
-        lookup_result = self._cache[token.mint_address]
+        holder_diagnostics["local_holder_lookup_attempted"] = True
+        lookup_result = await self._fetch_holder_lookup(token.mint_address)
+        lookup_status = "holder_lookup_failed_provider" if lookup_result is None else lookup_result.status
+        holder_diagnostics["local_holder_lookup_status"] = lookup_status
         if lookup_result is None:
-            return token, "holder_lookup_failed_provider"
+            return token, lookup_status, holder_diagnostics
 
         if lookup_result.status != "holder_lookup_succeeded":
-            return token, lookup_result.status
+            return token, lookup_result.status, holder_diagnostics
 
-        updates: dict[str, float | int] = {}
-        if token.top10_holder_pct is None and lookup_result.top10_holder_pct is not None:
-            updates["top10_holder_pct"] = lookup_result.top10_holder_pct
-        if token.creator_holding_pct is None and lookup_result.creator_holding_pct is not None:
-            updates["creator_holding_pct"] = lookup_result.creator_holding_pct
-        if token.holder_count is None and lookup_result.holder_count is not None:
-            updates["holder_count"] = lookup_result.holder_count
-        if not updates:
-            return token, "holder_lookup_succeeded"
-        return token.model_copy(update=updates), "holder_lookup_succeeded"
+        holder_diagnostics["local_filtered_top10_holder_pct"] = lookup_result.top10_holder_pct
+        holder_diagnostics["selected_top10_holder_pct"] = lookup_result.top10_holder_pct
+        holder_diagnostics["top10_holder_source"] = "local_filtered_lookup"
+        return _apply_holder_lookup_fields(token, lookup_result), "holder_lookup_succeeded", holder_diagnostics
+
+    async def _fetch_holder_lookup(self, mint_address: str) -> HolderLookupResult | None:
+        if mint_address not in self._cache:
+            try:
+                self._cache[mint_address] = await self._holder_lookup.fetch(mint_address)
+            except Exception:
+                self._cache[mint_address] = HolderLookupResult(status="holder_lookup_failed_provider")
+        return self._cache[mint_address]
 
     async def _enrich_liquidity(self, token: TokenInfo) -> TokenInfo:
         if token.liquidity_sol is not None:
@@ -282,7 +314,7 @@ class DiscoveryRiskScorer:
     def _record_lookup_outcome(self, lookup_status: str | None, assessment: RiskAssessment) -> None:
         if lookup_status is None:
             return
-        if lookup_status == "holder_lookup_succeeded" and assessment.top10_holder_check == CheckResult.FAIL:
+        if lookup_status in {"holder_lookup_succeeded", "holder_lookup_local_override_succeeded"} and assessment.top10_holder_check == CheckResult.FAIL:
             self._lookup_outcomes["holder_lookup_threshold_failed"] += 1
             return
         self._lookup_outcomes[lookup_status] += 1
@@ -394,9 +426,26 @@ def _apply_rugcheck_token_fields(token: TokenInfo, rugcheck_result: RugCheckResu
         updates["mint_authority_revoked"] = rugcheck_result.mint_authority_revoked
     if token.freeze_authority_revoked is None and rugcheck_result.freeze_authority_revoked is not None:
         updates["freeze_authority_revoked"] = rugcheck_result.freeze_authority_revoked
-    if token.top10_holder_pct is None and rugcheck_result.top_holder_pct is not None:
-        updates["top10_holder_pct"] = rugcheck_result.top_holder_pct
 
+    if not updates:
+        return token
+    return token.model_copy(update=updates)
+
+
+def _rugcheck_top10_holder_pct(rugcheck_result: RugCheckResult | None) -> float | None:
+    if rugcheck_result is None or rugcheck_result.provider_status != "ok" or not rugcheck_result.found:
+        return None
+    return rugcheck_result.top_holder_pct
+
+
+def _apply_holder_lookup_fields(token: TokenInfo, lookup_result: HolderLookupResult) -> TokenInfo:
+    updates: dict[str, float | int] = {}
+    if lookup_result.top10_holder_pct is not None:
+        updates["top10_holder_pct"] = lookup_result.top10_holder_pct
+    if token.creator_holding_pct is None and lookup_result.creator_holding_pct is not None:
+        updates["creator_holding_pct"] = lookup_result.creator_holding_pct
+    if token.holder_count is None and lookup_result.holder_count is not None:
+        updates["holder_count"] = lookup_result.holder_count
     if not updates:
         return token
     return token.model_copy(update=updates)

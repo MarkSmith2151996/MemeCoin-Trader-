@@ -127,15 +127,16 @@ class PaperCycleSummary:
             return []
 
         lines = ["Rejected candidate diagnostics:"]
-        lines.append("  # | symbol | mint | source | failed_check | top10_holder_pct | liquidity | attention_hints")
+        lines.append("  # | symbol | mint | source | failed_check | holder_source | top10_holder_pct | liquidity | attention_hints")
         for diagnostic in self.rejected_candidate_diagnostics:
             lines.append(
-                "  {rank} | {symbol} | {mint_short} | {source} | {failed_check} | {top10_holder_pct} | {liquidity} | {attention_hints}".format(
+                "  {rank} | {symbol} | {mint_short} | {source} | {failed_check} | {holder_source} | {top10_holder_pct} | {liquidity} | {attention_hints}".format(
                     rank=diagnostic.get("rank", "?"),
                     symbol=diagnostic.get("symbol", "unknown"),
                     mint_short=diagnostic.get("mint_short", "unknown"),
                     source=diagnostic.get("source", "unknown"),
                     failed_check=diagnostic.get("failed_check", "unknown"),
+                    holder_source=diagnostic.get("top10_holder_source", "unknown"),
                     top10_holder_pct=diagnostic.get("top10_holder_pct", "unknown"),
                     liquidity=diagnostic.get("liquidity_display", "unknown"),
                     attention_hints=diagnostic.get("attention_hints", "none"),
@@ -397,6 +398,7 @@ def _build_rejected_candidate_diagnostic(
     token_section = payload.get("token") if isinstance(payload.get("token"), dict) else {}
     metrics = payload.get("metrics") if isinstance(payload.get("metrics"), dict) else {}
     social = payload.get("social_credibility") if isinstance(payload.get("social_credibility"), dict) else {}
+    holder_diagnostics = payload.get("holder_diagnostics") if isinstance(payload.get("holder_diagnostics"), dict) else {}
     top10_result = _check_result_value(record, "top10_holder_check")
     liquidity_result = _check_result_value(record, "liquidity_check")
     authority_result = _check_result_value(record, "mint_authority_check")
@@ -428,7 +430,16 @@ def _build_rejected_candidate_diagnostic(
         "failed_check": (record.failed_check if record is not None and record.failed_check is not None else _format_rejection_reason(decision.rejection_reason)),
         "rejection_reason": decision.rejection_reason or "unknown_or_other",
         "risk_score": record.risk_score if record is not None else None,
-        "top10_holder_pct": top10_value if top10_value is not None else "unknown",
+        "rugcheck_top10_holder_pct": holder_diagnostics.get("rugcheck_top10_holder_pct", "unknown"),
+        "local_filtered_top10_holder_pct": holder_diagnostics.get("local_filtered_top10_holder_pct", "unknown"),
+        "selected_top10_holder_pct": holder_diagnostics.get(
+            "selected_top10_holder_pct",
+            top10_value if top10_value is not None else "unknown",
+        ),
+        "top10_holder_pct": holder_diagnostics.get(
+            "selected_top10_holder_pct",
+            top10_value if top10_value is not None else "unknown",
+        ),
         "top10_holder_source": _top10_holder_source_hint(payload, record),
         "liquidity_value": liquidity_value if liquidity_value is not None else "unknown",
         "liquidity_display": _liquidity_display(liquidity_result, liquidity_value),
@@ -547,6 +558,11 @@ def _attention_hints(
 
 
 def _top10_holder_source_hint(payload: dict[str, object], record: RejectionRecord | None) -> str:
+    holder_diagnostics = payload.get("holder_diagnostics")
+    if isinstance(holder_diagnostics, dict):
+        source = holder_diagnostics.get("top10_holder_source")
+        if isinstance(source, str) and source:
+            return source
     if any(key in payload for key in ("top10HolderPct", "top10HolderPercent", "holderConcentrationTop10Pct")):
         return "signal_payload"
     if record is not None and _check_metric_value(record, "top10_holder_check") is not None:
@@ -598,6 +614,9 @@ def build_rejection_diagnostic_report(summary: PaperCycleSummary) -> str:
                 f"failed_check: {diagnostic.get('failed_check', 'unknown')}",
                 f"rejection_reason: {diagnostic.get('rejection_reason', 'unknown')}",
                 f"risk_score: {diagnostic.get('risk_score', 'unknown') if diagnostic.get('risk_score') is not None else 'unknown'}",
+                f"rugcheck_top10_holder_pct: {diagnostic.get('rugcheck_top10_holder_pct', 'unknown')}",
+                f"local_filtered_top10_holder_pct: {diagnostic.get('local_filtered_top10_holder_pct', 'unknown')}",
+                f"selected_top10_holder_pct: {diagnostic.get('selected_top10_holder_pct', 'unknown')}",
                 f"top10_holder_pct: {diagnostic.get('top10_holder_pct', 'unknown')}",
                 f"top10_holder_source: {diagnostic.get('top10_holder_source', 'unknown')}",
                 f"liquidity: {diagnostic.get('liquidity_display', 'unknown')}",
