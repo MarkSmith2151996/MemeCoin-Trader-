@@ -6,7 +6,8 @@ import asyncio
 import logging
 import sqlite3
 from collections import Counter
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+from datetime import UTC, datetime
 from pathlib import Path
 from time import monotonic
 from typing import Any
@@ -35,6 +36,9 @@ app = typer.Typer(help="Memecoin Trader CLI")
 console = Console()
 logger = logging.getLogger(__name__)
 SUPPORTED_RISK_PROFILES = {"strict", "discovery"}
+MT038_REPORT_PATH = Path(
+    "/mnt/c/Users/Big A/custodian-shared/memecoin-trader/diagnostic-reports/mt038-per-token-rejection-diagnostics.txt"
+)
 
 
 @dataclass(slots=True)
@@ -61,6 +65,8 @@ class PaperCycleSummary:
     holder_lookup_outcomes: dict[str, int]
     termination_reason: str
     elapsed_seconds: float
+    rejected_candidate_diagnostics: list[dict[str, object]] = field(default_factory=list)
+    diagnostic_report_path: str | None = None
 
     def safe_lines(self) -> list[str]:
         lines = [
@@ -91,6 +97,7 @@ class PaperCycleSummary:
             lines.append("holder_lookup_outcomes:")
             lines.extend(f"  {reason}={count}" for reason, count in self.holder_lookup_outcomes.items())
         lines.extend(self.summary_table_lines())
+        lines.extend(self.rejection_diagnostic_lines())
         return lines
 
     def summary_table_lines(self) -> list[str]:
@@ -113,6 +120,27 @@ class PaperCycleSummary:
                 "═══════════════════════════",
             ]
         )
+        return lines
+
+    def rejection_diagnostic_lines(self) -> list[str]:
+        if not self.rejected_candidate_diagnostics:
+            return []
+
+        lines = ["Rejected candidate diagnostics:"]
+        lines.append("  # | symbol | mint | source | failed_check | top10_holder_pct | liquidity | attention_hints")
+        for diagnostic in self.rejected_candidate_diagnostics:
+            lines.append(
+                "  {rank} | {symbol} | {mint_short} | {source} | {failed_check} | {top10_holder_pct} | {liquidity} | {attention_hints}".format(
+                    rank=diagnostic.get("rank", "?"),
+                    symbol=diagnostic.get("symbol", "unknown"),
+                    mint_short=diagnostic.get("mint_short", "unknown"),
+                    source=diagnostic.get("source", "unknown"),
+                    failed_check=diagnostic.get("failed_check", "unknown"),
+                    top10_holder_pct=diagnostic.get("top10_holder_pct", "unknown"),
+                    liquidity=diagnostic.get("liquidity_display", "unknown"),
+                    attention_hints=diagnostic.get("attention_hints", "none"),
+                )
+            )
         return lines
 
 
@@ -227,6 +255,7 @@ async def run_bounded_paper_cycle(
     passed_risk_by_source: Counter[str] = Counter()
     summary_rejection_reasons: Counter[str] = Counter()
     passed_risk_checks = 0
+    rejected_candidate_diagnostics: list[dict[str, object]] = []
     termination_reason = "timeout"
 
     await aggregator.start()
@@ -252,7 +281,7 @@ async def run_bounded_paper_cycle(
 
             for signal in evaluated_batch:
                 signals_collected += 1
-                evaluated_by_source[signal.source.value] += 1
+                evaluated_by_source[str(signal.source.value).lower()] += 1
                 try:
                     decision = await engine.evaluate_signal_with_diagnostics(signal)
                 except Exception as exc:  # pragma: no cover - defensive against future decision/runtime failures
@@ -266,21 +295,29 @@ async def run_bounded_paper_cycle(
                 if record is not None:
                     if record.outcome == "passed":
                         passed_risk_checks += 1
-                        passed_risk_by_source[record.signal_source] += 1
+                        passed_risk_by_source[str(record.signal_source).lower()] += 1
                     elif record.failed_check is not None:
                         summary_rejection_reasons[_format_failed_check(record.failed_check)] += 1
 
                 if decision.trade is None:
                     signals_rejected += 1
                     rejection_reasons[decision.rejection_reason or "unknown_or_other"] += 1
-                    if record is None:
+                    if record is None or record.failed_check is None:
                         summary_rejection_reasons[_format_rejection_reason(decision.rejection_reason)] += 1
+                    rejected_candidate_diagnostics.append(
+                        _build_rejected_candidate_diagnostic(
+                            rank=signals_collected,
+                            signal=signal,
+                            decision=decision,
+                            record=record,
+                        )
+                    )
                     continue
 
                 signals_accepted += 1
                 if record is None:
                     passed_risk_checks += 1
-                    passed_risk_by_source[signal.source.value] += 1
+                    passed_risk_by_source[str(signal.source.value).lower()] += 1
 
             if signals_collected >= max_signals:
                 termination_reason = "max_signals"
@@ -319,6 +356,7 @@ async def run_bounded_paper_cycle(
         holder_lookup_outcomes=holder_lookup_outcomes,
         termination_reason=termination_reason,
         elapsed_seconds=round(monotonic() - start_at, 3),
+        rejected_candidate_diagnostics=rejected_candidate_diagnostics,
     )
 
 
@@ -346,6 +384,266 @@ def _format_rejection_reason(rejection_reason: str | None) -> str:
     if rejection_reason.endswith("_unknown"):
         return rejection_reason.removesuffix("_check_unknown") + "_unknown"
     return rejection_reason
+
+
+def _build_rejected_candidate_diagnostic(
+    *,
+    rank: int,
+    signal: Any,
+    decision: Any,
+    record: RejectionRecord | None,
+) -> dict[str, object]:
+    payload = signal.payload if isinstance(signal.payload, dict) else {}
+    token_section = payload.get("token") if isinstance(payload.get("token"), dict) else {}
+    metrics = payload.get("metrics") if isinstance(payload.get("metrics"), dict) else {}
+    social = payload.get("social_credibility") if isinstance(payload.get("social_credibility"), dict) else {}
+    top10_result = _check_result_value(record, "top10_holder_check")
+    liquidity_result = _check_result_value(record, "liquidity_check")
+    authority_result = _check_result_value(record, "mint_authority_check")
+    honeypot_result = _check_result_value(record, "honeypot_check")
+    unique_buyers_result = _check_result_value(record, "unique_buyers_check")
+    market_cap = _first_present(
+        token_section,
+        payload,
+        keys=("market_cap_usd", "marketCapUsd", "usdMarketCap", "marketCapUSD", "marketCapSol"),
+    )
+    volume = _first_present(metrics, payload, keys=("volume_m5", "volume_h1", "volume_h24", "volume"))
+    buy_sell = _buy_sell_hint(metrics)
+    attention_hints = _attention_hints(payload, social=social, market_cap=market_cap, volume=volume, buy_sell=buy_sell)
+    symbol = _stringish(_first_present(token_section, payload, keys=("symbol", "ticker", "name"))) or "unknown"
+    liquidity_value = _check_metric_value(record, "liquidity_check")
+    top10_value = _check_metric_value(record, "top10_holder_check")
+
+    return {
+        "rank": rank,
+        "mint": signal.mint_address,
+        "mint_short": _short_mint(signal.mint_address),
+        "symbol": symbol,
+        "name": _stringish(_first_present(token_section, payload, keys=("name",))),
+        "source": str(signal.source.value).lower(),
+        "confidence": round(signal.confidence, 6),
+        "weight": round(signal.weight, 6),
+        "effective_score": round(min(signal.confidence * max(signal.weight, 0.0), 1.0), 6),
+        "decision": "rejected",
+        "failed_check": (record.failed_check if record is not None and record.failed_check is not None else _format_rejection_reason(decision.rejection_reason)),
+        "rejection_reason": decision.rejection_reason or "unknown_or_other",
+        "risk_score": record.risk_score if record is not None else None,
+        "top10_holder_pct": top10_value if top10_value is not None else "unknown",
+        "top10_holder_source": _top10_holder_source_hint(payload, record),
+        "liquidity_value": liquidity_value if liquidity_value is not None else "unknown",
+        "liquidity_display": _liquidity_display(liquidity_result, liquidity_value),
+        "liquidity_state": liquidity_result or "unknown",
+        "liquidity_check": liquidity_result or "unknown",
+        "honeypot_check": honeypot_result or "unknown",
+        "authority_check": authority_result or "unknown",
+        "funding_check": unique_buyers_result or "unknown",
+        "market_cap_hint": market_cap if market_cap is not None else "unknown",
+        "volume_hint": volume if volume is not None else "unknown",
+        "buy_sell_hint": buy_sell,
+        "graduation_flag": str(signal.type.value).lower() == "graduation",
+        "social_hint": _social_hint(social),
+        "attention_hints": attention_hints,
+        "creator_repeat_flag": bool(payload.get("creator_repeat_flag")),
+        "notes": _diagnostic_note(payload, record),
+    }
+
+
+def _check_result_value(record: RejectionRecord | None, field_name: str) -> str | None:
+    if record is None:
+        return None
+    entry = record.check_results.get(field_name)
+    if not isinstance(entry, dict):
+        return None
+    result = entry.get("result")
+    return str(result).lower() if isinstance(result, str) else None
+
+
+def _check_metric_value(record: RejectionRecord | None, field_name: str) -> object | None:
+    if record is None:
+        return None
+    entry = record.check_results.get(field_name)
+    if not isinstance(entry, dict):
+        return None
+    return entry.get("value")
+
+
+def _first_present(*mappings: dict[str, object], keys: tuple[str, ...]) -> object | None:
+    for mapping in mappings:
+        for key in keys:
+            value = mapping.get(key)
+            if value is not None:
+                return value
+    return None
+
+
+def _stringish(value: object) -> str | None:
+    if isinstance(value, str) and value.strip():
+        return value.strip()
+    return None
+
+
+def _short_mint(mint: str) -> str:
+    if len(mint) <= 12:
+        return mint
+    return f"{mint[:4]}...{mint[-4:]}"
+
+
+def _liquidity_display(result: str | None, value: object | None) -> str:
+    if isinstance(value, (int, float)):
+        return f"{float(value):.4f}"
+    if result == "unknown":
+        return "unknown"
+    if result == "fail":
+        return "fail"
+    return "unknown"
+
+
+def _buy_sell_hint(metrics: dict[str, object]) -> str:
+    buys = metrics.get("buys_m5")
+    sells = metrics.get("sells_m5")
+    if isinstance(buys, (int, float)) and isinstance(sells, (int, float)):
+        return f"b{int(buys)}/s{int(sells)}"
+    return "unknown"
+
+
+def _social_hint(social: dict[str, object]) -> str:
+    if not social:
+        return "unknown"
+    tier = social.get("highest_tier")
+    unique_accounts = social.get("unique_accounts")
+    parts: list[str] = []
+    if tier is not None:
+        parts.append(f"tier={tier}")
+    if unique_accounts is not None:
+        parts.append(f"accounts={unique_accounts}")
+    return ",".join(parts) if parts else "known"
+
+
+def _attention_hints(
+    payload: dict[str, object],
+    *,
+    social: dict[str, object],
+    market_cap: object | None,
+    volume: object | None,
+    buy_sell: str,
+) -> str:
+    hints: list[str] = []
+    if payload.get("pool") == "raydium" or any(
+        keyword in str(payload.get(field, "")).lower()
+        for field in ("txType", "event", "type")
+        for keyword in ("migrate", "graduat")
+    ):
+        hints.append("graduation")
+    if isinstance(market_cap, (int, float)):
+        hints.append(f"mc={float(market_cap):.2f}")
+    if isinstance(volume, (int, float)):
+        hints.append(f"vol={float(volume):.2f}")
+    if buy_sell != "unknown":
+        hints.append(buy_sell)
+    social_summary = _social_hint(social)
+    if social_summary != "unknown":
+        hints.append(f"social:{social_summary}")
+    return ", ".join(hints) if hints else "none"
+
+
+def _top10_holder_source_hint(payload: dict[str, object], record: RejectionRecord | None) -> str:
+    if any(key in payload for key in ("top10HolderPct", "top10HolderPercent", "holderConcentrationTop10Pct")):
+        return "signal_payload"
+    if record is not None and _check_metric_value(record, "top10_holder_check") is not None:
+        return "risk_enrichment_unknown"
+    return "unknown"
+
+
+def _diagnostic_note(payload: dict[str, object], record: RejectionRecord | None) -> str:
+    notes: list[str] = []
+    if record is not None and _check_result_value(record, "liquidity_check") == "unknown":
+        notes.append("liquidity metric missing at evaluation time")
+    if record is not None and _check_result_value(record, "top10_holder_check") == "fail":
+        notes.append("holder concentration threshold failed")
+    if payload.get("social_credibility") is None:
+        notes.append("no social credibility metadata present")
+    return "; ".join(notes) if notes else "none"
+
+
+def build_rejection_diagnostic_report(summary: PaperCycleSummary) -> str:
+    lines = [
+        "MT-038 Per-Token Rejection Diagnostics",
+        f"generated_at_utc: {datetime.now(UTC).isoformat()}",
+        f"execution_mode: {summary.execution_mode}",
+        f"risk_profile: {summary.risk_profile}",
+        f"max_signals: {summary.max_signals}",
+        f"timeout_seconds: {summary.timeout_seconds:g}",
+        f"signals_collected: {summary.signals_collected}",
+        f"candidates_evaluated: {summary.candidates_evaluated}",
+        f"passed_risk_checks: {summary.passed_risk_checks}",
+        f"rejected: {summary.candidates_evaluated - summary.passed_risk_checks}",
+        f"paper_trades_executed: {summary.trades_persisted}",
+        "",
+        "Aggregate rejection reasons:",
+    ]
+    if summary.summary_rejection_reasons:
+        lines.extend(f"- {reason}: {count}" for reason, count in summary.summary_rejection_reasons.items())
+    else:
+        lines.append("- none")
+
+    lines.extend(["", "Per-candidate sections:"])
+    for diagnostic in summary.rejected_candidate_diagnostics:
+        lines.extend(
+            [
+                "",
+                f"[{diagnostic.get('rank', '?')}] {diagnostic.get('symbol', 'unknown')} ({diagnostic.get('mint_short', 'unknown')})",
+                f"mint: {diagnostic.get('mint', 'unknown')}",
+                f"source: {diagnostic.get('source', 'unknown')}",
+                f"decision: {diagnostic.get('decision', 'unknown')}",
+                f"failed_check: {diagnostic.get('failed_check', 'unknown')}",
+                f"rejection_reason: {diagnostic.get('rejection_reason', 'unknown')}",
+                f"risk_score: {diagnostic.get('risk_score', 'unknown') if diagnostic.get('risk_score') is not None else 'unknown'}",
+                f"top10_holder_pct: {diagnostic.get('top10_holder_pct', 'unknown')}",
+                f"top10_holder_source: {diagnostic.get('top10_holder_source', 'unknown')}",
+                f"liquidity: {diagnostic.get('liquidity_display', 'unknown')}",
+                f"liquidity_state: {diagnostic.get('liquidity_state', 'unknown')}",
+                f"honeypot_check: {diagnostic.get('honeypot_check', 'unknown')}",
+                f"authority_check: {diagnostic.get('authority_check', 'unknown')}",
+                f"funding_check: {diagnostic.get('funding_check', 'unknown')}",
+                f"market_cap_hint: {diagnostic.get('market_cap_hint', 'unknown')}",
+                f"volume_hint: {diagnostic.get('volume_hint', 'unknown')}",
+                f"buy_sell_hint: {diagnostic.get('buy_sell_hint', 'unknown')}",
+                f"graduation_flag: {diagnostic.get('graduation_flag', 'unknown')}",
+                f"social_hint: {diagnostic.get('social_hint', 'unknown')}",
+                f"attention_hints: {diagnostic.get('attention_hints', 'unknown')}",
+                f"notes: {diagnostic.get('notes', 'none')}",
+            ]
+        )
+
+    rugcheck_holder_failures = sum(
+        1
+        for diagnostic in summary.rejected_candidate_diagnostics
+        if diagnostic.get("failed_check") == "top10_holder_check"
+        and diagnostic.get("top10_holder_source") == "risk_enrichment_unknown"
+    )
+    liquidity_failures = sum(
+        1 for diagnostic in summary.rejected_candidate_diagnostics if diagnostic.get("liquidity_state") in {"fail", "unknown"}
+    )
+    has_attention_hints = any(
+        diagnostic.get("attention_hints") not in {"none", "unknown"}
+        for diagnostic in summary.rejected_candidate_diagnostics
+    )
+    lines.extend(
+        [
+            "",
+            "Interpretation:",
+            f"- RugCheck/local enrichment holder-driven failures: {rugcheck_holder_failures}",
+            f"- Liquidity fail/unknown count among rejected candidates: {liquidity_failures}",
+            f"- Signal payloads contain attention-scoring hints: {'yes' if has_attention_hints else 'no'}",
+        ]
+    )
+    return "\n".join(lines) + "\n"
+
+
+def write_rejection_diagnostic_report(summary: PaperCycleSummary, path: Path) -> None:
+    report = build_rejection_diagnostic_report(summary)
+    path.write_text(report, encoding="utf-8")
+    summary.diagnostic_report_path = str(path)
 
 
 @app.command()
@@ -380,6 +678,9 @@ def paper_cycle(
             db_path=db_path,
         )
     )
+    if not MT038_REPORT_PATH.parent.is_dir():
+        raise RuntimeError(f"Shared diagnostic directory missing: {MT038_REPORT_PATH.parent}")
+    write_rejection_diagnostic_report(summary, MT038_REPORT_PATH)
     for line in summary.safe_lines():
         console.print(line)
 

@@ -53,6 +53,7 @@ class RejectionRecord:
     outcome: str
     failed_check: str | None
     check_results: dict[str, dict[str, object]]
+    risk_score: float | None = None
 
 
 class DecisionEngine:
@@ -430,6 +431,7 @@ class DecisionEngine:
         for check_name, actual, threshold, result in self._ordered_check_details(token, risk):
             check_results[check_name] = {
                 "passed": result == CheckResult.PASS,
+                "result": result.value,
                 "value": actual,
                 "threshold": threshold,
             }
@@ -444,6 +446,7 @@ class DecisionEngine:
             timestamp=timestamp,
             outcome=outcome,
             failed_check=failed_check,
+            risk_score=risk.score if risk is not None else None,
             check_results=check_results,
         )
 
