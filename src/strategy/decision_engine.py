@@ -3,10 +3,18 @@
 from __future__ import annotations
 
 import inspect
+import json
 import logging
-from dataclasses import dataclass, field
+from collections import Counter
+from dataclasses import asdict, dataclass, field
+from datetime import datetime
 from pathlib import Path
 from typing import Any
+
+try:
+    import structlog
+except ModuleNotFoundError:  # pragma: no cover - depends on local environment
+    structlog = None
 
 from src.core.config import Settings
 from src.core.database import record_trade
@@ -19,6 +27,7 @@ from src.strategy.position_sizing import determine_liquidity_position_size
 
 
 logger = logging.getLogger(__name__)
+telemetry_logger = structlog.get_logger(__name__) if structlog is not None else logger
 
 
 @dataclass(slots=True)
@@ -33,6 +42,17 @@ class PositionSizingResult:
     amount_sol: float
     metadata: dict[str, object]
     rejection_reason: str | None = None
+
+
+@dataclass(slots=True)
+class RejectionRecord:
+    mint_address: str
+    signal_source: str
+    signal_strength: float
+    timestamp: datetime
+    outcome: str
+    failed_check: str | None
+    check_results: dict[str, dict[str, object]]
 
 
 class DecisionEngine:
@@ -59,31 +79,50 @@ class DecisionEngine:
     async def evaluate_signal_with_diagnostics(self, signal: Signal) -> DecisionResult:
         if not signal.mint_address.strip():
             logger.info("Skipping signal without mint address")
-            return DecisionResult(trade=None, rejection_reason="missing_mint_address")
+            telemetry = self._build_rejection_record(signal, outcome="rejected")
+            self._log_rejection_record(telemetry)
+            return DecisionResult(
+                trade=None,
+                rejection_reason="missing_mint_address",
+                metadata={"rejection_record": asdict(telemetry)},
+            )
 
         existing = await self.position_manager.get_position(signal.mint_address)
         if existing is not None:
             logger.info("Skipping %s: open position already exists", signal.mint_address)
-            return DecisionResult(trade=None, rejection_reason="open_position_exists")
+            telemetry = self._build_rejection_record(signal, outcome="rejected")
+            self._log_rejection_record(telemetry)
+            return DecisionResult(
+                trade=None,
+                rejection_reason="open_position_exists",
+                metadata={"rejection_record": asdict(telemetry)},
+            )
 
         regime_metadata = self._market_regime_metadata(signal)
 
         risk = await self._assess_signal(signal)
+        rejection_record = self._build_rejection_record(
+            signal,
+            risk=risk,
+            outcome="passed" if risk.all_checks_pass else "rejected",
+        )
         if not risk.all_checks_pass:
             logger.info("Skipping %s: risk gate blocked trade (%s)", signal.mint_address, ", ".join(risk.reasons))
+            self._log_rejection_record(rejection_record)
             return DecisionResult(
                 trade=None,
                 rejection_reason=self._risk_rejection_reason(risk),
-                metadata=regime_metadata,
+                metadata={**regime_metadata, "rejection_record": asdict(rejection_record)},
             )
 
         open_positions = await self.position_manager.get_all_open()
         if len(open_positions) >= self.config.position.max_open_positions:
             logger.info("Skipping %s: max open positions reached", signal.mint_address)
+            self._log_rejection_record(rejection_record)
             return DecisionResult(
                 trade=None,
                 rejection_reason="max_open_positions_reached",
-                metadata=regime_metadata,
+                metadata={**regime_metadata, "rejection_record": asdict(rejection_record)},
             )
 
         remaining_portfolio = (
@@ -91,19 +130,21 @@ class DecisionEngine:
         )
         if remaining_portfolio <= 0:
             logger.info("Skipping %s: max portfolio exposure reached", signal.mint_address)
+            self._log_rejection_record(rejection_record)
             return DecisionResult(
                 trade=None,
                 rejection_reason="max_portfolio_exposure_reached",
-                metadata=regime_metadata,
+                metadata={**regime_metadata, "rejection_record": asdict(rejection_record)},
             )
 
         sizing = self._calculate_position_size(signal, risk, remaining_portfolio)
         if sizing.amount_sol <= 0:
             logger.info("Skipping %s: calculated position size was zero", signal.mint_address)
+            self._log_rejection_record(rejection_record)
             return DecisionResult(
                 trade=None,
                 rejection_reason=sizing.rejection_reason or "position_size_zero",
-                metadata={**sizing.metadata, **regime_metadata},
+                metadata={**sizing.metadata, **regime_metadata, "rejection_record": asdict(rejection_record)},
             )
 
         trade = await self.execution.execute_swap(
@@ -130,7 +171,11 @@ class DecisionEngine:
         )
         await self._record_trade(trade)
         await self.position_manager.open_position(trade, signal)
-        return DecisionResult(trade=trade, metadata={**sizing.metadata, **regime_metadata})
+        self._log_rejection_record(rejection_record)
+        return DecisionResult(
+            trade=trade,
+            metadata={**sizing.metadata, **regime_metadata, "rejection_record": asdict(rejection_record)},
+        )
 
     async def check_exits(self) -> list[Trade]:
         exit_trades: list[Trade] = []
@@ -371,6 +416,92 @@ class DecisionEngine:
             if result == CheckResult.UNKNOWN:
                 return f"{field_name}_unknown"
         return "risk_check_blocked"
+
+    def _build_rejection_record(
+        self,
+        signal: Signal,
+        *,
+        risk: RiskAssessment | None = None,
+        outcome: str,
+    ) -> RejectionRecord:
+        check_results: dict[str, dict[str, object]] = {}
+        failed_check: str | None = None
+        token = risk.token if risk is not None else None
+        for check_name, actual, threshold, result in self._ordered_check_details(token, risk):
+            check_results[check_name] = {
+                "passed": result == CheckResult.PASS,
+                "value": actual,
+                "threshold": threshold,
+            }
+            if failed_check is None and result == CheckResult.FAIL:
+                failed_check = check_name
+
+        timestamp = risk.checked_at if risk is not None else signal.observed_at
+        return RejectionRecord(
+            mint_address=signal.mint_address,
+            signal_source=signal.source.value,
+            signal_strength=round(max(0.0, min(signal.confidence * max(signal.weight, 0.0), 1.0)), 6),
+            timestamp=timestamp,
+            outcome=outcome,
+            failed_check=failed_check,
+            check_results=check_results,
+        )
+
+    def _ordered_check_details(
+        self,
+        token: TokenInfo | None,
+        risk: RiskAssessment | None,
+    ) -> tuple[tuple[str, object, object, CheckResult], ...]:
+        risk = risk or RiskAssessment(token=token)
+        return (
+            ("liquidity_check", token.liquidity_sol if token else None, self.config.risk.min_liquidity_sol, risk.liquidity_check),
+            ("top10_holder_check", token.top10_holder_pct if token else None, self.config.risk.max_top10_holder_pct, risk.top10_holder_check),
+            (
+                "creator_holding_check",
+                token.creator_holding_pct if token else None,
+                self.config.risk.max_creator_holding_pct,
+                risk.creator_holding_check,
+            ),
+            ("age_check", token.age_minutes if token else None, self.config.risk.min_age_minutes, risk.age_check),
+            ("unique_buyers_check", token.unique_buyers if token else None, self.config.risk.min_unique_buyers, risk.unique_buyers_check),
+            (
+                "mint_authority_check",
+                token.mint_authority_revoked if token else None,
+                True,
+                risk.mint_authority_check,
+            ),
+            (
+                "freeze_authority_check",
+                token.freeze_authority_revoked if token else None,
+                True,
+                risk.freeze_authority_check,
+            ),
+            ("honeypot_check", None, False, risk.honeypot_check),
+        )
+
+    @staticmethod
+    def _log_rejection_record(record: RejectionRecord) -> None:
+        payload = asdict(record)
+        if structlog is not None:
+            telemetry_logger.info("decision_evaluation", rejection_record=payload)
+            return
+        telemetry_logger.info("decision_evaluation %s", json.dumps(payload, default=str, sort_keys=True))
+
+    @staticmethod
+    def summarize_rejections(records: list[RejectionRecord]) -> dict[str, object]:
+        rejection_reasons = Counter(
+            record.failed_check or "other" for record in records if record.outcome == "rejected"
+        )
+        source_distribution = Counter(record.signal_source for record in records)
+        passed_count = sum(1 for record in records if record.outcome == "passed")
+        rejected_count = sum(1 for record in records if record.outcome == "rejected")
+        return {
+            "total_evaluated": len(records),
+            "passed_count": passed_count,
+            "rejected_count": rejected_count,
+            "rejection_reason_distribution": rejection_reasons,
+            "source_distribution": source_distribution,
+        }
 
     @staticmethod
     def _realized_pnl(position: Position, exit_price_sol: float, sell_pct: float) -> float:
