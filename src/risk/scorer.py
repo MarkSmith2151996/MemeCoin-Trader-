@@ -19,7 +19,7 @@ from src.core.models import CheckResult, RiskAssessment, Signal, SignalSource, S
 from src.risk.contract_audit import check_freeze_authority, check_honeypot, check_mint_authority
 from src.risk.funding_analysis import FundingAnalysisResult, FundingTransferProvider, analyze_buyer_funding
 from src.risk.funding_provider import HeliusFundingProvider
-from src.risk.holders import check_creator_holding, check_top10_holders
+from src.risk.holders import check_creator_holding, check_top10_holders, filtered_holder_accounts
 from src.risk.honeypot_simulation import (
     HoneypotSimulationAdapter,
     HoneypotSimulationRequest,
@@ -83,7 +83,8 @@ class ReadOnlyHolderLookup:
             return HolderLookupResult(status="holder_lookup_no_largest_accounts")
 
         top10_total = 0.0
-        for account in largest_accounts[:10]:
+        filtered_accounts = filtered_holder_accounts(largest_accounts)
+        for account in filtered_accounts[:10]:
             if not isinstance(account, Mapping):
                 continue
             balance = _extract_token_balance(account)

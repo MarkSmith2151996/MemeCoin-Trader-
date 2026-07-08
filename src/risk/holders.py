@@ -1,9 +1,57 @@
-"""Holder concentration checks."""
+"""Holder concentration checks and holder-account filtering helpers."""
 
 from __future__ import annotations
 
+from collections.abc import Mapping, Sequence
+
 from src.core.config import RiskConfig
 from src.core.models import CheckResult, TokenInfo
+
+KNOWN_NON_PERSON_OWNERS = {
+    "675kPX9MHTjS2zt1qfr1NYHuzeLXfQM9H24wFSUt1Mp8",  # Raydium AMM
+    "whirLbMiicVdio4qvUfM5KAg6Ct8VwpYzGff3uctyCc",  # Orca Whirlpool
+    "5Q544fKrFoe6tsEbD7S8EmxGTJYAKtTVhAW5Q5pge4j1",  # Raydium authority
+    "11111111111111111111111111111111",  # System program
+    "1nc1nerator11111111111111111111111111111111",  # Incinerator
+}
+
+KNOWN_NON_PERSON_ADDRESSES = {
+    "1nc1nerator11111111111111111111111111111111",
+}
+
+
+def _extract_string(account: Mapping[str, object], *keys: str) -> str | None:
+    for key in keys:
+        value = account.get(key)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    return None
+
+
+def is_non_person_holder(account: Mapping[str, object]) -> bool:
+    """Return True when a largest-account entry is clearly protocol-owned or burned."""
+
+    address = _extract_string(account, "address", "account", "pubkey")
+    owner = _extract_string(account, "owner", "ownerAddress", "accountOwner")
+
+    if address in KNOWN_NON_PERSON_ADDRESSES:
+        return True
+    if owner in KNOWN_NON_PERSON_OWNERS:
+        return True
+    if address in KNOWN_NON_PERSON_OWNERS:
+        return True
+    return False
+
+
+def filtered_holder_accounts(accounts: Sequence[object]) -> list[Mapping[str, object]]:
+    filtered: list[Mapping[str, object]] = []
+    for account in accounts:
+        if not isinstance(account, Mapping):
+            continue
+        if is_non_person_holder(account):
+            continue
+        filtered.append(account)
+    return filtered
 
 
 def check_top10_holders(token: TokenInfo, config: RiskConfig) -> CheckResult:
