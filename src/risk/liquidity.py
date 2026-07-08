@@ -29,38 +29,84 @@ class LiquidityProbe:
         self._client = client
 
     async def get_pool_info(self, mint_address: str) -> dict[str, object]:
+        diagnostics: dict[str, object] = {
+            "dexscreener_attempted": True,
+            "dexscreener_liquidity_sol": None,
+            "dexscreener_liquidity_usd": None,
+            "dexscreener_status": "missing",
+            "jupiter_attempted": False,
+            "jupiter_liquidity_sol": None,
+            "jupiter_liquidity_usd": None,
+            "jupiter_status": None,
+        }
         result = await self._get_dexscreener(mint_address)
         if result is not None and result.get("pool_liquidity_sol") is not None:
-            return result
+            diagnostics.update(
+                {
+                    "dexscreener_liquidity_sol": result.get("pool_liquidity_sol"),
+                    "dexscreener_liquidity_usd": result.get("pool_liquidity_usd"),
+                    "dexscreener_status": "ok",
+                }
+            )
+            return {**diagnostics, **result}
 
+        if result is not None:
+            diagnostics.update(
+                {
+                    "dexscreener_liquidity_sol": result.get("pool_liquidity_sol"),
+                    "dexscreener_liquidity_usd": result.get("pool_liquidity_usd"),
+                    "dexscreener_status": str(result.get("status") or "missing"),
+                }
+            )
+
+        diagnostics["jupiter_attempted"] = True
         result = await self._get_jupiter_liquidity_probe(mint_address)
         if result is not None and result.get("pool_liquidity_sol") is not None:
-            return result
+            diagnostics.update(
+                {
+                    "jupiter_liquidity_sol": result.get("pool_liquidity_sol"),
+                    "jupiter_liquidity_usd": result.get("pool_liquidity_usd"),
+                    "jupiter_status": "ok",
+                }
+            )
+            return {**diagnostics, **result}
 
-        return {"pool_liquidity_sol": None, "source": "none"}
+        if result is not None:
+            diagnostics.update(
+                {
+                    "jupiter_liquidity_sol": result.get("pool_liquidity_sol"),
+                    "jupiter_liquidity_usd": result.get("pool_liquidity_usd"),
+                    "jupiter_status": str(result.get("status") or "missing"),
+                }
+            )
+
+        return {**diagnostics, "pool_liquidity_sol": None, "pool_liquidity_usd": None, "source": "none", "status": "missing"}
 
     async def _get_dexscreener(self, mint_address: str) -> dict[str, object] | None:
         payload = await self._get_json(self._token_url_template.format(mint_address=mint_address))
         if not isinstance(payload, Mapping):
-            return None
+            return {"pool_liquidity_sol": None, "pool_liquidity_usd": None, "source": "dexscreener", "status": "provider_missing"}
 
         pairs = payload.get("pairs")
         if not isinstance(pairs, Sequence) or isinstance(pairs, (str, bytes, bytearray)):
-            return None
+            return {"pool_liquidity_sol": None, "pool_liquidity_usd": None, "source": "dexscreener", "status": "no_pairs"}
 
         best_liquidity: float | None = None
+        best_liquidity_usd: float | None = None
         for pair in pairs:
             if not isinstance(pair, Mapping) or pair.get("chainId") != "solana":
                 continue
             liquidity_sol = _extract_pair_liquidity_sol(pair)
+            liquidity_usd = _extract_pair_liquidity_usd(pair)
             if liquidity_sol is None:
                 continue
             if best_liquidity is None or liquidity_sol > best_liquidity:
                 best_liquidity = liquidity_sol
+                best_liquidity_usd = liquidity_usd
 
         if best_liquidity is None:
-            return None
-        return {"pool_liquidity_sol": best_liquidity, "source": "dexscreener"}
+            return {"pool_liquidity_sol": None, "pool_liquidity_usd": None, "source": "dexscreener", "status": "no_solana_liquidity"}
+        return {"pool_liquidity_sol": best_liquidity, "pool_liquidity_usd": best_liquidity_usd, "source": "dexscreener", "status": "ok"}
 
     async def _get_jupiter_liquidity_probe(self, mint_address: str) -> dict[str, object] | None:
         url = (
@@ -69,20 +115,20 @@ class LiquidityProbe:
         )
         payload = await self._get_json(url)
         if not isinstance(payload, Mapping):
-            return None
+            return {"pool_liquidity_sol": None, "pool_liquidity_usd": None, "source": "jupiter_fallback", "status": "provider_missing"}
 
         route_plan = payload.get("routePlan")
         if not isinstance(route_plan, Sequence) or isinstance(route_plan, (str, bytes, bytearray)) or not route_plan:
-            return None
+            return {"pool_liquidity_sol": None, "pool_liquidity_usd": None, "source": "jupiter_fallback", "status": "no_route"}
 
         explicit_liquidity = _extract_jupiter_liquidity_sol(payload)
         if explicit_liquidity is not None:
-            return {"pool_liquidity_sol": explicit_liquidity, "source": "jupiter_fallback"}
+            return {"pool_liquidity_sol": explicit_liquidity, "pool_liquidity_usd": None, "source": "jupiter_fallback", "status": "ok"}
 
         out_amount = _coerce_float(payload.get("outAmount"))
         if out_amount is None or out_amount <= 0:
-            return None
-        return {"pool_liquidity_sol": round(out_amount / 1_000_000_000, 9), "source": "jupiter_fallback"}
+            return {"pool_liquidity_sol": None, "pool_liquidity_usd": None, "source": "jupiter_fallback", "status": "no_out_amount"}
+        return {"pool_liquidity_sol": round(out_amount / 1_000_000_000, 9), "pool_liquidity_usd": None, "source": "jupiter_fallback", "status": "ok"}
 
     async def _get_json(self, url: str) -> object | None:
         client = self._client
@@ -119,6 +165,13 @@ def _extract_pair_liquidity_sol(pair: Mapping[str, object]) -> float | None:
         return _coerce_float(liquidity.get("quote"))
 
     return None
+
+
+def _extract_pair_liquidity_usd(pair: Mapping[str, object]) -> float | None:
+    liquidity = pair.get("liquidity")
+    if not isinstance(liquidity, Mapping):
+        return None
+    return _coerce_float(liquidity.get("usd"))
 
 
 def _extract_jupiter_liquidity_sol(payload: Mapping[str, object]) -> float | None:

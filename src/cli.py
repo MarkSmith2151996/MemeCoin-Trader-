@@ -404,6 +404,7 @@ def _build_rejected_candidate_diagnostic(
     holder_diagnostics = payload.get("holder_diagnostics") if isinstance(payload.get("holder_diagnostics"), dict) else {}
     creator_diagnostics = payload.get("creator_diagnostics") if isinstance(payload.get("creator_diagnostics"), dict) else {}
     holder_policy = payload.get("holder_policy") if isinstance(payload.get("holder_policy"), dict) else {}
+    liquidity_diagnostics = payload.get("liquidity_diagnostics") if isinstance(payload.get("liquidity_diagnostics"), dict) else {}
     top10_result = _check_result_value(record, "top10_holder_check")
     liquidity_result = _check_result_value(record, "liquidity_check")
     authority_result = _check_result_value(record, "mint_authority_check")
@@ -456,8 +457,21 @@ def _build_rejected_candidate_diagnostic(
         "token_age_minutes": holder_policy.get("token_age_minutes"),
         "stage_hint": holder_policy.get("stage_hint", "unknown"),
         "fresh_launch_context_used": bool(holder_policy.get("fresh_launch_context_used")),
-        "liquidity_value": liquidity_value if liquidity_value is not None else "unknown",
-        "liquidity_display": _liquidity_display(liquidity_result, liquidity_value),
+        "selected_liquidity_sol": liquidity_diagnostics.get("selected_liquidity_sol", liquidity_value if liquidity_value is not None else "unknown"),
+        "selected_liquidity_usd": liquidity_diagnostics.get("selected_liquidity_usd", "unknown"),
+        "liquidity_source": liquidity_diagnostics.get("liquidity_source", "unknown"),
+        "liquidity_data_state": liquidity_diagnostics.get("liquidity_data_state", "unknown"),
+        "liquidity_unknown_reason": liquidity_diagnostics.get("liquidity_unknown_reason"),
+        "dexscreener_liquidity_sol": liquidity_diagnostics.get("dexscreener_liquidity_sol", "unknown"),
+        "dexscreener_liquidity_usd": liquidity_diagnostics.get("dexscreener_liquidity_usd", "unknown"),
+        "dexscreener_status": liquidity_diagnostics.get("dexscreener_status", "unknown"),
+        "jupiter_liquidity_sol": liquidity_diagnostics.get("jupiter_liquidity_sol", "unknown"),
+        "jupiter_liquidity_usd": liquidity_diagnostics.get("jupiter_liquidity_usd", "unknown"),
+        "jupiter_status": liquidity_diagnostics.get("jupiter_status", "unknown"),
+        "fallback_attempted": bool(liquidity_diagnostics.get("fallback_attempted")),
+        "fallback_succeeded": bool(liquidity_diagnostics.get("fallback_succeeded")),
+        "liquidity_value": liquidity_diagnostics.get("selected_liquidity_sol", liquidity_value if liquidity_value is not None else "unknown"),
+        "liquidity_display": _liquidity_display(liquidity_result, liquidity_diagnostics.get("selected_liquidity_sol", liquidity_value)),
         "liquidity_state": liquidity_result or "unknown",
         "liquidity_check": liquidity_result or "unknown",
         "honeypot_check": honeypot_result or "unknown",
@@ -654,6 +668,19 @@ def build_rejection_diagnostic_report(summary: PaperCycleSummary) -> str:
                 f"token_age_minutes: {diagnostic.get('token_age_minutes', 'unknown') if diagnostic.get('token_age_minutes') is not None else 'unknown'}",
                 f"stage_hint: {diagnostic.get('stage_hint', 'unknown')}",
                 f"fresh_launch_context_used: {diagnostic.get('fresh_launch_context_used', False)}",
+                f"selected_liquidity_sol: {diagnostic.get('selected_liquidity_sol', 'unknown')}",
+                f"selected_liquidity_usd: {diagnostic.get('selected_liquidity_usd', 'unknown')}",
+                f"liquidity_source: {diagnostic.get('liquidity_source', 'unknown')}",
+                f"liquidity_data_state: {diagnostic.get('liquidity_data_state', 'unknown')}",
+                f"liquidity_unknown_reason: {diagnostic.get('liquidity_unknown_reason', 'unknown')}",
+                f"dexscreener_liquidity_sol: {diagnostic.get('dexscreener_liquidity_sol', 'unknown')}",
+                f"dexscreener_liquidity_usd: {diagnostic.get('dexscreener_liquidity_usd', 'unknown')}",
+                f"dexscreener_status: {diagnostic.get('dexscreener_status', 'unknown')}",
+                f"jupiter_liquidity_sol: {diagnostic.get('jupiter_liquidity_sol', 'unknown')}",
+                f"jupiter_liquidity_usd: {diagnostic.get('jupiter_liquidity_usd', 'unknown')}",
+                f"jupiter_status: {diagnostic.get('jupiter_status', 'unknown')}",
+                f"fallback_attempted: {diagnostic.get('fallback_attempted', False)}",
+                f"fallback_succeeded: {diagnostic.get('fallback_succeeded', False)}",
                 f"liquidity: {diagnostic.get('liquidity_display', 'unknown')}",
                 f"liquidity_state: {diagnostic.get('liquidity_state', 'unknown')}",
                 f"honeypot_check: {diagnostic.get('honeypot_check', 'unknown')}",

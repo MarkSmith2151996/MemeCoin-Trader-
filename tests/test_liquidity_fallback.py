@@ -64,7 +64,10 @@ def test_dexscreener_success_returns_without_jupiter_fallback() -> None:
 
     result = asyncio.run(probe.get_pool_info(mint))
 
-    assert result == {"pool_liquidity_sol": 42.0, "source": "dexscreener"}
+    assert result["pool_liquidity_sol"] == 42.0
+    assert result["source"] == "dexscreener"
+    assert result["dexscreener_status"] == "ok"
+    assert result["jupiter_attempted"] is False
     assert client.calls == [dexscreener_url]
     assert jupiter_url not in client.calls
 
@@ -90,7 +93,10 @@ def test_dexscreener_failure_triggers_jupiter_fallback() -> None:
 
     result = asyncio.run(probe.get_pool_info(mint))
 
-    assert result == {"pool_liquidity_sol": 18.5, "source": "jupiter_fallback"}
+    assert result["pool_liquidity_sol"] == 18.5
+    assert result["source"] == "jupiter_fallback"
+    assert result["dexscreener_status"] == "no_solana_liquidity"
+    assert result["jupiter_status"] == "ok"
     assert client.calls == [dexscreener_url, jupiter_url]
 
 
@@ -115,7 +121,9 @@ def test_jupiter_fallback_can_derive_liquidity_from_valid_quote() -> None:
 
     result = asyncio.run(probe.get_pool_info(mint))
 
-    assert result == {"pool_liquidity_sol": 2.5, "source": "jupiter_fallback"}
+    assert result["pool_liquidity_sol"] == 2.5
+    assert result["source"] == "jupiter_fallback"
+    assert result["jupiter_status"] == "ok"
 
 
 def test_both_sources_failing_returns_unknown() -> None:
@@ -139,12 +147,24 @@ def test_both_sources_failing_returns_unknown() -> None:
 
     result = asyncio.run(probe.get_pool_info(mint))
 
-    assert result == {"pool_liquidity_sol": None, "source": "none"}
+    assert result["pool_liquidity_sol"] is None
+    assert result["source"] == "none"
+    assert result["dexscreener_status"] == "provider_missing"
+    assert result["jupiter_status"] == "no_route"
 
 
 class StubLiquidityProbe:
     async def get_pool_info(self, mint_address: str) -> dict[str, object]:
-        return {"pool_liquidity_sol": 12.0, "source": "jupiter_fallback"}
+        return {
+            "pool_liquidity_sol": 12.0,
+            "pool_liquidity_usd": None,
+            "source": "jupiter_fallback",
+            "status": "ok",
+            "dexscreener_attempted": True,
+            "dexscreener_status": "no_solana_liquidity",
+            "jupiter_attempted": True,
+            "jupiter_status": "ok",
+        }
 
 
 def test_discovery_risk_scorer_uses_fallback_liquidity_value() -> None:

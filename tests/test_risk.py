@@ -93,6 +93,14 @@ class SlowFundingProvider(FakeFundingProvider):
         return await super().get_recent_inbound_transfers(wallet)
 
 
+class FakeLiquidityProbe:
+    def __init__(self, result: dict[str, object]) -> None:
+        self._result = result
+
+    async def get_pool_info(self, mint_address: str) -> dict[str, object]:
+        return self._result
+
+
 class RecordingSimulationProvider:
     def __init__(self, result: object, delay_s: float = 0.0) -> None:
         self.result = result
@@ -238,6 +246,164 @@ def test_assess_signal_uses_enriched_pump_fun_liquidity() -> None:
     assert assessment.liquidity_check == CheckResult.PASS
     assert assessment.age_check == CheckResult.PASS
     assert assessment.unique_buyers_check == CheckResult.PASS
+
+
+def test_signal_payload_liquidity_preserves_signal_payload_source_in_diagnostics() -> None:
+    signal = Signal(
+        source=SignalSource.PUMP_FUN,
+        type=SignalType.NEW_POOL,
+        mint_address="payload-liquidity-mint",
+        payload={
+            "vSolInBondingCurve": 30.1,
+            "uniqueBuyers": 25,
+            "top10HolderPct": 30.0,
+            "creatorHoldingPct": 5.0,
+            "mintAuthorityRevoked": True,
+            "freezeAuthorityRevoked": True,
+            "createdAt": (datetime.now(UTC) - timedelta(minutes=10)).isoformat(),
+        },
+    )
+    scorer = DiscoveryRiskScorer(config=RiskConfig(min_age_minutes=0), enable_holder_lookup=False)
+
+    assessment = asyncio.run(scorer.assess_signal(signal))
+
+    assert assessment.liquidity_check == CheckResult.PASS
+    diagnostics = signal.payload["liquidity_diagnostics"]
+    assert diagnostics["selected_liquidity_sol"] == 30.1
+    assert diagnostics["liquidity_source"] == "signal_payload"
+    assert diagnostics["liquidity_data_state"] == "known"
+    assert diagnostics["fallback_attempted"] is False
+
+
+def test_missing_primary_liquidity_uses_fallback_source_and_passes_when_above_threshold() -> None:
+    signal = Signal(
+        source=SignalSource.WHALE_TRACKER,
+        type=SignalType.BUY,
+        mint_address="fallback-pass-mint",
+        payload={
+            "uniqueBuyers": 25,
+            "top10HolderPct": 30.0,
+            "creatorHoldingPct": 5.0,
+            "mintAuthorityRevoked": True,
+            "freezeAuthorityRevoked": True,
+            "createdAt": (datetime.now(UTC) - timedelta(minutes=10)).isoformat(),
+        },
+    )
+    scorer = DiscoveryRiskScorer(
+        config=RiskConfig(min_age_minutes=0),
+        liquidity_probe=FakeLiquidityProbe(
+            {
+                "pool_liquidity_sol": 12.0,
+                "pool_liquidity_usd": 2400.0,
+                "source": "jupiter_fallback",
+                "status": "ok",
+                "dexscreener_attempted": True,
+                "dexscreener_status": "no_solana_liquidity",
+                "dexscreener_liquidity_sol": None,
+                "dexscreener_liquidity_usd": None,
+                "jupiter_attempted": True,
+                "jupiter_status": "ok",
+                "jupiter_liquidity_sol": 12.0,
+                "jupiter_liquidity_usd": None,
+            }
+        ),
+        enable_holder_lookup=False,
+    )
+
+    assessment = asyncio.run(scorer.assess_signal(signal))
+
+    assert assessment.liquidity_check == CheckResult.PASS
+    diagnostics = signal.payload["liquidity_diagnostics"]
+    assert diagnostics["selected_liquidity_sol"] == 12.0
+    assert diagnostics["selected_liquidity_usd"] == 2400.0
+    assert diagnostics["liquidity_source"] == "jupiter_fallback"
+    assert diagnostics["liquidity_data_state"] == "known"
+    assert diagnostics["fallback_attempted"] is True
+    assert diagnostics["fallback_succeeded"] is True
+
+
+def test_missing_primary_liquidity_fails_with_fallback_source_when_below_threshold() -> None:
+    signal = Signal(
+        source=SignalSource.WHALE_TRACKER,
+        type=SignalType.BUY,
+        mint_address="fallback-fail-mint",
+        payload={
+            "uniqueBuyers": 25,
+            "top10HolderPct": 30.0,
+            "creatorHoldingPct": 5.0,
+            "mintAuthorityRevoked": True,
+            "freezeAuthorityRevoked": True,
+            "createdAt": (datetime.now(UTC) - timedelta(minutes=10)).isoformat(),
+        },
+    )
+    scorer = DiscoveryRiskScorer(
+        config=RiskConfig(min_age_minutes=0),
+        liquidity_probe=FakeLiquidityProbe(
+            {
+                "pool_liquidity_sol": 4.0,
+                "pool_liquidity_usd": 500.0,
+                "source": "jupiter_fallback",
+                "status": "ok",
+                "dexscreener_attempted": True,
+                "dexscreener_status": "no_solana_liquidity",
+                "jupiter_attempted": True,
+                "jupiter_status": "ok",
+            }
+        ),
+        enable_holder_lookup=False,
+    )
+
+    assessment = asyncio.run(scorer.assess_signal(signal))
+
+    assert assessment.liquidity_check == CheckResult.FAIL
+    diagnostics = signal.payload["liquidity_diagnostics"]
+    assert diagnostics["selected_liquidity_sol"] == 4.0
+    assert diagnostics["liquidity_source"] == "jupiter_fallback"
+    assert diagnostics["liquidity_data_state"] == "known"
+
+
+def test_all_liquidity_sources_missing_stays_unknown_with_reason() -> None:
+    signal = Signal(
+        source=SignalSource.WHALE_TRACKER,
+        type=SignalType.BUY,
+        mint_address="fallback-unknown-mint",
+        payload={
+            "uniqueBuyers": 25,
+            "top10HolderPct": 30.0,
+            "creatorHoldingPct": 5.0,
+            "mintAuthorityRevoked": True,
+            "freezeAuthorityRevoked": True,
+            "createdAt": (datetime.now(UTC) - timedelta(minutes=10)).isoformat(),
+        },
+    )
+    scorer = DiscoveryRiskScorer(
+        config=RiskConfig(min_age_minutes=0),
+        liquidity_probe=FakeLiquidityProbe(
+            {
+                "pool_liquidity_sol": None,
+                "pool_liquidity_usd": None,
+                "source": "none",
+                "status": "missing",
+                "dexscreener_attempted": True,
+                "dexscreener_status": "provider_missing",
+                "dexscreener_liquidity_sol": None,
+                "dexscreener_liquidity_usd": None,
+                "jupiter_attempted": True,
+                "jupiter_status": "no_route",
+                "jupiter_liquidity_sol": None,
+                "jupiter_liquidity_usd": None,
+            }
+        ),
+        enable_holder_lookup=False,
+    )
+
+    assessment = asyncio.run(scorer.assess_signal(signal))
+
+    assert assessment.liquidity_check == CheckResult.UNKNOWN
+    diagnostics = signal.payload["liquidity_diagnostics"]
+    assert diagnostics["liquidity_source"] == "none"
+    assert diagnostics["liquidity_data_state"] == "unknown"
+    assert diagnostics["liquidity_unknown_reason"] == "dexscreener=provider_missing; jupiter=no_route"
 
 
 def test_assess_signal_keeps_holder_check_unknown_when_holder_fields_missing() -> None:

@@ -132,7 +132,8 @@ class DiscoveryRiskScorer:
 
     async def assess_signal(self, signal: Signal) -> RiskAssessment:
         token = build_token_from_signal(signal)
-        token = await self._enrich_liquidity(token)
+        token, liquidity_diagnostics = await self._enrich_liquidity(token)
+        signal.payload["liquidity_diagnostics"] = liquidity_diagnostics
         rugcheck_result, funding_response = await asyncio.gather(
             self._fetch_rugcheck(token),
             self._analyze_funding(signal, token),
@@ -229,21 +230,70 @@ class DiscoveryRiskScorer:
                 self._cache[mint_address] = HolderLookupResult(status="holder_lookup_failed_provider")
         return self._cache[mint_address]
 
-    async def _enrich_liquidity(self, token: TokenInfo) -> TokenInfo:
+    async def _enrich_liquidity(self, token: TokenInfo) -> tuple[TokenInfo, dict[str, object]]:
+        payload_liquidity_usd = None
+        if token.market_cap_usd is not None:
+            payload_liquidity_usd = token.market_cap_usd
+        diagnostics = {
+            "selected_liquidity_sol": token.liquidity_sol,
+            "selected_liquidity_usd": payload_liquidity_usd,
+            "liquidity_source": "signal_payload" if token.liquidity_sol is not None else "unknown",
+            "liquidity_data_state": "known" if token.liquidity_sol is not None else "unknown",
+            "liquidity_unknown_reason": None if token.liquidity_sol is not None else "signal payload did not include normalized liquidity",
+            "dexscreener_liquidity_sol": None,
+            "dexscreener_liquidity_usd": None,
+            "dexscreener_status": None,
+            "jupiter_liquidity_sol": None,
+            "jupiter_liquidity_usd": None,
+            "jupiter_status": None,
+            "fallback_attempted": False,
+            "fallback_succeeded": False,
+        }
         if token.liquidity_sol is not None:
-            return token
+            return token, diagnostics
 
         if token.mint_address not in self._liquidity_cache:
             try:
                 self._liquidity_cache[token.mint_address] = await self._liquidity_probe.get_pool_info(token.mint_address)
             except Exception:
-                self._liquidity_cache[token.mint_address] = {"pool_liquidity_sol": None, "source": "provider_error"}
+                self._liquidity_cache[token.mint_address] = {
+                    "pool_liquidity_sol": None,
+                    "pool_liquidity_usd": None,
+                    "source": "provider_error",
+                    "status": "provider_error",
+                    "dexscreener_attempted": True,
+                    "dexscreener_status": "provider_error",
+                    "jupiter_attempted": True,
+                    "jupiter_status": "provider_error",
+                }
 
         probe_result = self._liquidity_cache[token.mint_address]
+        if isinstance(probe_result, Mapping):
+            diagnostics.update(
+                {
+                    "dexscreener_liquidity_sol": probe_result.get("dexscreener_liquidity_sol"),
+                    "dexscreener_liquidity_usd": probe_result.get("dexscreener_liquidity_usd"),
+                    "dexscreener_status": probe_result.get("dexscreener_status"),
+                    "jupiter_liquidity_sol": probe_result.get("jupiter_liquidity_sol"),
+                    "jupiter_liquidity_usd": probe_result.get("jupiter_liquidity_usd"),
+                    "jupiter_status": probe_result.get("jupiter_status"),
+                    "fallback_attempted": bool(probe_result.get("jupiter_attempted")),
+                }
+            )
         liquidity_sol = probe_result.get("pool_liquidity_sol") if isinstance(probe_result, Mapping) else None
+        liquidity_usd = probe_result.get("pool_liquidity_usd") if isinstance(probe_result, Mapping) else None
         if not isinstance(liquidity_sol, (int, float)):
-            return token
-        return token.model_copy(update={"liquidity_sol": float(liquidity_sol)})
+            diagnostics["liquidity_source"] = str(probe_result.get("source") if isinstance(probe_result, Mapping) else "unknown")
+            diagnostics["liquidity_data_state"] = "unknown"
+            diagnostics["liquidity_unknown_reason"] = _liquidity_unknown_reason(probe_result)
+            return token, diagnostics
+        diagnostics["selected_liquidity_sol"] = float(liquidity_sol)
+        diagnostics["selected_liquidity_usd"] = liquidity_usd if isinstance(liquidity_usd, (int, float)) else None
+        diagnostics["liquidity_source"] = str(probe_result.get("source") if isinstance(probe_result, Mapping) else "unknown")
+        diagnostics["liquidity_data_state"] = "known"
+        diagnostics["liquidity_unknown_reason"] = None
+        diagnostics["fallback_succeeded"] = diagnostics["liquidity_source"] == "jupiter_fallback"
+        return token.model_copy(update={"liquidity_sol": float(liquidity_sol)}), diagnostics
 
     async def _fetch_rugcheck(self, token: TokenInfo) -> RugCheckResult | None:
         if self._rugcheck_client is None:
@@ -563,6 +613,20 @@ def _coerce_float_value(value: object) -> float | None:
         except ValueError:
             return None
     return None
+
+
+def _liquidity_unknown_reason(probe_result: object) -> str:
+    if not isinstance(probe_result, Mapping):
+        return "liquidity probe returned no structured result"
+    source = str(probe_result.get("source") or "unknown")
+    status = str(probe_result.get("status") or "missing")
+    if source == "provider_error" or status == "provider_error":
+        return "liquidity providers errored"
+    if source == "none":
+        dexscreener_status = str(probe_result.get("dexscreener_status") or "missing")
+        jupiter_status = str(probe_result.get("jupiter_status") or "missing")
+        return f"dexscreener={dexscreener_status}; jupiter={jupiter_status}"
+    return f"{source}={status}"
 
 
 def _build_holder_policy_diagnostics(

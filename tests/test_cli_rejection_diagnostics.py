@@ -85,6 +85,21 @@ def _build_rejected_signal() -> Signal:
                 "stage_hint": "new_pool",
                 "fresh_launch_context_used": True,
             },
+            "liquidity_diagnostics": {
+                "selected_liquidity_sol": 4.0,
+                "selected_liquidity_usd": 500.0,
+                "liquidity_source": "jupiter_fallback",
+                "liquidity_data_state": "known",
+                "liquidity_unknown_reason": None,
+                "dexscreener_liquidity_sol": None,
+                "dexscreener_liquidity_usd": None,
+                "dexscreener_status": "no_solana_liquidity",
+                "jupiter_liquidity_sol": 4.0,
+                "jupiter_liquidity_usd": None,
+                "jupiter_status": "ok",
+                "fallback_attempted": True,
+                "fallback_succeeded": True,
+            },
             "raw_data": {"secret": "do-not-print", "buyerWallets": ["WalletSecret111"]},
             "risk_assessment": assessment,
         },
@@ -118,6 +133,12 @@ def test_run_bounded_paper_cycle_collects_per_token_rejection_diagnostics(tmp_pa
         assert diagnostic["creator_holding_source"] == "unknown"
         assert diagnostic["creator_holding_state"] == "unknown"
         assert diagnostic["holder_policy_state"] == "fresh_launch_warning"
+        assert diagnostic["selected_liquidity_sol"] == 4.0
+        assert diagnostic["selected_liquidity_usd"] == 500.0
+        assert diagnostic["liquidity_source"] == "jupiter_fallback"
+        assert diagnostic["liquidity_data_state"] == "known"
+        assert diagnostic["fallback_attempted"] is True
+        assert diagnostic["fallback_succeeded"] is True
         assert diagnostic["liquidity_state"] == "fail"
         assert diagnostic["liquidity_display"] == "4.0000"
         assert "mc=12345.00" in diagnostic["attention_hints"]
@@ -175,6 +196,9 @@ def test_rejection_report_and_cli_lines_stay_safe_with_missing_fields() -> None:
     assert "liquidity_check" in cli_lines[2]
     assert "creator_holding_unknown_reason" in report
     assert "holder_policy_reason" in report
+    assert "liquidity_source" in report
+    assert "liquidity_data_state" in report
+    assert "fallback_attempted" in report
     assert "do-not-print" not in report
     assert "WalletSecret111" not in report
     assert "raw_data" not in report
