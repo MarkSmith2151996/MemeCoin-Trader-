@@ -5,7 +5,9 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import json
+import logging
 import os
+from collections import deque
 from collections.abc import Awaitable, Callable, Iterable, Mapping
 from time import monotonic
 from typing import Any
@@ -28,6 +30,13 @@ DEFAULT_SUBSCRIPTIONS = (
     {"method": "subscribeNewToken"},
     {"method": "subscribeMigration"},
 )
+SPAM_NAME_PATTERNS = ("TEST", "AIRDROP", "FREE")
+CREATOR_REPEAT_WINDOW_S = 3600.0
+CREATOR_REPEAT_LIMIT = 3
+INITIAL_LIQUIDITY_FLOOR_SOL = 1.0
+
+
+logger = logging.getLogger(__name__)
 
 
 async def _default_http_fetcher(client: httpx.AsyncClient, url: str) -> object:
@@ -54,6 +63,7 @@ class PumpFunMonitor(SignalSource):
         poll_interval_s: float = 10.0,
         http_fetcher: HTTPFetcher | None = None,
         websocket_connector: WebsocketConnector | None = None,
+        now_monotonic: Callable[[], float] | None = None,
     ) -> None:
         self._http_urls = tuple(http_urls or DEFAULT_HTTP_URLS)
         self._websocket_url = websocket_url if websocket_url is not None else DEFAULT_WS_URL
@@ -62,6 +72,7 @@ class PumpFunMonitor(SignalSource):
         self._poll_interval_s = poll_interval_s
         self._http_fetcher = http_fetcher or _default_http_fetcher
         self._websocket_connector = websocket_connector or websocket_connect
+        self._now_monotonic = now_monotonic or monotonic
 
         self._client: httpx.AsyncClient | None = None
         self._queue: asyncio.Queue[dict[str, object]] = asyncio.Queue()
@@ -69,6 +80,7 @@ class PumpFunMonitor(SignalSource):
         self._ws_task: asyncio.Task[None] | None = None
         self._started = False
         self._last_http_poll_at = 0.0
+        self._creator_launches: dict[str, deque[float]] = {}
 
     @property
     def name(self) -> str:
@@ -185,16 +197,77 @@ class PumpFunMonitor(SignalSource):
             return None
 
         signal_type = self._signal_type_from_payload(payload)
+        if signal_type == SignalType.NEW_POOL:
+            skip_reason = self._launch_skip_reason(payload)
+            if skip_reason is not None:
+                logger.debug("Skipping pump.fun token %s: %s", mint_address, skip_reason)
+                return None
+
         confidence = self._confidence_for_payload(payload, signal_type)
+        raw_payload = dict(payload)
 
         return Signal(
             source=SignalSourceEnum.PUMP_FUN,
             type=signal_type,
             mint_address=mint_address,
             confidence=confidence,
+            weight=self._weight_for_payload(payload, signal_type, confidence),
             message=self._message_for_payload(payload, signal_type),
-            payload=dict(payload),
+            payload={**raw_payload, "raw_data": raw_payload},
         )
+
+    def _launch_skip_reason(self, payload: Mapping[str, object]) -> str | None:
+        token_name = self._string_field(payload, "name")
+        symbol = self._string_field(payload, "symbol", "ticker")
+        if self._is_spam_name_or_symbol(token_name, symbol):
+            return "spam_name_or_symbol"
+
+        creator = self._string_field(payload, "creatorAddress", "creator", "traderPublicKey", "creator_wallet")
+        if creator and self._creator_repeat_triggered(creator):
+            return "creator_repeat_limit"
+
+        initial_liquidity = self._initial_liquidity_sol(payload)
+        if initial_liquidity is not None and initial_liquidity < INITIAL_LIQUIDITY_FLOOR_SOL:
+            return "initial_liquidity_below_floor"
+
+        return None
+
+    def _is_spam_name_or_symbol(self, token_name: str | None, symbol: str | None) -> bool:
+        for candidate in (token_name, symbol):
+            if not isinstance(candidate, str):
+                continue
+            normalized = candidate.strip()
+            upper = normalized.upper()
+            compact = "".join(character for character in upper if character.isalnum())
+            if any(pattern in upper for pattern in SPAM_NAME_PATTERNS):
+                return True
+            if compact and len(compact) <= 1:
+                return True
+        return False
+
+    def _creator_repeat_triggered(self, creator: str) -> bool:
+        now = self._now_monotonic()
+        launches = self._creator_launches.setdefault(creator, deque())
+        cutoff = now - CREATOR_REPEAT_WINDOW_S
+        while launches and launches[0] < cutoff:
+            launches.popleft()
+        launches.append(now)
+        if len(launches) > CREATOR_REPEAT_LIMIT:
+            return True
+        if not launches:
+            self._creator_launches.pop(creator, None)
+        return False
+
+    def _initial_liquidity_sol(self, payload: Mapping[str, object]) -> float | None:
+        for field_name in ("initialSolAmount", "initialLiquiditySol", "initial_liquidity_sol"):
+            value = payload.get(field_name)
+            if isinstance(value, bool) or value is None:
+                continue
+            try:
+                return float(value)
+            except (TypeError, ValueError):
+                continue
+        return None
 
     def _mint_address_from_payload(self, payload: Mapping[str, object]) -> str | None:
         for field_name in (
@@ -245,11 +318,24 @@ class PumpFunMonitor(SignalSource):
 
         return 0.7
 
+    def _weight_for_payload(self, payload: Mapping[str, object], signal_type: SignalType, confidence: float) -> float:
+        if signal_type != SignalType.GRADUATION or confidence <= 0:
+            return 1.0
+        boosted_strength = min(confidence + 0.2, 1.0)
+        return round(boosted_strength / confidence, 6)
+
     def _message_for_payload(self, payload: Mapping[str, object], signal_type: SignalType) -> str:
         symbol = payload.get("symbol") or payload.get("ticker") or payload.get("name")
         if isinstance(symbol, str) and symbol.strip():
             return f"pump.fun {signal_type.value.lower()} for {symbol.strip()}"
         return f"pump.fun {signal_type.value.lower()} detected"
+
+    def _string_field(self, payload: Mapping[str, object], *field_names: str) -> str | None:
+        for field_name in field_names:
+            value = payload.get(field_name)
+            if isinstance(value, str) and value.strip():
+                return value.strip()
+        return None
 
     def _extract_events(self, payload: object) -> list[dict[str, object]]:
         if isinstance(payload, list):
