@@ -127,10 +127,10 @@ class PaperCycleSummary:
             return []
 
         lines = ["Rejected candidate diagnostics:"]
-        lines.append("  # | symbol | mint | source | failed_check | holder_source | top10_holder_pct | liquidity | attention_hints")
+        lines.append("  # | symbol | mint | source | failed_check | holder_source | top10_holder_pct | creator | liquidity | attention_hints")
         for diagnostic in self.rejected_candidate_diagnostics:
             lines.append(
-                "  {rank} | {symbol} | {mint_short} | {source} | {failed_check} | {holder_source} | {top10_holder_pct} | {liquidity} | {attention_hints}".format(
+                "  {rank} | {symbol} | {mint_short} | {source} | {failed_check} | {holder_source} | {top10_holder_pct} | {creator} | {liquidity} | {attention_hints}".format(
                     rank=diagnostic.get("rank", "?"),
                     symbol=diagnostic.get("symbol", "unknown"),
                     mint_short=diagnostic.get("mint_short", "unknown"),
@@ -138,6 +138,7 @@ class PaperCycleSummary:
                     failed_check=diagnostic.get("failed_check", "unknown"),
                     holder_source=diagnostic.get("top10_holder_source", "unknown"),
                     top10_holder_pct=diagnostic.get("top10_holder_pct", "unknown"),
+                    creator=diagnostic.get("creator_holding_display", "unknown"),
                     liquidity=diagnostic.get("liquidity_display", "unknown"),
                     attention_hints=diagnostic.get("attention_hints", "none"),
                 )
@@ -399,6 +400,7 @@ def _build_rejected_candidate_diagnostic(
     metrics = payload.get("metrics") if isinstance(payload.get("metrics"), dict) else {}
     social = payload.get("social_credibility") if isinstance(payload.get("social_credibility"), dict) else {}
     holder_diagnostics = payload.get("holder_diagnostics") if isinstance(payload.get("holder_diagnostics"), dict) else {}
+    creator_diagnostics = payload.get("creator_diagnostics") if isinstance(payload.get("creator_diagnostics"), dict) else {}
     top10_result = _check_result_value(record, "top10_holder_check")
     liquidity_result = _check_result_value(record, "liquidity_check")
     authority_result = _check_result_value(record, "mint_authority_check")
@@ -441,6 +443,11 @@ def _build_rejected_candidate_diagnostic(
             top10_value if top10_value is not None else "unknown",
         ),
         "top10_holder_source": _top10_holder_source_hint(payload, record),
+        "creator_holding_pct": creator_diagnostics.get("creator_holding_pct", "unknown"),
+        "creator_holding_source": creator_diagnostics.get("creator_holding_source", "unknown"),
+        "creator_holding_state": creator_diagnostics.get("creator_holding_state", "unknown"),
+        "creator_holding_unknown_reason": creator_diagnostics.get("creator_holding_unknown_reason"),
+        "creator_holding_display": _creator_holding_display(creator_diagnostics),
         "liquidity_value": liquidity_value if liquidity_value is not None else "unknown",
         "liquidity_display": _liquidity_display(liquidity_result, liquidity_value),
         "liquidity_state": liquidity_result or "unknown",
@@ -528,6 +535,17 @@ def _social_hint(social: dict[str, object]) -> str:
     if unique_accounts is not None:
         parts.append(f"accounts={unique_accounts}")
     return ",".join(parts) if parts else "known"
+
+
+def _creator_holding_display(creator_diagnostics: dict[str, object]) -> str:
+    value = creator_diagnostics.get("creator_holding_pct")
+    source = creator_diagnostics.get("creator_holding_source")
+    state = creator_diagnostics.get("creator_holding_state")
+    if isinstance(value, (int, float)):
+        return f"{float(value):.4f}@{source}"
+    if state == "unknown":
+        return "unknown"
+    return "unknown"
 
 
 def _attention_hints(
@@ -619,6 +637,10 @@ def build_rejection_diagnostic_report(summary: PaperCycleSummary) -> str:
                 f"selected_top10_holder_pct: {diagnostic.get('selected_top10_holder_pct', 'unknown')}",
                 f"top10_holder_pct: {diagnostic.get('top10_holder_pct', 'unknown')}",
                 f"top10_holder_source: {diagnostic.get('top10_holder_source', 'unknown')}",
+                f"creator_holding_pct: {diagnostic.get('creator_holding_pct', 'unknown')}",
+                f"creator_holding_source: {diagnostic.get('creator_holding_source', 'unknown')}",
+                f"creator_holding_state: {diagnostic.get('creator_holding_state', 'unknown')}",
+                f"creator_holding_unknown_reason: {diagnostic.get('creator_holding_unknown_reason', 'unknown')}",
                 f"liquidity: {diagnostic.get('liquidity_display', 'unknown')}",
                 f"liquidity_state: {diagnostic.get('liquidity_state', 'unknown')}",
                 f"honeypot_check: {diagnostic.get('honeypot_check', 'unknown')}",

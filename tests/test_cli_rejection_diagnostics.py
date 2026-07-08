@@ -72,6 +72,12 @@ def _build_rejected_signal() -> Signal:
                 "selected_top10_holder_pct": 42.0,
                 "top10_holder_source": "local_filtered_override",
             },
+            "creator_diagnostics": {
+                "creator_holding_pct": None,
+                "creator_holding_source": "unknown",
+                "creator_holding_state": "unknown",
+                "creator_holding_unknown_reason": "no normalized creator holding in signal payload, RugCheck, or holder lookup",
+            },
             "raw_data": {"secret": "do-not-print", "buyerWallets": ["WalletSecret111"]},
             "risk_assessment": assessment,
         },
@@ -102,6 +108,8 @@ def test_run_bounded_paper_cycle_collects_per_token_rejection_diagnostics(tmp_pa
         assert diagnostic["selected_top10_holder_pct"] == 42.0
         assert diagnostic["top10_holder_source"] == "local_filtered_override"
         assert diagnostic["top10_holder_pct"] == 42.0
+        assert diagnostic["creator_holding_source"] == "unknown"
+        assert diagnostic["creator_holding_state"] == "unknown"
         assert diagnostic["liquidity_state"] == "fail"
         assert diagnostic["liquidity_display"] == "4.0000"
         assert "mc=12345.00" in diagnostic["attention_hints"]
@@ -154,7 +162,9 @@ def test_rejection_report_and_cli_lines_stay_safe_with_missing_fields() -> None:
     assert cli_lines[0] == "Rejected candidate diagnostics:"
     assert "failed_check" in cli_lines[1]
     assert "holder_source" in cli_lines[1]
+    assert "creator" in cli_lines[1]
     assert "liquidity_check" in cli_lines[2]
+    assert "creator_holding_unknown_reason" in report
     assert "do-not-print" not in report
     assert "WalletSecret111" not in report
     assert "raw_data" not in report

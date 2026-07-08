@@ -377,6 +377,127 @@ def test_rugcheck_unsafe_data_fails_existing_checks_with_current_labels() -> Non
     assert "honeypot_check failed" in assessment.reasons
 
 
+def test_signal_creator_holding_alias_below_threshold_passes_and_sets_source() -> None:
+    signal = Signal(
+        source=SignalSource.PUMP_FUN,
+        type=SignalType.NEW_POOL,
+        mint_address="creator-pass-mint",
+        payload={
+            "vSolInBondingCurve": 30.1,
+            "uniqueBuyers": 25,
+            "deployerHoldingPct": 7.5,
+            "top10HolderPct": 30.0,
+            "mintAuthorityRevoked": True,
+            "freezeAuthorityRevoked": True,
+            "createdAt": (datetime.now(UTC) - timedelta(minutes=10)).isoformat(),
+        },
+    )
+    scorer = DiscoveryRiskScorer(config=RiskConfig(min_age_minutes=0), enable_holder_lookup=False)
+
+    assessment = asyncio.run(scorer.assess_signal(signal))
+
+    assert assessment.creator_holding_check == CheckResult.PASS
+    assert assessment.token is not None
+    assert assessment.token.creator_holding_pct == 7.5
+    diagnostics = signal.payload["creator_diagnostics"]
+    assert diagnostics["creator_holding_pct"] == 7.5
+    assert diagnostics["creator_holding_source"] == "signal_payload"
+    assert diagnostics["creator_holding_state"] == "known"
+
+
+def test_signal_creator_holding_alias_above_threshold_fails() -> None:
+    signal = Signal(
+        source=SignalSource.PUMP_FUN,
+        type=SignalType.NEW_POOL,
+        mint_address="creator-fail-mint",
+        payload={
+            "vSolInBondingCurve": 30.1,
+            "uniqueBuyers": 25,
+            "creatorBalancePct": 18.0,
+            "top10HolderPct": 30.0,
+            "mintAuthorityRevoked": True,
+            "freezeAuthorityRevoked": True,
+            "createdAt": (datetime.now(UTC) - timedelta(minutes=10)).isoformat(),
+        },
+    )
+    scorer = DiscoveryRiskScorer(config=RiskConfig(min_age_minutes=0), enable_holder_lookup=False)
+
+    assessment = asyncio.run(scorer.assess_signal(signal))
+
+    assert assessment.creator_holding_check == CheckResult.FAIL
+    assert assessment.token is not None
+    assert assessment.token.creator_holding_pct == 18.0
+    diagnostics = signal.payload["creator_diagnostics"]
+    assert diagnostics["creator_holding_source"] == "signal_payload"
+
+
+def test_rugcheck_raw_creator_holding_populates_when_signal_missing() -> None:
+    mint_address = "So11111111111111111111111111111111111111112"
+    signal = Signal(
+        source=SignalSource.PUMP_FUN,
+        type=SignalType.NEW_POOL,
+        mint_address=mint_address,
+        payload={
+            "vSolInBondingCurve": 30.1,
+            "uniqueBuyers": 25,
+            "top10HolderPct": 30.0,
+            "mintAuthorityRevoked": True,
+            "freezeAuthorityRevoked": True,
+            "createdAt": (datetime.now(UTC) - timedelta(minutes=10)).isoformat(),
+        },
+    )
+    rugcheck = RugCheckResult(
+        mint_address=mint_address,
+        found=True,
+        mint_authority_revoked=True,
+        freeze_authority_revoked=True,
+        top_holder_pct=30.0,
+        provider_status="ok",
+    )
+    rugcheck.raw = {"creatorHoldingPct": 9.0}
+    scorer = DiscoveryRiskScorer(
+        config=RiskConfig(min_age_minutes=0),
+        rugcheck_client=FakeRugCheckClient(rugcheck),
+        enable_holder_lookup=False,
+    )
+
+    assessment = asyncio.run(scorer.assess_signal(signal))
+
+    assert assessment.creator_holding_check == CheckResult.PASS
+    assert assessment.token is not None
+    assert assessment.token.creator_holding_pct == 9.0
+    diagnostics = signal.payload["creator_diagnostics"]
+    assert diagnostics["creator_holding_pct"] == 9.0
+    assert diagnostics["creator_holding_source"] == "rugcheck"
+    assert diagnostics["creator_holding_state"] == "known"
+
+
+def test_creator_holding_missing_stays_unknown_and_reason_is_recorded() -> None:
+    signal = Signal(
+        source=SignalSource.PUMP_FUN,
+        type=SignalType.NEW_POOL,
+        mint_address="creator-unknown-mint",
+        payload={
+            "vSolInBondingCurve": 30.1,
+            "uniqueBuyers": 25,
+            "top10HolderPct": 30.0,
+            "mintAuthorityRevoked": True,
+            "freezeAuthorityRevoked": True,
+            "createdAt": (datetime.now(UTC) - timedelta(minutes=10)).isoformat(),
+        },
+    )
+    scorer = DiscoveryRiskScorer(config=RiskConfig(min_age_minutes=0), enable_holder_lookup=False)
+
+    assessment = asyncio.run(scorer.assess_signal(signal))
+
+    assert assessment.creator_holding_check == CheckResult.UNKNOWN
+    diagnostics = signal.payload["creator_diagnostics"]
+    assert diagnostics["creator_holding_pct"] is None
+    assert diagnostics["creator_holding_source"] == "unknown"
+    assert diagnostics["creator_holding_state"] == "unknown"
+    assert diagnostics["creator_holding_unknown_reason"] == "no normalized creator holding in signal payload, RugCheck, or holder lookup"
+
+
 def test_rugcheck_failing_holder_uses_local_filtered_override_when_local_passes() -> None:
     mint_address = "44444444444444444444444444444444"
     signal = Signal(

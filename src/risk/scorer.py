@@ -139,6 +139,7 @@ class DiscoveryRiskScorer:
             self._lookup_outcomes["parallel_prechecks_used"] += 1
         token, lookup_status, holder_diagnostics = await self._enrich_token(token, rugcheck_result)
         signal.payload["holder_diagnostics"] = holder_diagnostics
+        signal.payload["creator_diagnostics"] = _build_creator_diagnostics(signal.payload, token, rugcheck_result)
         token = _apply_funding_token_fields(token, funding_result)
         assessment = assess_token(token, self._config)
         assessment = _apply_rugcheck_assessment(assessment, rugcheck_result)
@@ -426,6 +427,9 @@ def _apply_rugcheck_token_fields(token: TokenInfo, rugcheck_result: RugCheckResu
         updates["mint_authority_revoked"] = rugcheck_result.mint_authority_revoked
     if token.freeze_authority_revoked is None and rugcheck_result.freeze_authority_revoked is not None:
         updates["freeze_authority_revoked"] = rugcheck_result.freeze_authority_revoked
+    rugcheck_creator_holding_pct = _rugcheck_creator_holding_pct(rugcheck_result)
+    if token.creator_holding_pct is None and rugcheck_creator_holding_pct is not None:
+        updates["creator_holding_pct"] = rugcheck_creator_holding_pct
 
     if not updates:
         return token
@@ -436,6 +440,118 @@ def _rugcheck_top10_holder_pct(rugcheck_result: RugCheckResult | None) -> float 
     if rugcheck_result is None or rugcheck_result.provider_status != "ok" or not rugcheck_result.found:
         return None
     return rugcheck_result.top_holder_pct
+
+
+def _rugcheck_creator_holding_pct(rugcheck_result: RugCheckResult | None) -> float | None:
+    if rugcheck_result is None or rugcheck_result.provider_status != "ok" or not rugcheck_result.found:
+        return None
+    raw = rugcheck_result.raw
+    if not isinstance(raw, Mapping):
+        return None
+    return _extract_float_from_mapping(
+        raw,
+        (
+            "creatorHoldingPct",
+            "creatorHoldingPercent",
+            "creatorPercent",
+            "creator_balance_pct",
+            "creatorBalancePct",
+            "deployerHoldingPct",
+            "deployerHoldingPercent",
+            "devHoldingPct",
+            "devHoldingPercent",
+            "holderAnalysis.creatorHoldingPct",
+            "holders.creatorHoldingPct",
+        ),
+    )
+
+
+def _build_creator_diagnostics(
+    payload: Mapping[str, object],
+    token: TokenInfo,
+    rugcheck_result: RugCheckResult | None,
+) -> dict[str, object]:
+    signal_creator_holding_pct = _extract_float_from_mapping(
+        payload,
+        (
+            "creator_holding_pct",
+            "creator_holding_percent",
+            "creatorHoldingPct",
+            "creatorHoldingPercent",
+            "creatorPercent",
+            "creator_percentage",
+            "deployer_holding_pct",
+            "deployerHoldingPct",
+            "deployerHoldingPercent",
+            "creator_balance_pct",
+            "creatorBalancePct",
+            "devHoldingPct",
+            "devHoldingPercent",
+        ),
+    )
+    rugcheck_creator_holding_pct = _rugcheck_creator_holding_pct(rugcheck_result)
+
+    if signal_creator_holding_pct is not None:
+        return {
+            "creator_holding_pct": signal_creator_holding_pct,
+            "creator_holding_source": "signal_payload",
+            "creator_holding_state": "known",
+            "creator_holding_unknown_reason": None,
+        }
+    if rugcheck_creator_holding_pct is not None:
+        return {
+            "creator_holding_pct": rugcheck_creator_holding_pct,
+            "creator_holding_source": "rugcheck",
+            "creator_holding_state": "known",
+            "creator_holding_unknown_reason": None,
+        }
+    if token.creator_holding_pct is not None:
+        return {
+            "creator_holding_pct": token.creator_holding_pct,
+            "creator_holding_source": "enriched_unknown",
+            "creator_holding_state": "known",
+            "creator_holding_unknown_reason": None,
+        }
+    return {
+        "creator_holding_pct": None,
+        "creator_holding_source": "unknown",
+        "creator_holding_state": "unknown",
+        "creator_holding_unknown_reason": "no normalized creator holding in signal payload, RugCheck, or holder lookup",
+    }
+
+
+def _extract_float_from_mapping(mapping: Mapping[str, object], paths: tuple[str, ...]) -> float | None:
+    for path in paths:
+        value = _extract_value_from_mapping(mapping, path)
+        parsed = _coerce_float_value(value)
+        if parsed is not None:
+            return parsed
+    return None
+
+
+def _extract_value_from_mapping(mapping: Mapping[str, object], path: str) -> object:
+    current: object = mapping
+    for segment in path.split("."):
+        if not isinstance(current, Mapping):
+            return None
+        current = current.get(segment)
+    return current
+
+
+def _coerce_float_value(value: object) -> float | None:
+    if isinstance(value, bool) or value is None:
+        return None
+    if isinstance(value, (int, float)):
+        return float(value)
+    if isinstance(value, str):
+        stripped = value.strip().rstrip("%")
+        if not stripped:
+            return None
+        try:
+            return float(stripped)
+        except ValueError:
+            return None
+    return None
 
 
 def _apply_holder_lookup_fields(token: TokenInfo, lookup_result: HolderLookupResult) -> TokenInfo:
@@ -743,6 +859,11 @@ def build_token_from_signal(signal: Signal) -> TokenInfo:
             "creatorHoldingPercent",
             "creatorPercent",
             "creator_percentage",
+            "deployer_holding_pct",
+            "deployerHoldingPct",
+            "deployerHoldingPercent",
+            "creator_balance_pct",
+            "creatorBalancePct",
             "devHoldingPct",
             "devHoldingPercent",
         ),
