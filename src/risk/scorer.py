@@ -39,6 +39,8 @@ CHECK_WEIGHTS = {
     "freeze_authority_check": 10.0,
     "honeypot_check": 10.0,
 }
+FRESH_LAUNCH_HOLDER_WARNING_AGE_MINUTES = 15.0
+FRESH_LAUNCH_HOLDER_WARNING_CAP_PCT = 100.0
 
 
 @dataclass(slots=True)
@@ -109,6 +111,7 @@ class DiscoveryRiskScorer:
         funding_provider: FundingTransferProvider | None = None,
         honeypot_adapter: HoneypotSimulationAdapter | None = None,
         liquidity_probe: LiquidityProbe | None = None,
+        holder_policy_mode: str = "strict",
         enable_holder_lookup: bool = True,
         enable_funding_analysis: bool = True,
     ) -> None:
@@ -118,6 +121,7 @@ class DiscoveryRiskScorer:
         self._funding_provider = funding_provider or HeliusFundingProvider()
         self._honeypot_adapter = honeypot_adapter
         self._liquidity_probe = liquidity_probe or LiquidityProbe()
+        self._holder_policy_mode = holder_policy_mode
         self._enable_holder_lookup = enable_holder_lookup
         self._enable_funding_analysis = enable_funding_analysis
         self._cache: dict[str, HolderLookupResult | None] = {}
@@ -146,6 +150,13 @@ class DiscoveryRiskScorer:
         honeypot_result = await self._simulate_honeypot(signal, rugcheck_result)
         assessment = _apply_honeypot_simulation_assessment(assessment, honeypot_result)
         assessment = _apply_funding_assessment(assessment, funding_result, missing_provider=missing_provider)
+        signal.payload["holder_policy"] = _build_holder_policy_diagnostics(
+            signal,
+            token,
+            assessment,
+            holder_diagnostics,
+            policy_mode=self._holder_policy_mode,
+        )
         self._record_lookup_outcome(lookup_status, assessment)
         self._record_rugcheck_outcome(rugcheck_result, assessment)
         self._record_honeypot_simulation_outcome(honeypot_result, assessment)
@@ -552,6 +563,86 @@ def _coerce_float_value(value: object) -> float | None:
         except ValueError:
             return None
     return None
+
+
+def _build_holder_policy_diagnostics(
+    signal: Signal,
+    token: TokenInfo,
+    assessment: RiskAssessment,
+    holder_diagnostics: Mapping[str, object],
+    *,
+    policy_mode: str,
+) -> dict[str, object]:
+    selected_top10_holder_pct = holder_diagnostics.get("selected_top10_holder_pct")
+    holder_source = holder_diagnostics.get("top10_holder_source")
+    age_minutes = token.age_minutes
+    stage = _signal_stage_hint(signal)
+    fresh_context_used = False
+
+    if assessment.top10_holder_check == CheckResult.PASS:
+        return {
+            "holder_policy_state": "pass",
+            "holder_policy_reason": "selected holder concentration passed strict threshold",
+            "token_age_minutes": age_minutes,
+            "stage_hint": stage,
+            "fresh_launch_context_used": fresh_context_used,
+        }
+
+    if assessment.top10_holder_check == CheckResult.UNKNOWN:
+        return {
+            "holder_policy_state": "unknown",
+            "holder_policy_reason": "holder concentration data unavailable",
+            "token_age_minutes": age_minutes,
+            "stage_hint": stage,
+            "fresh_launch_context_used": fresh_context_used,
+        }
+
+    if policy_mode != "discovery":
+        return {
+            "holder_policy_state": "fail",
+            "holder_policy_reason": "strict mode preserves hard holder threshold",
+            "token_age_minutes": age_minutes,
+            "stage_hint": stage,
+            "fresh_launch_context_used": fresh_context_used,
+        }
+
+    trusted_source = holder_source in {"local_filtered_override", "local_filtered_lookup", "signal_payload"}
+    is_fresh = age_minutes is not None and age_minutes <= FRESH_LAUNCH_HOLDER_WARNING_AGE_MINUTES
+    creator_safe = assessment.creator_holding_check == CheckResult.PASS
+    liquidity_safe = assessment.liquidity_check == CheckResult.PASS
+    authorities_safe = assessment.mint_authority_check != CheckResult.FAIL and assessment.freeze_authority_check != CheckResult.FAIL
+    honeypot_safe = assessment.honeypot_check != CheckResult.FAIL
+    bounded_holder_pct = isinstance(selected_top10_holder_pct, (int, float)) and selected_top10_holder_pct <= FRESH_LAUNCH_HOLDER_WARNING_CAP_PCT
+
+    if trusted_source and is_fresh and creator_safe and liquidity_safe and authorities_safe and honeypot_safe and bounded_holder_pct:
+        fresh_context_used = True
+        return {
+            "holder_policy_state": "fresh_launch_warning",
+            "holder_policy_reason": "discovery-mode fresh-launch concentration warning with trusted holder source and clean supporting checks",
+            "token_age_minutes": age_minutes,
+            "stage_hint": stage,
+            "fresh_launch_context_used": fresh_context_used,
+        }
+
+    return {
+        "holder_policy_state": "fail",
+        "holder_policy_reason": "discovery mode could not downgrade holder failure because freshness or supporting safety checks were insufficient",
+        "token_age_minutes": age_minutes,
+        "stage_hint": stage,
+        "fresh_launch_context_used": fresh_context_used,
+    }
+
+
+def _signal_stage_hint(signal: Signal) -> str:
+    if signal.type == SignalType.GRADUATION:
+        return "graduation"
+    payload = signal.payload
+    pool = payload.get("pool")
+    if isinstance(pool, str) and pool.strip():
+        return pool.strip().lower()
+    if signal.type == SignalType.NEW_POOL:
+        return "new_pool"
+    return "unknown"
 
 
 def _apply_holder_lookup_fields(token: TokenInfo, lookup_result: HolderLookupResult) -> TokenInfo:

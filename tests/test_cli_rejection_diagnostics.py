@@ -78,6 +78,13 @@ def _build_rejected_signal() -> Signal:
                 "creator_holding_state": "unknown",
                 "creator_holding_unknown_reason": "no normalized creator holding in signal payload, RugCheck, or holder lookup",
             },
+            "holder_policy": {
+                "holder_policy_state": "fresh_launch_warning",
+                "holder_policy_reason": "discovery-mode fresh-launch concentration warning with trusted holder source and clean supporting checks",
+                "token_age_minutes": 10.0,
+                "stage_hint": "new_pool",
+                "fresh_launch_context_used": True,
+            },
             "raw_data": {"secret": "do-not-print", "buyerWallets": ["WalletSecret111"]},
             "risk_assessment": assessment,
         },
@@ -110,6 +117,7 @@ def test_run_bounded_paper_cycle_collects_per_token_rejection_diagnostics(tmp_pa
         assert diagnostic["top10_holder_pct"] == 42.0
         assert diagnostic["creator_holding_source"] == "unknown"
         assert diagnostic["creator_holding_state"] == "unknown"
+        assert diagnostic["holder_policy_state"] == "fresh_launch_warning"
         assert diagnostic["liquidity_state"] == "fail"
         assert diagnostic["liquidity_display"] == "4.0000"
         assert "mc=12345.00" in diagnostic["attention_hints"]
@@ -161,10 +169,12 @@ def test_rejection_report_and_cli_lines_stay_safe_with_missing_fields() -> None:
 
     assert cli_lines[0] == "Rejected candidate diagnostics:"
     assert "failed_check" in cli_lines[1]
+    assert "holder_policy" in cli_lines[1]
     assert "holder_source" in cli_lines[1]
     assert "creator" in cli_lines[1]
     assert "liquidity_check" in cli_lines[2]
     assert "creator_holding_unknown_reason" in report
+    assert "holder_policy_reason" in report
     assert "do-not-print" not in report
     assert "WalletSecret111" not in report
     assert "raw_data" not in report

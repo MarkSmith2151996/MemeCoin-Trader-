@@ -498,6 +498,237 @@ def test_creator_holding_missing_stays_unknown_and_reason_is_recorded() -> None:
     assert diagnostics["creator_holding_unknown_reason"] == "no normalized creator holding in signal payload, RugCheck, or holder lookup"
 
 
+def test_strict_mode_keeps_high_holder_concentration_as_hard_fail() -> None:
+    mint_address = "88888888888888888888888888888888"
+    signal = Signal(
+        source=SignalSource.PUMP_FUN,
+        type=SignalType.NEW_POOL,
+        mint_address=mint_address,
+        payload={
+            "vSolInBondingCurve": 30.1,
+            "uniqueBuyers": 25,
+            "creatorHoldingPct": 5.0,
+            "mintAuthorityRevoked": True,
+            "freezeAuthorityRevoked": True,
+            "createdAt": (datetime.now(UTC) - timedelta(minutes=10)).isoformat(),
+        },
+    )
+    scorer = DiscoveryRiskScorer(
+        config=RiskConfig(min_age_minutes=0),
+        holder_lookup=FakeHolderLookup(HolderLookupResult(top10_holder_pct=75.0)),
+        rugcheck_client=FakeRugCheckClient(
+            RugCheckResult(
+                mint_address=mint_address,
+                found=True,
+                mint_authority_revoked=True,
+                freeze_authority_revoked=True,
+                top_holder_pct=120.0,
+                provider_status="ok",
+            )
+        ),
+        holder_policy_mode="strict",
+        enable_holder_lookup=False,
+    )
+
+    assessment = asyncio.run(scorer.assess_signal(signal))
+
+    assert assessment.top10_holder_check == CheckResult.FAIL
+    assert signal.payload["holder_policy"]["holder_policy_state"] == "fail"
+
+
+def test_discovery_mode_classifies_fresh_launch_warning_without_changing_fail_result() -> None:
+    mint_address = "99999999999999999999999999999999"
+    signal = Signal(
+        source=SignalSource.PUMP_FUN,
+        type=SignalType.NEW_POOL,
+        mint_address=mint_address,
+        payload={
+            "vSolInBondingCurve": 30.1,
+            "uniqueBuyers": 25,
+            "creatorHoldingPct": 5.0,
+            "mintAuthorityRevoked": True,
+            "freezeAuthorityRevoked": True,
+            "createdAt": (datetime.now(UTC) - timedelta(minutes=10)).isoformat(),
+        },
+    )
+    scorer = DiscoveryRiskScorer(
+        config=RiskConfig(min_age_minutes=0),
+        holder_lookup=FakeHolderLookup(HolderLookupResult(top10_holder_pct=75.0)),
+        rugcheck_client=FakeRugCheckClient(
+            RugCheckResult(
+                mint_address=mint_address,
+                found=True,
+                mint_authority_revoked=True,
+                freeze_authority_revoked=True,
+                top_holder_pct=120.0,
+                provider_status="ok",
+            )
+        ),
+        holder_policy_mode="discovery",
+        enable_holder_lookup=False,
+    )
+
+    assessment = asyncio.run(scorer.assess_signal(signal))
+
+    assert assessment.top10_holder_check == CheckResult.FAIL
+    policy = signal.payload["holder_policy"]
+    assert policy["holder_policy_state"] == "fresh_launch_warning"
+    assert policy["fresh_launch_context_used"] is True
+
+
+def test_discovery_warning_blocked_when_liquidity_unknown() -> None:
+    mint_address = "AAAAAAAABBBBBBBBCCCCCCCCDDDDDDDD"
+    signal = Signal(
+        source=SignalSource.PUMP_FUN,
+        type=SignalType.NEW_POOL,
+        mint_address=mint_address,
+        payload={
+            "uniqueBuyers": 25,
+            "creatorHoldingPct": 5.0,
+            "mintAuthorityRevoked": True,
+            "freezeAuthorityRevoked": True,
+            "createdAt": (datetime.now(UTC) - timedelta(minutes=10)).isoformat(),
+        },
+    )
+    scorer = DiscoveryRiskScorer(
+        config=RiskConfig(min_age_minutes=0),
+        holder_lookup=FakeHolderLookup(HolderLookupResult(top10_holder_pct=75.0)),
+        rugcheck_client=FakeRugCheckClient(
+            RugCheckResult(
+                mint_address=mint_address,
+                found=True,
+                mint_authority_revoked=True,
+                freeze_authority_revoked=True,
+                top_holder_pct=120.0,
+                provider_status="ok",
+            )
+        ),
+        holder_policy_mode="discovery",
+        enable_holder_lookup=False,
+    )
+
+    assessment = asyncio.run(scorer.assess_signal(signal))
+
+    assert assessment.liquidity_check == CheckResult.UNKNOWN
+    assert signal.payload["holder_policy"]["holder_policy_state"] == "fail"
+
+
+def test_discovery_warning_blocked_when_creator_holding_fails() -> None:
+    mint_address = "BBBBBBBBCCCCCCCCDDDDDDDDEEEEEEEE"
+    signal = Signal(
+        source=SignalSource.PUMP_FUN,
+        type=SignalType.NEW_POOL,
+        mint_address=mint_address,
+        payload={
+            "vSolInBondingCurve": 30.1,
+            "uniqueBuyers": 25,
+            "creatorHoldingPct": 18.0,
+            "mintAuthorityRevoked": True,
+            "freezeAuthorityRevoked": True,
+            "createdAt": (datetime.now(UTC) - timedelta(minutes=10)).isoformat(),
+        },
+    )
+    scorer = DiscoveryRiskScorer(
+        config=RiskConfig(min_age_minutes=0),
+        holder_lookup=FakeHolderLookup(HolderLookupResult(top10_holder_pct=75.0)),
+        rugcheck_client=FakeRugCheckClient(
+            RugCheckResult(
+                mint_address=mint_address,
+                found=True,
+                mint_authority_revoked=True,
+                freeze_authority_revoked=True,
+                top_holder_pct=120.0,
+                provider_status="ok",
+            )
+        ),
+        holder_policy_mode="discovery",
+        enable_holder_lookup=False,
+    )
+
+    assessment = asyncio.run(scorer.assess_signal(signal))
+
+    assert assessment.creator_holding_check == CheckResult.FAIL
+    assert signal.payload["holder_policy"]["holder_policy_state"] == "fail"
+
+
+def test_discovery_warning_blocked_when_honeypot_fails() -> None:
+    mint_address = "CCCCCCCCDDDDDDDDEEEEEEEEFFFFFFFF"
+    signal = Signal(
+        source=SignalSource.PUMP_FUN,
+        type=SignalType.NEW_POOL,
+        mint_address=mint_address,
+        payload={
+            "vSolInBondingCurve": 30.1,
+            "uniqueBuyers": 25,
+            "creatorHoldingPct": 5.0,
+            "mintAuthorityRevoked": True,
+            "freezeAuthorityRevoked": True,
+            "createdAt": (datetime.now(UTC) - timedelta(minutes=10)).isoformat(),
+        },
+    )
+    scorer = DiscoveryRiskScorer(
+        config=RiskConfig(min_age_minutes=0),
+        holder_lookup=FakeHolderLookup(HolderLookupResult(top10_holder_pct=75.0)),
+        rugcheck_client=FakeRugCheckClient(
+            RugCheckResult(
+                mint_address=mint_address,
+                found=True,
+                mint_authority_revoked=True,
+                freeze_authority_revoked=True,
+                top_holder_pct=120.0,
+                is_honeypot=True,
+                provider_status="ok",
+            )
+        ),
+        holder_policy_mode="discovery",
+        enable_holder_lookup=False,
+    )
+
+    assessment = asyncio.run(scorer.assess_signal(signal))
+
+    assert assessment.honeypot_check == CheckResult.FAIL
+    assert signal.payload["holder_policy"]["holder_policy_state"] == "fail"
+
+
+def test_discovery_warning_preserves_fail_when_age_missing() -> None:
+    mint_address = "DDDDDDDDEEEEEEEEFFFFFFFFGGGGGGGG"
+    signal = Signal(
+        source=SignalSource.WHALE_TRACKER,
+        type=SignalType.BUY,
+        mint_address=mint_address,
+        payload={
+            "liquidity_sol": 30.1,
+            "uniqueBuyers": 25,
+            "creatorHoldingPct": 5.0,
+            "mintAuthorityRevoked": True,
+            "freezeAuthorityRevoked": True,
+        },
+    )
+    scorer = DiscoveryRiskScorer(
+        config=RiskConfig(min_age_minutes=0),
+        holder_lookup=FakeHolderLookup(HolderLookupResult(top10_holder_pct=75.0)),
+        rugcheck_client=FakeRugCheckClient(
+            RugCheckResult(
+                mint_address=mint_address,
+                found=True,
+                mint_authority_revoked=True,
+                freeze_authority_revoked=True,
+                top_holder_pct=120.0,
+                provider_status="ok",
+            )
+        ),
+        holder_policy_mode="discovery",
+        enable_holder_lookup=False,
+    )
+
+    assessment = asyncio.run(scorer.assess_signal(signal))
+
+    assert assessment.top10_holder_check == CheckResult.FAIL
+    policy = signal.payload["holder_policy"]
+    assert policy["holder_policy_state"] == "fail"
+    assert policy["token_age_minutes"] is None
+
+
 def test_rugcheck_failing_holder_uses_local_filtered_override_when_local_passes() -> None:
     mint_address = "44444444444444444444444444444444"
     signal = Signal(
