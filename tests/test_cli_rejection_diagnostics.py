@@ -84,6 +84,11 @@ def _build_rejected_signal() -> Signal:
                 "creator_holding_state": "unknown",
                 "creator_holding_unknown_reason": "no normalized creator holding in signal payload, RugCheck, or holder lookup",
             },
+            "creator_policy": {
+                "creator_policy_state": "unknown_warning",
+                "creator_policy_reason": "discovery-mode launch-stage token allowed past unknown creator holding because other hard safety checks were clean enough",
+                "creator_policy_context_used": True,
+            },
             "holder_policy": {
                 "holder_policy_state": "fresh_launch_warning",
                 "holder_policy_reason": "discovery-mode fresh-launch concentration warning with trusted holder source and clean supporting checks",
@@ -147,6 +152,7 @@ def test_run_bounded_paper_cycle_collects_per_token_rejection_diagnostics(tmp_pa
         assert diagnostic["local_holder_top_filtered_accounts"][0]["classification"] == "bonding_curve_artifact"
         assert diagnostic["creator_holding_source"] == "unknown"
         assert diagnostic["creator_holding_state"] == "unknown"
+        assert diagnostic["creator_policy_state"] == "unknown_warning"
         assert diagnostic["holder_policy_state"] == "fresh_launch_warning"
         assert diagnostic["age_policy_state"] == "immature_warning"
         assert diagnostic["selected_liquidity_sol"] == 4.0
@@ -208,10 +214,12 @@ def test_rejection_report_and_cli_lines_stay_safe_with_missing_fields() -> None:
     assert "failed_check" in cli_lines[1]
     assert "holder_policy" in cli_lines[1]
     assert "age_policy" in cli_lines[1]
+    assert "creator_policy" in cli_lines[1]
     assert "holder_source" in cli_lines[1]
     assert "creator" in cli_lines[1]
     assert "liquidity_check" in cli_lines[2]
     assert "creator_holding_unknown_reason" in report
+    assert "creator_policy_reason" in report
     assert "age_policy_reason" in report
     assert "holder_policy_reason" in report
     assert "liquidity_source" in report

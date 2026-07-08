@@ -188,6 +188,15 @@ class DiscoveryRiskScorer:
             holder_policy=holder_policy,
         )
         signal.payload["age_policy"] = age_policy
+        assessment, creator_policy = _apply_creator_policy_assessment(
+            assessment,
+            signal,
+            policy_mode=self._holder_policy_mode,
+            holder_policy=holder_policy,
+            age_policy=age_policy,
+            creator_diagnostics=signal.payload["creator_diagnostics"],
+        )
+        signal.payload["creator_policy"] = creator_policy
         self._record_lookup_outcome(lookup_status, assessment)
         self._record_rugcheck_outcome(rugcheck_result, assessment)
         self._record_honeypot_simulation_outcome(honeypot_result, assessment)
@@ -887,6 +896,73 @@ def _apply_age_policy_assessment(
         "age_policy_state": "fresh_seconds",
         "age_policy_reason": "seconds-old launch still blocked because other hard safety checks were not clean enough for warning downgrade",
         "age_policy_context_used": context_used,
+    }
+
+
+def _apply_creator_policy_assessment(
+    assessment: RiskAssessment,
+    signal: Signal,
+    *,
+    policy_mode: str,
+    holder_policy: Mapping[str, object],
+    age_policy: Mapping[str, object],
+    creator_diagnostics: Mapping[str, object],
+) -> tuple[RiskAssessment, dict[str, object]]:
+    context_used = False
+
+    if assessment.creator_holding_check == CheckResult.PASS:
+        return assessment, {
+            "creator_policy_state": "pass",
+            "creator_policy_reason": "creator holding passed configured threshold",
+            "creator_policy_context_used": context_used,
+        }
+
+    if assessment.creator_holding_check == CheckResult.FAIL:
+        return assessment, {
+            "creator_policy_state": "fail",
+            "creator_policy_reason": "creator holding exceeded configured threshold",
+            "creator_policy_context_used": context_used,
+        }
+
+    if policy_mode != "discovery":
+        return assessment, {
+            "creator_policy_state": "unknown_conservative",
+            "creator_policy_reason": "strict mode preserves conservative rejection for unknown creator holding",
+            "creator_policy_context_used": context_used,
+        }
+
+    stage_hint = _signal_stage_hint(signal)
+    launch_like = stage_hint in {"new_pool", "pump"}
+    age_state = age_policy.get("age_policy_state")
+    age_safe = age_state in {"age_pass", "immature_warning"}
+    holder_safe = holder_policy.get("holder_policy_state") in {"pass", "fresh_launch_warning"}
+    liquidity_safe = assessment.liquidity_check == CheckResult.PASS
+    authority_safe = assessment.mint_authority_check != CheckResult.FAIL and assessment.freeze_authority_check != CheckResult.FAIL
+    honeypot_safe = assessment.honeypot_check != CheckResult.FAIL
+    unknown_reason = creator_diagnostics.get("creator_holding_unknown_reason")
+    missing_metadata = isinstance(unknown_reason, str) and unknown_reason != ""
+
+    if launch_like and age_safe and holder_safe and liquidity_safe and authority_safe and honeypot_safe and missing_metadata:
+        context_used = True
+        updated_reasons = [reason for reason in assessment.reasons if reason != "creator_holding_check unknown"]
+        updated_score = assessment.score + CHECK_WEIGHTS["creator_holding_check"]
+        updated_assessment = assessment.model_copy(
+            update={
+                "creator_holding_check": CheckResult.PASS,
+                "score": updated_score,
+                "reasons": updated_reasons,
+            }
+        )
+        return updated_assessment, {
+            "creator_policy_state": "unknown_warning",
+            "creator_policy_reason": "discovery-mode launch-stage token allowed past unknown creator holding because other hard safety checks were clean enough",
+            "creator_policy_context_used": context_used,
+        }
+
+    return assessment, {
+        "creator_policy_state": "unknown_conservative",
+        "creator_policy_reason": "creator holding is unknown and discovery-mode warning conditions were not met",
+        "creator_policy_context_used": context_used,
     }
 
 

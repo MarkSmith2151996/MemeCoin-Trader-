@@ -127,10 +127,10 @@ class PaperCycleSummary:
             return []
 
         lines = ["Rejected candidate diagnostics:"]
-        lines.append("  # | symbol | mint | source | failed_check | holder_policy | age_policy | holder_source | top10_holder_pct | creator | liquidity | attention_hints")
+        lines.append("  # | symbol | mint | source | failed_check | holder_policy | age_policy | creator_policy | holder_source | top10_holder_pct | creator | liquidity | attention_hints")
         for diagnostic in self.rejected_candidate_diagnostics:
             lines.append(
-                "  {rank} | {symbol} | {mint_short} | {source} | {failed_check} | {holder_policy} | {age_policy} | {holder_source} | {top10_holder_pct} | {creator} | {liquidity} | {attention_hints}".format(
+                "  {rank} | {symbol} | {mint_short} | {source} | {failed_check} | {holder_policy} | {age_policy} | {creator_policy} | {holder_source} | {top10_holder_pct} | {creator} | {liquidity} | {attention_hints}".format(
                     rank=diagnostic.get("rank", "?"),
                     symbol=diagnostic.get("symbol", "unknown"),
                     mint_short=diagnostic.get("mint_short", "unknown"),
@@ -138,6 +138,7 @@ class PaperCycleSummary:
                     failed_check=diagnostic.get("failed_check", "unknown"),
                     holder_policy=diagnostic.get("holder_policy_state", "unknown"),
                     age_policy=diagnostic.get("age_policy_state", "unknown"),
+                    creator_policy=diagnostic.get("creator_policy_state", "unknown"),
                     holder_source=diagnostic.get("top10_holder_source", "unknown"),
                     top10_holder_pct=diagnostic.get("top10_holder_pct", "unknown"),
                     creator=diagnostic.get("creator_holding_display", "unknown"),
@@ -400,6 +401,7 @@ def _build_rejected_candidate_diagnostic(
     social = payload.get("social_credibility") if isinstance(payload.get("social_credibility"), dict) else {}
     holder_diagnostics = payload.get("holder_diagnostics") if isinstance(payload.get("holder_diagnostics"), dict) else {}
     creator_diagnostics = payload.get("creator_diagnostics") if isinstance(payload.get("creator_diagnostics"), dict) else {}
+    creator_policy = payload.get("creator_policy") if isinstance(payload.get("creator_policy"), dict) else {}
     holder_policy = payload.get("holder_policy") if isinstance(payload.get("holder_policy"), dict) else {}
     age_policy = payload.get("age_policy") if isinstance(payload.get("age_policy"), dict) else {}
     liquidity_diagnostics = payload.get("liquidity_diagnostics") if isinstance(payload.get("liquidity_diagnostics"), dict) else {}
@@ -456,6 +458,9 @@ def _build_rejected_candidate_diagnostic(
         "creator_holding_state": creator_diagnostics.get("creator_holding_state", "unknown"),
         "creator_holding_unknown_reason": creator_diagnostics.get("creator_holding_unknown_reason"),
         "creator_holding_display": _creator_holding_display(creator_diagnostics),
+        "creator_policy_state": creator_policy.get("creator_policy_state", "unknown"),
+        "creator_policy_reason": creator_policy.get("creator_policy_reason", "unknown"),
+        "creator_policy_context_used": bool(creator_policy.get("creator_policy_context_used")),
         "holder_policy_state": holder_policy.get("holder_policy_state", "unknown"),
         "holder_policy_reason": holder_policy.get("holder_policy_reason", "unknown"),
         "token_age_minutes": holder_policy.get("token_age_minutes"),
@@ -678,6 +683,9 @@ def build_rejection_diagnostic_report(summary: PaperCycleSummary) -> str:
                 f"creator_holding_source: {diagnostic.get('creator_holding_source', 'unknown')}",
                 f"creator_holding_state: {diagnostic.get('creator_holding_state', 'unknown')}",
                 f"creator_holding_unknown_reason: {diagnostic.get('creator_holding_unknown_reason', 'unknown')}",
+                f"creator_policy_state: {diagnostic.get('creator_policy_state', 'unknown')}",
+                f"creator_policy_reason: {diagnostic.get('creator_policy_reason', 'unknown')}",
+                f"creator_policy_context_used: {diagnostic.get('creator_policy_context_used', False)}",
                 f"holder_policy_state: {diagnostic.get('holder_policy_state', 'unknown')}",
                 f"holder_policy_reason: {diagnostic.get('holder_policy_reason', 'unknown')}",
                 f"token_age_minutes: {diagnostic.get('token_age_minutes', 'unknown') if diagnostic.get('token_age_minutes') is not None else 'unknown'}",
