@@ -286,3 +286,133 @@ def test_rejection_report_and_cli_lines_stay_safe_with_missing_fields() -> None:
     assert "do-not-print" not in report
     assert "WalletSecret111" not in report
     assert "raw_data" not in report
+
+
+def test_discovery_candidate_summary_lines_sort_and_label_capacity_blocked() -> None:
+    summary = cli_module.PaperCycleSummary(
+        execution_mode="paper",
+        risk_profile="discovery",
+        max_signals=3,
+        timeout_seconds=60.0,
+        signals_collected=3,
+        signals_accepted=1,
+        signals_rejected=2,
+        trades_persisted=1,
+        open_positions=1,
+        sources_polled=["pump_fun"],
+        source_signal_counts={"pump_fun": 3},
+        source_failures={},
+        composite_opportunities=0,
+        rejection_reasons={"max_open_positions_reached": 1, "top10_holder_check_failed": 1},
+        candidates_evaluated=3,
+        passed_risk_checks=1,
+        summary_rejection_reasons={"max_open_positions_reached": 1, "top10_holder": 1},
+        source_evaluated_counts={"pump_fun": 3},
+        source_pass_counts={"pump_fun": 1},
+        holder_lookup_outcomes={},
+        termination_reason="max_signals",
+        elapsed_seconds=1.0,
+        accepted_candidate_diagnostics=[
+            {
+                "rank": 2,
+                "symbol": "WIN",
+                "mint_short": "Winn...1111",
+                "source": "pump_fun",
+                "attention_score": 79,
+                "attention_tier": "strong_watch",
+                "action_outcome": "traded",
+                "main_warnings": ("creator_policy:unknown_warning",),
+                "narrative_tags": ("fresh-launch", "pumpfun", "pumpfun-launch"),
+                "metadata_completeness_state": "partial",
+            }
+        ],
+        rejected_candidate_diagnostics=[
+            {
+                "rank": 1,
+                "symbol": "WAIT",
+                "mint_short": "Wait...2222",
+                "source": "pump_fun",
+                "attention_score": 79,
+                "attention_tier": "strong_watch",
+                "action_outcome": "capacity-blocked",
+                "rejection_reason": "max_open_positions_reached",
+                "main_warnings": ("outcome:max_open_positions_reached",),
+                "narrative_tags": ("fresh-launch", "pumpfun", "pumpfun-launch"),
+                "metadata_completeness_state": "partial",
+            },
+            {
+                "rank": 3,
+                "symbol": "LOW",
+                "mint_short": "Loww...3333",
+                "source": "pump_fun",
+                "attention_score": 24,
+                "attention_tier": "ignore",
+                "action_outcome": "rejected",
+                "failed_check": "top10_holder_check",
+                "main_warnings": ("outcome:top10_holder_check_failed",),
+                "narrative_tags": ("stale",),
+                "metadata_completeness_state": "partial",
+            },
+        ],
+    )
+
+    lines = summary.discovery_candidate_summary_lines()
+
+    assert lines[0] == "Top discovery candidates:"
+    assert "outcome" in lines[1]
+    assert "WAIT" in lines[2]
+    assert "capacity-blocked" in lines[2]
+    assert "max_open_positions_reached" in lines[2]
+    assert "WIN" in lines[3]
+    assert "traded" in lines[3]
+    assert "LOW" in lines[4]
+
+
+def test_discovery_candidate_summary_lines_stay_safe_without_raw_payloads() -> None:
+    summary = cli_module.PaperCycleSummary(
+        execution_mode="paper",
+        risk_profile="discovery",
+        max_signals=1,
+        timeout_seconds=60.0,
+        signals_collected=1,
+        signals_accepted=1,
+        signals_rejected=0,
+        trades_persisted=1,
+        open_positions=1,
+        sources_polled=["pump_fun"],
+        source_signal_counts={"pump_fun": 1},
+        source_failures={},
+        composite_opportunities=0,
+        rejection_reasons={},
+        candidates_evaluated=1,
+        passed_risk_checks=1,
+        summary_rejection_reasons={},
+        source_evaluated_counts={"pump_fun": 1},
+        source_pass_counts={"pump_fun": 1},
+        holder_lookup_outcomes={},
+        termination_reason="max_signals",
+        elapsed_seconds=1.0,
+        accepted_candidate_diagnostics=[
+            {
+                "rank": 1,
+                "symbol": "SAFE",
+                "mint_short": "Safe...1111",
+                "source": "pump_fun",
+                "attention_score": 79,
+                "attention_tier": "strong_watch",
+                "action_outcome": "traded",
+                "main_warnings": ("creator_policy:unknown_warning",),
+                "narrative_tags": ("fresh-launch", "pumpfun", "pumpfun-launch"),
+                "metadata_completeness_state": "partial",
+                "raw_data": {"secret": "do-not-print"},
+                "buyerWallets": ["WalletSecret111"],
+            }
+        ],
+    )
+
+    output = "\n".join(summary.discovery_candidate_summary_lines())
+
+    assert "SAFE" in output
+    assert "do-not-print" not in output
+    assert "WalletSecret111" not in output
+    assert "raw_data" not in output

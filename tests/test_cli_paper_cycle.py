@@ -526,6 +526,73 @@ def test_discovery_candidate_snapshot_persists_attention_fields_without_raw_payl
     asyncio.run(run())
 
 
+def test_discovery_cli_safe_lines_include_ranked_candidate_summary(tmp_path: Path) -> None:
+    async def run() -> None:
+        db_path = tmp_path / "discovery-summary.db"
+        accepted_signal = build_signal("summary-accepted", passes=True).model_copy(
+            update={"source": SignalSourceEnum.PUMP_FUN, "type": SignalType.NEW_POOL}
+        )
+        accepted_signal.payload.update(
+            {
+                "symbol": "TOP",
+                "attention_diagnostics": {
+                    "attention_score": 79,
+                    "attention_tier": "strong_watch",
+                    "attention_reasons": ["launch-stage signal"],
+                    "narrative_tags": ["fresh-launch", "pumpfun", "pumpfun-launch"],
+                    "social_signal_state": "missing",
+                    "metadata_completeness_state": "partial",
+                },
+                "holder_policy": {"holder_policy_state": "pass", "stage_hint": "new_pool", "token_age_minutes": 0.1},
+                "creator_policy": {"creator_policy_state": "unknown_warning"},
+            }
+        )
+        blocked_signal = build_signal("summary-blocked", passes=True).model_copy(
+            update={"source": SignalSourceEnum.PUMP_FUN, "type": SignalType.NEW_POOL}
+        )
+        blocked_signal.payload.update(
+            {
+                "symbol": "BLOCK",
+                "attention_diagnostics": {
+                    "attention_score": 79,
+                    "attention_tier": "strong_watch",
+                    "attention_reasons": ["launch-stage signal"],
+                    "narrative_tags": ["fresh-launch", "pumpfun", "pumpfun-launch"],
+                    "social_signal_state": "missing",
+                    "metadata_completeness_state": "partial",
+                },
+                "holder_policy": {"holder_policy_state": "pass", "stage_hint": "new_pool", "token_age_minutes": 0.1},
+            }
+        )
+        constrained_settings = cli_module.load_settings().model_copy(
+            update={
+                "position": cli_module.load_settings().position.model_copy(update={"max_open_positions": 1})
+            }
+        )
+
+        summary = await cli_module.run_bounded_paper_cycle(
+            max_signals=2,
+            timeout_seconds=0.1,
+            db_path=db_path,
+            risk_profile="discovery",
+            settings=constrained_settings,
+            sources=[FakeSignalSource([[accepted_signal, blocked_signal]])],
+            poll_interval_s=0.0,
+        )
+
+        lines = summary.safe_lines()
+        joined = "\n".join(lines)
+
+        assert "Top discovery candidates:" in joined
+        assert "TOP" in joined
+        assert "BLOCK" in joined
+        assert "capacity-blocked" in joined
+        assert "pumpfun-launch" in joined
+        assert "partial" in joined
+
+    asyncio.run(run())
+
+
 def test_strict_mode_keeps_candidate_snapshot_path_inactive_for_rejected_trade_set(tmp_path: Path) -> None:
     async def run() -> None:
         db_path = tmp_path / "strict-no-snapshot.db"

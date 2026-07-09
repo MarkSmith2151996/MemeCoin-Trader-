@@ -108,6 +108,7 @@ class PaperCycleSummary:
             lines.append("holder_lookup_outcomes:")
             lines.extend(f"  {reason}={count}" for reason, count in self.holder_lookup_outcomes.items())
         lines.extend(self.summary_table_lines())
+        lines.extend(self.discovery_candidate_summary_lines())
         lines.extend(self.rejection_diagnostic_lines())
         return lines
 
@@ -159,6 +160,35 @@ class PaperCycleSummary:
                     creator=diagnostic.get("creator_holding_display", "unknown"),
                     liquidity=diagnostic.get("liquidity_display", "unknown"),
                     attention_hints=diagnostic.get("attention_hints", "none"),
+                )
+            )
+        return lines
+
+    def discovery_candidate_summary_lines(self) -> list[str]:
+        if self.risk_profile != "discovery":
+            return []
+
+        candidates = sorted(
+            [*self.accepted_candidate_diagnostics, *self.rejected_candidate_diagnostics],
+            key=_candidate_sort_key,
+        )
+        if not candidates:
+            return []
+
+        lines = ["Top discovery candidates:"]
+        lines.append("  # | symbol | mint | source | attn | outcome | reason | tags | meta")
+        for diagnostic in candidates[:8]:
+            lines.append(
+                "  {rank} | {symbol} | {mint_short} | {source} | {attn} | {outcome} | {reason} | {tags} | {meta}".format(
+                    rank=diagnostic.get("rank", "?"),
+                    symbol=diagnostic.get("symbol", "unknown"),
+                    mint_short=diagnostic.get("mint_short", "unknown"),
+                    source=diagnostic.get("source", "unknown"),
+                    attn=f"{diagnostic.get('attention_score', 0)}/{diagnostic.get('attention_tier', 'ignore')}",
+                    outcome=diagnostic.get("action_outcome", diagnostic.get("decision", "unknown")),
+                    reason=_candidate_summary_reason(diagnostic),
+                    tags=_candidate_summary_tags(diagnostic),
+                    meta=diagnostic.get("metadata_completeness_state", "unknown"),
                 )
             )
         return lines
@@ -747,6 +777,48 @@ def _compact_candidate_snapshot(diagnostic: dict[str, object]) -> dict[str, obje
     }
 
 
+def _candidate_sort_key(diagnostic: dict[str, object]) -> tuple[int, int, int]:
+    return (
+        -int(diagnostic.get("attention_score", 0) if isinstance(diagnostic.get("attention_score"), (int, float)) else 0),
+        -_attention_tier_rank(diagnostic.get("attention_tier")),
+        int(diagnostic.get("rank", 10_000) if isinstance(diagnostic.get("rank"), int) else 10_000),
+    )
+
+
+def _attention_tier_rank(value: object) -> int:
+    if not isinstance(value, str):
+        return 0
+    return {
+        "strong_watch": 4,
+        "candidate": 3,
+        "watch": 2,
+        "ignore": 1,
+    }.get(value, 0)
+
+
+def _candidate_summary_reason(diagnostic: dict[str, object]) -> str:
+    warnings = diagnostic.get("main_warnings")
+    if isinstance(warnings, (list, tuple)) and warnings:
+        first_warning = warnings[0]
+        if isinstance(first_warning, str) and first_warning:
+            return first_warning
+    rejection_reason = diagnostic.get("rejection_reason")
+    if isinstance(rejection_reason, str) and rejection_reason:
+        return rejection_reason
+    failed_check = diagnostic.get("failed_check")
+    if isinstance(failed_check, str) and failed_check:
+        return failed_check
+    return "none"
+
+
+def _candidate_summary_tags(diagnostic: dict[str, object]) -> str:
+    tags = diagnostic.get("narrative_tags")
+    if isinstance(tags, (list, tuple)) and tags:
+        safe_tags = [str(tag) for tag in tags[:3]]
+        return ",".join(safe_tags)
+    return "none"
+
+
 def _check_result_value(record: RejectionRecord | None, field_name: str) -> str | None:
     if record is None:
         return None
@@ -932,6 +1004,10 @@ def build_rejection_diagnostic_report(summary: PaperCycleSummary) -> str:
             )
     else:
         lines.extend(["", "- none"])
+
+    discovery_summary_lines = summary.discovery_candidate_summary_lines()
+    if discovery_summary_lines:
+        lines.extend(["", *discovery_summary_lines])
 
     lines.extend([
         "",
