@@ -37,6 +37,12 @@ execution:
   tx_retry_count: 3
   tx_confirm_timeout_s: 30
 
+live_guardrails:
+  confirmation_phrase: I_UNDERSTAND_THIS_CAN_LOSE_REAL_SOL
+  max_trade_sol: 0.01
+  max_daily_trades: 3
+  max_daily_loss_sol: 0.05
+
 monitoring:
   heartbeat_interval_s: 60
   log_level: INFO

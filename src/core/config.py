@@ -59,6 +59,14 @@ class ExecutionConfig(BaseModel):
     tx_confirm_timeout_s: int = 30
 
 
+class LiveGuardrailsConfig(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    confirmation_phrase: str = "I_UNDERSTAND_THIS_CAN_LOSE_REAL_SOL"
+    max_trade_sol: float = 0.01
+    max_daily_trades: int = 3
+    max_daily_loss_sol: float = 0.05
+
+
 class MonitoringConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
     heartbeat_interval_s: int = 60
@@ -71,6 +79,7 @@ class Settings(BaseModel):
     position: PositionConfig = Field(default_factory=PositionConfig)
     exits: ExitConfig = Field(default_factory=ExitConfig)
     execution: ExecutionConfig = Field(default_factory=ExecutionConfig)
+    live_guardrails: LiveGuardrailsConfig = Field(default_factory=LiveGuardrailsConfig)
     monitoring: MonitoringConfig = Field(default_factory=MonitoringConfig)
 
 
@@ -94,4 +103,22 @@ def load_settings(path: str | Path = "config/settings.yaml") -> Settings:
                 value = int(value)
             position_updates[field_name] = value
 
-    return settings.model_copy(update={"position": PositionConfig.model_validate(position_updates)})
+    live_guardrails_updates = settings.live_guardrails.model_dump()
+    live_guardrail_env_overrides: dict[str, str] = {
+        "MAX_LIVE_TRADE_SOL": "max_trade_sol",
+        "MAX_LIVE_DAILY_TRADES": "max_daily_trades",
+        "MAX_LIVE_DAILY_LOSS_SOL": "max_daily_loss_sol",
+    }
+    for env_name, field_name in live_guardrail_env_overrides.items():
+        if os.getenv(env_name):
+            value: float | int = float(os.environ[env_name])
+            if field_name.endswith("trades"):
+                value = int(value)
+            live_guardrails_updates[field_name] = value
+
+    return settings.model_copy(
+        update={
+            "position": PositionConfig.model_validate(position_updates),
+            "live_guardrails": LiveGuardrailsConfig.model_validate(live_guardrails_updates),
+        }
+    )

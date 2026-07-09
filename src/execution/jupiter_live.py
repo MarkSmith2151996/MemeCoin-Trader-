@@ -11,8 +11,10 @@ from dataclasses import dataclass, field
 from typing import Protocol
 
 from src.chain.jito import JitoBlockEngineClient, JitoSubmitResult
+from src.core.config import Settings, load_settings
 from src.core.models import Side, SwapQuote, Trade
 from src.execution.base import ExecutionAdapter
+from src.execution.live_guardrails import LiveGuardrailDecision, evaluate_live_guardrails
 
 
 class SupportsRpcSubmit(Protocol):
@@ -39,6 +41,8 @@ class JupiterLiveExecutionAdapter(ExecutionAdapter):
         jito_validator_tip_account: str | None = None,
         jito_client: JitoBlockEngineClient | None = None,
         rpc_submitter: SupportsRpcSubmit | None = None,
+        settings: Settings | None = None,
+        guardrail_env: dict[str, str] | None = None,
     ) -> None:
         self._jito_enabled = jito_enabled
         self._jito_fallback_to_rpc = jito_fallback_to_rpc
@@ -46,12 +50,28 @@ class JupiterLiveExecutionAdapter(ExecutionAdapter):
         self._jito_validator_tip_account = jito_validator_tip_account
         self._jito_client = jito_client or JitoBlockEngineClient()
         self._rpc_submitter = rpc_submitter
+        self._settings = settings or load_settings()
+        self._guardrail_env = guardrail_env
 
     @property
     def mode(self) -> str:
         return "live"
 
-    async def submit_serialized_swap(self, transaction: str | bytes) -> LiveSubmissionResult:
+    async def submit_serialized_swap(
+        self,
+        transaction: str | bytes,
+        *,
+        amount_sol: float | None = None,
+    ) -> LiveSubmissionResult:
+        guardrails = self.live_guardrails(amount_sol)
+        if not guardrails.allowed:
+            return LiveSubmissionResult(
+                ok=False,
+                provider="guardrails",
+                error="live guardrails blocked submission",
+                diagnostics=list(guardrails.diagnostics),
+            )
+
         diagnostics: list[str] = []
 
         if self._jito_enabled:
@@ -110,6 +130,13 @@ class JupiterLiveExecutionAdapter(ExecutionAdapter):
     async def close(self) -> None:
         await self._jito_client.close()
         return None
+
+    def live_guardrails(self, requested_trade_sol: float | None = None) -> LiveGuardrailDecision:
+        return evaluate_live_guardrails(
+            self._settings,
+            requested_trade_sol=requested_trade_sol,
+            env=self._guardrail_env,
+        )
 
     async def _submit_via_rpc(
         self,

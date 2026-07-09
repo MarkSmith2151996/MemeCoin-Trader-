@@ -3,6 +3,7 @@ import base64
 
 import httpx
 
+from src.core.config import load_settings
 from src.chain.jito import JitoBlockEngineClient
 from src.core.models import Side
 from src.execution.jupiter_live import JupiterLiveExecutionAdapter
@@ -170,11 +171,12 @@ def test_live_adapter_default_behavior_is_unchanged_when_jito_disabled() -> None
 
         result = await adapter.submit_serialized_swap("serialized-tx")
 
-        assert result.ok is True
-        assert result.provider == "rpc"
-        assert result.tx_signature == "rpc-signature-disabled"
-        assert result.diagnostics == ["jito_disabled"]
-        assert len(rpc_submitter.calls) == 1
+        assert result.ok is False
+        assert result.provider == "guardrails"
+        assert result.tx_signature is None
+        assert "execution_mode_not_live" in result.diagnostics
+        assert "live_confirmation_phrase_invalid" in result.diagnostics
+        assert len(rpc_submitter.calls) == 0
 
         try:
             await adapter.execute_swap("mint", Side.BUY, 1.0)
@@ -191,13 +193,25 @@ def test_live_adapter_default_behavior_is_unchanged_when_jito_disabled() -> None
 def test_live_adapter_calls_jito_when_explicitly_enabled() -> None:
     async def run() -> None:
         http_client = RecordingClient(FakeResponse(200, {"result": "bundle-789"}))
+        settings = load_settings().model_copy(
+            update={"execution": load_settings().execution.model_copy(update={"mode": "live"})}
+        )
         adapter = JupiterLiveExecutionAdapter(
             jito_enabled=True,
             jito_client=JitoBlockEngineClient(http_client=http_client),
             rpc_submitter=RecordingRpcSubmitter(),
+            settings=settings,
+            guardrail_env={
+                "LIVE_TRADING_ENABLED": "true",
+                "LIVE_CONFIRMATION_PHRASE": settings.live_guardrails.confirmation_phrase,
+                "LIVE_KILL_SWITCH": "false",
+                "MAX_LIVE_TRADE_SOL": "0.01",
+                "MAX_LIVE_DAILY_TRADES": "3",
+                "MAX_LIVE_DAILY_LOSS_SOL": "0.05",
+            },
         )
 
-        result = await adapter.submit_serialized_swap("serialized-tx")
+        result = await adapter.submit_serialized_swap("serialized-tx", amount_sol=0.01)
 
         assert result.ok is True
         assert result.provider == "jito"
@@ -214,13 +228,25 @@ def test_live_adapter_calls_jito_when_explicitly_enabled() -> None:
 def test_live_adapter_handles_successful_jito_response() -> None:
     async def run() -> None:
         http_client = RecordingClient(FakeResponse(200, {"result": {"bundleId": "bundle-success"}}))
+        settings = load_settings().model_copy(
+            update={"execution": load_settings().execution.model_copy(update={"mode": "live"})}
+        )
         adapter = JupiterLiveExecutionAdapter(
             jito_enabled=True,
             jito_tip_lamports=5_000,
             jito_client=JitoBlockEngineClient(http_client=http_client),
+            settings=settings,
+            guardrail_env={
+                "LIVE_TRADING_ENABLED": "true",
+                "LIVE_CONFIRMATION_PHRASE": settings.live_guardrails.confirmation_phrase,
+                "LIVE_KILL_SWITCH": "false",
+                "MAX_LIVE_TRADE_SOL": "0.01",
+                "MAX_LIVE_DAILY_TRADES": "3",
+                "MAX_LIVE_DAILY_LOSS_SOL": "0.05",
+            },
         )
 
-        result = await adapter.submit_serialized_swap(b"serialized-tx")
+        result = await adapter.submit_serialized_swap(b"serialized-tx", amount_sol=0.01)
 
         assert result.ok is True
         assert result.provider == "jito"
@@ -238,14 +264,26 @@ def test_live_adapter_falls_back_to_rpc_when_jito_fails_and_fallback_enabled() -
     async def run() -> None:
         http_client = RecordingClient(FakeResponse(503, {"error": "busy"}))
         rpc_submitter = RecordingRpcSubmitter("rpc-signature-fallback")
+        settings = load_settings().model_copy(
+            update={"execution": load_settings().execution.model_copy(update={"mode": "live"})}
+        )
         adapter = JupiterLiveExecutionAdapter(
             jito_enabled=True,
             jito_fallback_to_rpc=True,
             jito_client=JitoBlockEngineClient(http_client=http_client),
             rpc_submitter=rpc_submitter,
+            settings=settings,
+            guardrail_env={
+                "LIVE_TRADING_ENABLED": "true",
+                "LIVE_CONFIRMATION_PHRASE": settings.live_guardrails.confirmation_phrase,
+                "LIVE_KILL_SWITCH": "false",
+                "MAX_LIVE_TRADE_SOL": "0.01",
+                "MAX_LIVE_DAILY_TRADES": "3",
+                "MAX_LIVE_DAILY_LOSS_SOL": "0.05",
+            },
         )
 
-        result = await adapter.submit_serialized_swap("serialized-tx")
+        result = await adapter.submit_serialized_swap("serialized-tx", amount_sol=0.01)
 
         assert result.ok is True
         assert result.provider == "rpc"
@@ -264,14 +302,26 @@ def test_live_adapter_fails_safely_when_jito_fails_and_fallback_disabled() -> No
     async def run() -> None:
         http_client = RecordingClient(FakeResponse(503, {"error": "busy"}))
         rpc_submitter = RecordingRpcSubmitter("rpc-should-not-run")
+        settings = load_settings().model_copy(
+            update={"execution": load_settings().execution.model_copy(update={"mode": "live"})}
+        )
         adapter = JupiterLiveExecutionAdapter(
             jito_enabled=True,
             jito_fallback_to_rpc=False,
             jito_client=JitoBlockEngineClient(http_client=http_client),
             rpc_submitter=rpc_submitter,
+            settings=settings,
+            guardrail_env={
+                "LIVE_TRADING_ENABLED": "true",
+                "LIVE_CONFIRMATION_PHRASE": settings.live_guardrails.confirmation_phrase,
+                "LIVE_KILL_SWITCH": "false",
+                "MAX_LIVE_TRADE_SOL": "0.01",
+                "MAX_LIVE_DAILY_TRADES": "3",
+                "MAX_LIVE_DAILY_LOSS_SOL": "0.05",
+            },
         )
 
-        result = await adapter.submit_serialized_swap("serialized-tx")
+        result = await adapter.submit_serialized_swap("serialized-tx", amount_sol=0.01)
 
         assert result.ok is False
         assert result.provider == "jito"
@@ -280,6 +330,34 @@ def test_live_adapter_fails_safely_when_jito_fails_and_fallback_disabled() -> No
         assert result.jito_result.error == "unexpected status: 503"
         assert result.diagnostics == ["jito_attempted", "jito_failed_no_fallback"]
         assert len(rpc_submitter.calls) == 0
+
+        await adapter.close()
+
+    asyncio.run(run())
+
+
+def test_live_adapter_diagnostics_do_not_echo_confirmation_phrase_or_transaction() -> None:
+    async def run() -> None:
+        settings = load_settings().model_copy(
+            update={"execution": load_settings().execution.model_copy(update={"mode": "live"})}
+        )
+        adapter = JupiterLiveExecutionAdapter(
+            settings=settings,
+            guardrail_env={
+                "LIVE_TRADING_ENABLED": "true",
+                "LIVE_CONFIRMATION_PHRASE": "wrong",
+                "LIVE_KILL_SWITCH": "false",
+                "MAX_LIVE_TRADE_SOL": "0.01",
+                "MAX_LIVE_DAILY_TRADES": "3",
+                "MAX_LIVE_DAILY_LOSS_SOL": "0.05",
+            },
+        )
+
+        result = await adapter.submit_serialized_swap("serialized-tx", amount_sol=0.01)
+
+        assert result.ok is False
+        assert "serialized-tx" not in str(result.diagnostics)
+        assert settings.live_guardrails.confirmation_phrase not in str(result.diagnostics)
 
         await adapter.close()
 

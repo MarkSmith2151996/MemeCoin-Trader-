@@ -18,6 +18,7 @@ from rich.console import Console
 from src.core.config import Settings, load_settings
 from src.core.database import init_db, record_trade
 from src.execution.base import ExecutionAdapter
+from src.execution.live_guardrails import evaluate_live_guardrails
 from src.execution.paper import PaperExecutionAdapter
 from src.monitoring.dashboard import resolve_db_path
 from src.monitoring.health import check_health
@@ -1624,7 +1625,12 @@ def health() -> None:
 @app.command("show-config")
 def show_config() -> None:
     settings = load_settings()
-    console.print(settings.model_dump())
+    config_dump = settings.model_dump()
+    live_guardrails = config_dump.get("live_guardrails")
+    if isinstance(live_guardrails, dict) and "confirmation_phrase" in live_guardrails:
+        live_guardrails["confirmation_phrase"] = "<redacted>"
+    config_dump["live_guardrails_diagnostics"] = evaluate_live_guardrails(settings).as_dict()
+    console.print(config_dump)
 
 
 @app.command("paper-cycle")
