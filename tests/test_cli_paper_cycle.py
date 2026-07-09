@@ -640,10 +640,51 @@ def test_discovery_theme_cluster_hints_detect_repeated_clone_names(tmp_path: Pat
         clone_hints = {item["symbol"]: item["theme_cluster_hint"] for item in summary.accepted_candidate_diagnostics}
         name_hints = {item["symbol"]: item["name_quality_hint"] for item in summary.accepted_candidate_diagnostics}
 
-        assert clone_hints["fatdog"].startswith("cluster:")
-        assert clone_hints["fatbull"].startswith("cluster:")
+        assert clone_hints["fatdog"] != "cluster:liquid"
+        assert clone_hints["fatbull"] != "cluster:liquid"
         assert name_hints["fatdog"] != "differentiated-name"
         assert name_hints["nebulon"] == "differentiated-name"
+
+    asyncio.run(run())
+
+
+def test_discovery_theme_cluster_hint_allows_generic_liquidity_fallback_when_no_better_theme(tmp_path: Path) -> None:
+    async def run() -> None:
+        db_path = tmp_path / "theme-liquidity-fallback.db"
+        alpha = build_signal("alpha-a", passes=True).model_copy(update={"source": SignalSourceEnum.PUMP_FUN, "type": SignalType.NEW_POOL})
+        beta = build_signal("beta-b", passes=True).model_copy(update={"source": SignalSourceEnum.PUMP_FUN, "type": SignalType.NEW_POOL})
+        for signal, symbol in ((alpha, "aurora"), (beta, "nebula")):
+            signal.payload.update(
+                {
+                    "symbol": symbol,
+                    "name": symbol,
+                    "attention_diagnostics": {
+                        "attention_score": 79,
+                        "attention_tier": "strong_watch",
+                        "attention_reasons": ["launch-stage signal"],
+                        "narrative_tags": ["fresh-launch", "liquid", "pumpfun-launch"],
+                        "social_signal_state": "missing",
+                        "metadata_completeness_state": "partial",
+                    },
+                    "holder_policy": {"holder_policy_state": "pass", "stage_hint": "new_pool", "token_age_minutes": 0.2},
+                    "liquidity_diagnostics": {"selected_liquidity_sol": 4000.0, "liquidity_source": "signal_payload", "liquidity_data_state": "known"},
+                    "holder_diagnostics": {"selected_top10_holder_pct": 5.0, "top10_holder_source": "signal_payload"},
+                }
+            )
+
+        summary = await cli_module.run_bounded_paper_cycle(
+            max_signals=2,
+            timeout_seconds=0.1,
+            db_path=db_path,
+            risk_profile="discovery",
+            sources=[FakeSignalSource([[alpha, beta]])],
+            poll_interval_s=0.0,
+        )
+
+        theme_hints = {item["symbol"]: item["theme_cluster_hint"] for item in summary.accepted_candidate_diagnostics}
+
+        assert theme_hints["aurora"] == "cluster:liquid"
+        assert theme_hints["nebula"] == "cluster:liquid"
 
     asyncio.run(run())
 

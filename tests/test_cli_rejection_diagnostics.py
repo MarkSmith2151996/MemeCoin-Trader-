@@ -598,6 +598,8 @@ def test_discovery_comparison_lines_surface_theme_and_holder_callouts() -> None:
                 "source_context_hint": "single-source-launch",
                 "momentum_context_hint": "deep-liquidity",
                 "narrative_quality_hint": "clone-cluster/deep-liquidity",
+                "confidence": 0.7,
+                "weight": 1.0,
             },
             {
                 "rank": 2,
@@ -620,6 +622,8 @@ def test_discovery_comparison_lines_surface_theme_and_holder_callouts() -> None:
                 "source_context_hint": "single-source-launch",
                 "momentum_context_hint": "deep-liquidity",
                 "narrative_quality_hint": "differentiated/deep-liquidity",
+                "confidence": 0.7,
+                "weight": 1.0,
             },
         ],
     )
@@ -630,3 +634,4 @@ def test_discovery_comparison_lines_surface_theme_and_holder_callouts() -> None:
     assert "social still missing" in output
     assert "clone-cluster/deep-liquidity" in output
     assert "differentiated/deep-liquidity" in output
+    assert "sig=0.70x1.00" in output

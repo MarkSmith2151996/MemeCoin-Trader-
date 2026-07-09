@@ -704,6 +704,9 @@ def _build_accepted_candidate_diagnostic(
         "symbol": symbol,
         "name": _stringish(_first_present(token_section, payload, keys=("name",))),
         "source": str(signal.source.value).lower(),
+        "confidence": round(signal.confidence, 6),
+        "weight": round(signal.weight, 6),
+        "effective_score": round(min(signal.confidence * max(signal.weight, 0.0), 1.0), 6),
         "decision": "accepted",
         "action_outcome": action_outcome,
         "trade_id": getattr(decision.trade, "id", None),
@@ -793,6 +796,9 @@ def _compact_candidate_snapshot(diagnostic: dict[str, object]) -> dict[str, obje
         "mint": diagnostic.get("mint"),
         "mint_short": diagnostic.get("mint_short"),
         "source": diagnostic.get("source"),
+        "confidence": diagnostic.get("confidence"),
+        "weight": diagnostic.get("weight"),
+        "effective_score": diagnostic.get("effective_score"),
         "attention_score": diagnostic.get("attention_score"),
         "attention_tier": diagnostic.get("attention_tier"),
         "attention_reasons": list(diagnostic.get("attention_reasons", ())),
@@ -933,6 +939,10 @@ def _accepted_candidate_diff(diagnostic: dict[str, object]) -> str:
     source_context = diagnostic.get("source_context_hint")
     if isinstance(source_context, str) and source_context:
         parts.append(source_context)
+    confidence = _coerce_numeric(diagnostic.get("confidence"))
+    weight = _coerce_numeric(diagnostic.get("weight"))
+    if confidence is not None and weight is not None:
+        parts.append(f"sig={confidence:.2f}x{weight:.2f}")
     return ", ".join(parts)
 
 
@@ -991,6 +1001,26 @@ def _candidate_theme_tokens(diagnostic: dict[str, object]) -> tuple[str, ...]:
     return tuple(dict.fromkeys(tokens))
 
 
+def _candidate_priority_theme_tokens(diagnostic: dict[str, object]) -> tuple[str, ...]:
+    values = list(_candidate_name_tokens(diagnostic))
+    tags = diagnostic.get("narrative_tags")
+    if isinstance(tags, (list, tuple)):
+        for tag in tags[:3]:
+            normalized = _safe_theme_tag(str(tag))
+            if normalized and normalized not in {"liquid", "deep-liquidity"}:
+                values.append(normalized)
+
+    tokens: list[str] = []
+    for value in values:
+        if not value:
+            continue
+        compact = "".join(character if character.isalnum() else " " for character in value)
+        for token in compact.split():
+            if len(token) >= 3:
+                tokens.append(token)
+    return tuple(dict.fromkeys(tokens))
+
+
 def _candidate_name_tokens(diagnostic: dict[str, object]) -> tuple[str, ...]:
     generic_clone_tokens = {"dog", "cat", "bull", "rat", "weasel", "honeycomb", "fatdog", "fatbull"}
     tokens: list[str] = []
@@ -1017,9 +1047,15 @@ def _safe_theme_tag(tag: str) -> str:
 
 
 def _theme_cluster_hint(diagnostic: dict[str, object], token_counts: Counter[str]) -> str:
+    repeated_priority = [token for token in _candidate_priority_theme_tokens(diagnostic) if token_counts[token] > 1]
+    if repeated_priority:
+        return f"cluster:{repeated_priority[0]}"
     repeated = [token for token in _candidate_theme_tokens(diagnostic) if token_counts[token] > 1]
     if repeated:
         return f"cluster:{repeated[0]}"
+    momentum_context = _momentum_context_hint(diagnostic)
+    if momentum_context in {"deep-liquidity", "liquid"}:
+        return "cluster:liquid"
     return "distinct-theme"
 
 
