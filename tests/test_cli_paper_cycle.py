@@ -518,6 +518,11 @@ def test_discovery_candidate_snapshot_persists_attention_fields_without_raw_payl
         assert snapshot["attention_tier"] in {"watch", "strong_watch", "candidate"}
         assert "pumpfun-launch" in snapshot["narrative_tags"]
         assert snapshot["action_outcome"] == "traded"
+        assert snapshot["narrative_quality_hint"]
+        assert snapshot["theme_cluster_hint"]
+        assert snapshot["name_quality_hint"]
+        assert snapshot["source_context_hint"]
+        assert snapshot["momentum_context_hint"]
         assert "raw_data" not in snapshot
         assert "buyerWallets" not in snapshot
         assert "do-not-store" not in str(snapshot)
@@ -587,9 +592,58 @@ def test_discovery_cli_safe_lines_include_ranked_candidate_summary(tmp_path: Pat
         assert "TOP" in joined
         assert "BLOCK" in joined
         assert "capacity-blocked" in joined
-        assert "pumpfun-launch" in joined
+        assert "cluster:" in joined or "distinct-theme" in joined
         assert "partial" in joined
         assert "Accepted discovery comparison:" in joined
+
+    asyncio.run(run())
+
+
+def test_discovery_theme_cluster_hints_detect_repeated_clone_names(tmp_path: Path) -> None:
+    async def run() -> None:
+        db_path = tmp_path / "theme-cluster.db"
+        clone_a = build_signal("clone-a", passes=True).model_copy(update={"source": SignalSourceEnum.PUMP_FUN, "type": SignalType.NEW_POOL})
+        clone_b = build_signal("clone-b", passes=True).model_copy(update={"source": SignalSourceEnum.PUMP_FUN, "type": SignalType.NEW_POOL})
+        unique = build_signal("unique-c", passes=True).model_copy(update={"source": SignalSourceEnum.PUMP_FUN, "type": SignalType.NEW_POOL})
+        for signal, symbol, liquidity in (
+            (clone_a, "fatdog", 3000.0),
+            (clone_b, "fatbull", 3100.0),
+            (unique, "nebulon", 3200.0),
+        ):
+            signal.payload.update(
+                {
+                    "symbol": symbol,
+                    "name": symbol,
+                    "attention_diagnostics": {
+                        "attention_score": 79,
+                        "attention_tier": "strong_watch",
+                        "attention_reasons": ["launch-stage signal"],
+                        "narrative_tags": ["fresh-launch", "pumpfun", "pumpfun-launch"],
+                        "social_signal_state": "missing",
+                        "metadata_completeness_state": "partial",
+                    },
+                    "holder_policy": {"holder_policy_state": "pass", "stage_hint": "new_pool", "token_age_minutes": 0.2},
+                    "liquidity_diagnostics": {"selected_liquidity_sol": liquidity, "liquidity_source": "signal_payload", "liquidity_data_state": "known"},
+                    "holder_diagnostics": {"selected_top10_holder_pct": 5.0, "top10_holder_source": "signal_payload"},
+                }
+            )
+
+        summary = await cli_module.run_bounded_paper_cycle(
+            max_signals=3,
+            timeout_seconds=0.1,
+            db_path=db_path,
+            risk_profile="discovery",
+            sources=[FakeSignalSource([[clone_a, clone_b, unique]])],
+            poll_interval_s=0.0,
+        )
+
+        clone_hints = {item["symbol"]: item["theme_cluster_hint"] for item in summary.accepted_candidate_diagnostics}
+        name_hints = {item["symbol"]: item["name_quality_hint"] for item in summary.accepted_candidate_diagnostics}
+
+        assert clone_hints["fatdog"].startswith("cluster:")
+        assert clone_hints["fatbull"].startswith("cluster:")
+        assert name_hints["fatdog"] != "differentiated-name"
+        assert name_hints["nebulon"] == "differentiated-name"
 
     asyncio.run(run())
 

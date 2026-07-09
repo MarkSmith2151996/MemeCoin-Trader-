@@ -177,10 +177,10 @@ class PaperCycleSummary:
             return []
 
         lines = ["Top discovery candidates:"]
-        lines.append("  # | symbol | mint | source | attn | outcome | reason | tags | meta")
+        lines.append("  # | symbol | mint | source | attn | outcome | reason | theme | meta")
         for diagnostic in candidates[:8]:
             lines.append(
-                "  {rank} | {symbol} | {mint_short} | {source} | {attn} | {outcome} | {reason} | {tags} | {meta}".format(
+                "  {rank} | {symbol} | {mint_short} | {source} | {attn} | {outcome} | {reason} | {theme} | {meta}".format(
                     rank=diagnostic.get("rank", "?"),
                     symbol=diagnostic.get("symbol", "unknown"),
                     mint_short=diagnostic.get("mint_short", "unknown"),
@@ -188,7 +188,7 @@ class PaperCycleSummary:
                     attn=f"{diagnostic.get('attention_score', 0)}/{diagnostic.get('attention_tier', 'ignore')}",
                     outcome=diagnostic.get("action_outcome", diagnostic.get("decision", "unknown")),
                     reason=_candidate_summary_reason(diagnostic),
-                    tags=_candidate_summary_tags(diagnostic),
+                    theme=_candidate_summary_theme(diagnostic),
                     meta=diagnostic.get("metadata_completeness_state", "unknown"),
                 )
             )
@@ -334,6 +334,7 @@ async def run_bounded_paper_cycle(
     passed_risk_checks = 0
     accepted_candidate_diagnostics: list[dict[str, object]] = []
     rejected_candidate_diagnostics: list[dict[str, object]] = []
+    accepted_trades_by_id: dict[str, Any] = {}
     termination_reason = "timeout"
 
     await aggregator.start()
@@ -401,16 +402,7 @@ async def run_bounded_paper_cycle(
                 )
                 accepted_candidate_diagnostics.append(accepted_snapshot)
                 if normalized_risk_profile == "discovery":
-                    persisted_trade = decision.trade.model_copy(
-                        update={
-                            "metadata": {
-                                **decision.trade.metadata,
-                                "candidate_snapshot": _compact_candidate_snapshot(accepted_snapshot),
-                            }
-                        }
-                    )
-                    await record_trade(runtime_db_path, persisted_trade)
-                    decision.trade = persisted_trade
+                    accepted_trades_by_id[str(decision.trade.id)] = decision.trade
                 if record is None:
                     passed_risk_checks += 1
                     passed_risk_by_source[str(signal.source.value).lower()] += 1
@@ -426,6 +418,29 @@ async def run_bounded_paper_cycle(
     finally:
         await aggregator.stop()
         await execution_adapter.close()
+
+    accepted_candidate_diagnostics, rejected_candidate_diagnostics = _apply_candidate_narrative_hints(
+        accepted_candidate_diagnostics,
+        rejected_candidate_diagnostics,
+    )
+    if normalized_risk_profile == "discovery":
+        for diagnostic in accepted_candidate_diagnostics:
+            trade_id = diagnostic.get("trade_id")
+            if not isinstance(trade_id, str):
+                continue
+            trade = accepted_trades_by_id.get(trade_id)
+            if trade is None:
+                continue
+            persisted_trade = trade.model_copy(
+                update={
+                    "metadata": {
+                        **trade.metadata,
+                        "candidate_snapshot": _compact_candidate_snapshot(diagnostic),
+                    }
+                }
+            )
+            await record_trade(runtime_db_path, persisted_trade)
+            accepted_trades_by_id[trade_id] = persisted_trade
 
     holder_lookup_outcomes = extract_runtime_diagnostics(engine.risk_scorer)
     session_open_positions = len(await position_manager.get_all_open())
@@ -635,6 +650,8 @@ def _build_rejected_candidate_diagnostic(
         "social_hint": _social_hint(social),
         "attention_hints": attention_hints,
         "creator_repeat_flag": bool(payload.get("creator_repeat_flag")),
+        "source_count": payload.get("source_count"),
+        "sources": tuple(payload.get("sources", ())) if isinstance(payload.get("sources"), list) else tuple(payload.get("sources", ())) if isinstance(payload.get("sources"), tuple) else (),
         "main_warnings": _main_warnings(
             holder_policy_state=holder_policy.get("holder_policy_state", "unknown"),
             age_policy_state=age_policy.get("age_policy_state", "unknown"),
@@ -689,6 +706,7 @@ def _build_accepted_candidate_diagnostic(
         "source": str(signal.source.value).lower(),
         "decision": "accepted",
         "action_outcome": action_outcome,
+        "trade_id": getattr(decision.trade, "id", None),
         "failed_check": record.failed_check if record is not None else None,
         "rejection_reason": decision.rejection_reason,
         "risk_score": record.risk_score if record is not None else None,
@@ -723,6 +741,8 @@ def _build_accepted_candidate_diagnostic(
             risk_reasons=risk_reasons,
         ),
         "attention_hints": _attention_hints(payload, social=social, market_cap=market_cap, volume=volume, buy_sell=buy_sell),
+        "source_count": payload.get("source_count"),
+        "sources": tuple(payload.get("sources", ())) if isinstance(payload.get("sources"), list) else tuple(payload.get("sources", ())) if isinstance(payload.get("sources"), tuple) else (),
     }
 
 
@@ -793,9 +813,37 @@ def _compact_candidate_snapshot(diagnostic: dict[str, object]) -> dict[str, obje
         "authority_policy_state": diagnostic.get("authority_policy_state"),
         "honeypot_policy_state": diagnostic.get("honeypot_policy_state"),
         "main_warnings": list(diagnostic.get("main_warnings", ())),
+        "narrative_quality_hint": diagnostic.get("narrative_quality_hint"),
+        "theme_cluster_hint": diagnostic.get("theme_cluster_hint"),
+        "name_quality_hint": diagnostic.get("name_quality_hint"),
+        "source_context_hint": diagnostic.get("source_context_hint"),
+        "momentum_context_hint": diagnostic.get("momentum_context_hint"),
         "action_outcome": diagnostic.get("action_outcome"),
         "skip_or_rejection_reason": diagnostic.get("rejection_reason"),
     }
+
+
+def _apply_candidate_narrative_hints(
+    accepted: list[dict[str, object]],
+    rejected: list[dict[str, object]],
+) -> tuple[list[dict[str, object]], list[dict[str, object]]]:
+    candidates = [*accepted, *rejected]
+    token_counts: Counter[str] = Counter()
+    for diagnostic in candidates:
+        for token in _candidate_theme_tokens(diagnostic):
+            token_counts[token] += 1
+
+    def enrich(diagnostic: dict[str, object]) -> dict[str, object]:
+        return {
+            **diagnostic,
+            "theme_cluster_hint": _theme_cluster_hint(diagnostic, token_counts),
+            "name_quality_hint": _name_quality_hint(diagnostic, token_counts),
+            "source_context_hint": _source_context_hint(diagnostic),
+            "momentum_context_hint": _momentum_context_hint(diagnostic),
+            "narrative_quality_hint": _narrative_quality_hint(diagnostic, token_counts),
+        }
+
+    return [enrich(item) for item in accepted], [enrich(item) for item in rejected]
 
 
 def _candidate_sort_key(diagnostic: dict[str, object]) -> tuple[int, int, int]:
@@ -840,6 +888,13 @@ def _candidate_summary_tags(diagnostic: dict[str, object]) -> str:
     return "none"
 
 
+def _candidate_summary_theme(diagnostic: dict[str, object]) -> str:
+    theme_hint = diagnostic.get("theme_cluster_hint")
+    if isinstance(theme_hint, str) and theme_hint:
+        return theme_hint
+    return _candidate_summary_tags(diagnostic)
+
+
 def _accepted_candidate_sort_key(diagnostic: dict[str, object]) -> tuple[int, int, float, int, int]:
     holder_pct = _coerce_numeric(diagnostic.get("top10_holder_pct"))
     liquidity_sol = _coerce_numeric(diagnostic.get("selected_liquidity_sol"))
@@ -875,6 +930,9 @@ def _accepted_candidate_diff(diagnostic: dict[str, object]) -> str:
         parts.append("age=?")
     parts.append(f"social={social_state}")
     parts.append(f"meta={meta_state}")
+    source_context = diagnostic.get("source_context_hint")
+    if isinstance(source_context, str) and source_context:
+        parts.append(source_context)
     return ", ".join(parts)
 
 
@@ -897,6 +955,9 @@ def _accepted_candidate_note(diagnostic: dict[str, object]) -> str:
     social_state = diagnostic.get("social_signal_state")
     if social_state == "missing":
         parts.append("social still missing")
+    narrative_quality = diagnostic.get("narrative_quality_hint")
+    if isinstance(narrative_quality, str) and narrative_quality:
+        parts.append(f"narrative={narrative_quality}")
     return "; ".join(parts) if parts else "ranked by safe passer context"
 
 
@@ -911,6 +972,114 @@ def _coerce_numeric(value: object) -> float | None:
     if isinstance(value, (int, float)):
         return float(value)
     return None
+
+
+def _candidate_theme_tokens(diagnostic: dict[str, object]) -> tuple[str, ...]:
+    values = list(_candidate_name_tokens(diagnostic))
+    tags = diagnostic.get("narrative_tags")
+    if isinstance(tags, (list, tuple)):
+        values.extend(_safe_theme_tag(str(tag)) for tag in tags[:3])
+
+    tokens: list[str] = []
+    for value in values:
+        if not value:
+            continue
+        compact = "".join(character if character.isalnum() else " " for character in value)
+        for token in compact.split():
+            if len(token) >= 3:
+                tokens.append(token)
+    return tuple(dict.fromkeys(tokens))
+
+
+def _candidate_name_tokens(diagnostic: dict[str, object]) -> tuple[str, ...]:
+    generic_clone_tokens = {"dog", "cat", "bull", "rat", "weasel", "honeycomb", "fatdog", "fatbull"}
+    tokens: list[str] = []
+    for field_name in ("symbol", "name"):
+        value = diagnostic.get(field_name)
+        if not isinstance(value, str) or not value.strip():
+            continue
+        normalized = value.strip().lower()
+        compact = "".join(character for character in normalized if character.isalnum())
+        if len(compact) >= 3:
+            tokens.append(compact)
+        for clone_token in generic_clone_tokens:
+            if clone_token in compact:
+                tokens.append(clone_token)
+                tokens.append("clone")
+    return tuple(dict.fromkeys(tokens))
+
+
+def _safe_theme_tag(tag: str) -> str:
+    normalized = tag.strip().lower()
+    if normalized in {"fresh-launch", "pumpfun", "pumpfun-launch", "fresh", "launch"}:
+        return ""
+    return normalized
+
+
+def _theme_cluster_hint(diagnostic: dict[str, object], token_counts: Counter[str]) -> str:
+    repeated = [token for token in _candidate_theme_tokens(diagnostic) if token_counts[token] > 1]
+    if repeated:
+        return f"cluster:{repeated[0]}"
+    return "distinct-theme"
+
+
+def _name_quality_hint(diagnostic: dict[str, object], token_counts: Counter[str]) -> str:
+    repeated = [token for token in _candidate_name_tokens(diagnostic) if token_counts[token] > 1]
+    generic_clone_tokens = {"dog", "cat", "bull", "rat", "weasel", "honeycomb", "fatdog", "fatbull", "clone"}
+    if any(token in generic_clone_tokens for token in repeated):
+        return "generic-clone-like"
+    if repeated:
+        return "theme-repeated"
+    return "differentiated-name"
+
+
+def _source_context_hint(diagnostic: dict[str, object]) -> str:
+    source_count = diagnostic.get("source_count")
+    sources = diagnostic.get("sources")
+    if isinstance(source_count, int) and source_count > 1:
+        return f"multi-source:{source_count}"
+    if isinstance(sources, (list, tuple)) and len(sources) > 1:
+        return f"multi-source:{len(sources)}"
+    source = diagnostic.get("source")
+    if source == "pump_fun":
+        return "single-source-launch"
+    if source == "onchain":
+        return "onchain-context"
+    if source == "whale_tracker":
+        return "whale-context"
+    return "single-source"
+
+
+def _momentum_context_hint(diagnostic: dict[str, object]) -> str:
+    buy_sell = diagnostic.get("buy_sell_hint")
+    liquidity = _coerce_numeric(diagnostic.get("selected_liquidity_sol"))
+    if isinstance(buy_sell, str) and buy_sell.startswith("b") and "/s" in buy_sell:
+        buys_part, sells_part = buy_sell[1:].split("/s", 1)
+        try:
+            buys = int(buys_part)
+            sells = int(sells_part)
+        except ValueError:
+            buys = sells = 0
+        if buys > sells:
+            return "buy-pressure"
+    if liquidity is not None and liquidity >= 1000:
+        return "deep-liquidity"
+    if liquidity is not None and liquidity >= 50:
+        return "liquid"
+    return "limited-context"
+
+
+def _narrative_quality_hint(diagnostic: dict[str, object], token_counts: Counter[str]) -> str:
+    name_quality = _name_quality_hint(diagnostic, token_counts)
+    source_context = _source_context_hint(diagnostic)
+    momentum_context = _momentum_context_hint(diagnostic)
+    if name_quality == "differentiated-name" and source_context.startswith("multi-source"):
+        return f"differentiated/{momentum_context}/{source_context}"
+    if name_quality == "differentiated-name":
+        return f"differentiated/{momentum_context}"
+    if name_quality == "generic-clone-like":
+        return f"clone-cluster/{momentum_context}"
+    return f"theme-repeated/{momentum_context}"
 
 
 def _check_result_value(record: RejectionRecord | None, field_name: str) -> str | None:
@@ -1092,6 +1261,11 @@ def build_rejection_diagnostic_report(summary: PaperCycleSummary) -> str:
                     f"authority_policy_state: {diagnostic.get('authority_policy_state', 'unknown')}",
                     f"honeypot_policy_state: {diagnostic.get('honeypot_policy_state', 'unknown')}",
                     f"main_warnings: {diagnostic.get('main_warnings', ())}",
+                    f"narrative_quality_hint: {diagnostic.get('narrative_quality_hint', 'unknown')}",
+                    f"theme_cluster_hint: {diagnostic.get('theme_cluster_hint', 'unknown')}",
+                    f"name_quality_hint: {diagnostic.get('name_quality_hint', 'unknown')}",
+                    f"source_context_hint: {diagnostic.get('source_context_hint', 'unknown')}",
+                    f"momentum_context_hint: {diagnostic.get('momentum_context_hint', 'unknown')}",
                     f"skip_or_rejection_reason: {diagnostic.get('rejection_reason', 'none')}",
                     f"attention_hints: {diagnostic.get('attention_hints', 'unknown')}",
                 ]

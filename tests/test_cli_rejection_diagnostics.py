@@ -547,3 +547,86 @@ def test_discovery_comparison_lines_stay_safe_without_raw_payloads() -> None:
     assert "do-not-print" not in output
     assert "WalletSecret111" not in output
     assert "raw_data" not in output
+
+
+def test_discovery_comparison_lines_surface_theme_and_holder_callouts() -> None:
+    summary = cli_module.PaperCycleSummary(
+        execution_mode="paper",
+        risk_profile="discovery",
+        max_signals=2,
+        timeout_seconds=60.0,
+        signals_collected=2,
+        signals_accepted=2,
+        signals_rejected=0,
+        trades_persisted=2,
+        open_positions=2,
+        sources_polled=["pump_fun"],
+        source_signal_counts={"pump_fun": 2},
+        source_failures={},
+        composite_opportunities=0,
+        rejection_reasons={},
+        candidates_evaluated=2,
+        passed_risk_checks=2,
+        summary_rejection_reasons={},
+        source_evaluated_counts={"pump_fun": 2},
+        source_pass_counts={"pump_fun": 2},
+        holder_lookup_outcomes={},
+        termination_reason="max_signals",
+        elapsed_seconds=1.0,
+        accepted_candidate_diagnostics=[
+            {
+                "rank": 1,
+                "symbol": "fatdog",
+                "mint_short": "Fatd...1111",
+                "attention_score": 79,
+                "attention_tier": "strong_watch",
+                "top10_holder_pct": 49.2,
+                "top10_holder_source": "local_filtered_override",
+                "selected_liquidity_sol": 4500.0,
+                "token_age_minutes": 0.4,
+                "social_signal_state": "missing",
+                "metadata_completeness_state": "partial",
+                "main_warnings": (
+                    "age_policy:immature_warning",
+                    "creator_policy:unknown_warning",
+                    "unique_buyers_policy:unknown_warning",
+                    "authority_policy:unknown_warning",
+                    "honeypot_policy:unknown_warning",
+                ),
+                "theme_cluster_hint": "cluster:fatdog",
+                "name_quality_hint": "generic-clone-like",
+                "source_context_hint": "single-source-launch",
+                "momentum_context_hint": "deep-liquidity",
+                "narrative_quality_hint": "clone-cluster/deep-liquidity",
+            },
+            {
+                "rank": 2,
+                "symbol": "Nebulon",
+                "mint_short": "Nebu...2222",
+                "attention_score": 79,
+                "attention_tier": "strong_watch",
+                "top10_holder_pct": 4.2,
+                "top10_holder_source": "local_filtered_override",
+                "selected_liquidity_sol": 3200.0,
+                "token_age_minutes": 0.5,
+                "social_signal_state": "missing",
+                "metadata_completeness_state": "partial",
+                "main_warnings": (
+                    "age_policy:immature_warning",
+                    "creator_policy:unknown_warning",
+                ),
+                "theme_cluster_hint": "distinct-theme",
+                "name_quality_hint": "differentiated-name",
+                "source_context_hint": "single-source-launch",
+                "momentum_context_hint": "deep-liquidity",
+                "narrative_quality_hint": "differentiated/deep-liquidity",
+            },
+        ],
+    )
+
+    output = "\n".join(summary.discovery_comparison_lines())
+
+    assert "near holder cutoff" in output
+    assert "social still missing" in output
+    assert "clone-cluster/deep-liquidity" in output
+    assert "differentiated/deep-liquidity" in output
