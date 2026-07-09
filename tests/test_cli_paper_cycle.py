@@ -235,6 +235,8 @@ def test_paper_cycle_discovery_mode_stays_paper_when_settings_request_live(tmp_p
         assert summary.holder_lookup_outcomes == {}
         assert len(trades) == 1
         assert trades[0].mode == "paper"
+        assert "candidate_snapshot" in trades[0].metadata
+        assert trades[0].metadata["candidate_snapshot"]["action_outcome"] == "traded"
 
     asyncio.run(run())
 
@@ -350,6 +352,8 @@ def test_paper_cycle_capacity_blockers_report_current_open_positions(tmp_path: P
         assert blocked_summary.starting_open_positions == 1
         assert blocked_summary.persisted_open_positions == 1
         assert blocked_summary.configured_max_open_positions == 1
+        assert blocked_summary.rejected_candidate_diagnostics[0]["action_outcome"] == "capacity-blocked"
+        assert blocked_summary.rejected_candidate_diagnostics[0]["rejection_reason"] == "max_open_positions_reached"
         assert "starting_open_positions=1" in safe_lines
         assert "persisted_open_positions=1" in safe_lines
         assert "configured_max_open_positions=1" in safe_lines
@@ -398,6 +402,8 @@ def test_paper_cycle_fresh_evaluation_session_ignores_old_paper_positions_only_f
         assert fresh_summary.persisted_open_positions == 1
         assert fresh_summary.open_positions == 1
         assert fresh_summary.trades_persisted == 1
+        assert len(fresh_summary.accepted_candidate_diagnostics) == 1
+        assert fresh_summary.accepted_candidate_diagnostics[0]["action_outcome"] == "traded"
         assert len(trades) == 2
         assert any(trade.mint_address == "fresh-session-mint" for trade in trades)
         assert len(positions) == 1
@@ -444,6 +450,108 @@ def test_paper_cycle_aggregator_combines_multi_source_signals(tmp_path: Path) ->
         assert summary.source_signal_counts == {"pump_fun": 1, "whale_tracker": 1}
         assert summary.source_failures == {}
         assert len(trades) == 1
+
+    asyncio.run(run())
+
+
+def test_discovery_candidate_snapshot_persists_attention_fields_without_raw_payload(tmp_path: Path) -> None:
+    async def run() -> None:
+        db_path = tmp_path / "discovery-snapshot.db"
+        signal = build_signal("snapshot-mint", passes=True)
+        signal = signal.model_copy(
+            update={
+                "source": SignalSourceEnum.PUMP_FUN,
+                "type": SignalType.NEW_POOL,
+            }
+        )
+        signal.payload.update(
+            {
+                "symbol": "SNAP",
+                "name": "Snapshot Token",
+                "attention_diagnostics": {
+                    "attention_score": 79,
+                    "attention_tier": "strong_watch",
+                    "attention_reasons": ["launch-stage signal", "strong liquidity"],
+                    "narrative_tags": ["fresh-launch", "pumpfun", "pumpfun-launch"],
+                    "social_signal_state": "missing",
+                    "metadata_completeness_state": "partial",
+                },
+                "holder_policy": {
+                    "holder_policy_state": "pass",
+                    "stage_hint": "new_pool",
+                    "token_age_minutes": 0.2,
+                },
+                "creator_policy": {"creator_policy_state": "unknown_warning"},
+                "unique_buyers_policy": {"unique_buyers_policy_state": "unknown_warning"},
+                "authority_policy": {"authority_policy_state": "unknown_warning"},
+                "honeypot_policy": {"honeypot_policy_state": "unknown_warning"},
+                "liquidity_diagnostics": {
+                    "selected_liquidity_sol": 30.1,
+                    "selected_liquidity_usd": 900.0,
+                    "liquidity_source": "signal_payload",
+                    "liquidity_data_state": "known",
+                },
+                "holder_diagnostics": {
+                    "selected_top10_holder_pct": 12.0,
+                    "top10_holder_source": "signal_payload",
+                },
+            }
+        )
+        signal.payload["raw_data"] = {"secret": "do-not-store"}
+        signal.payload["buyerWallets"] = ["BuyerWallet11111111111111111111111111111111"]
+
+        summary = await cli_module.run_bounded_paper_cycle(
+            max_signals=1,
+            timeout_seconds=0.1,
+            db_path=db_path,
+            risk_profile="discovery",
+            sources=[FakeSignalSource([[signal]])],
+            poll_interval_s=0.0,
+        )
+
+        trades = load_recent_trades(db_path, limit=5)
+        snapshot = trades[0].metadata["candidate_snapshot"]
+
+        assert summary.signals_accepted == 1
+        assert len(summary.accepted_candidate_diagnostics) == 1
+        assert snapshot["attention_score"] > 0
+        assert snapshot["attention_tier"] in {"watch", "strong_watch", "candidate"}
+        assert "pumpfun-launch" in snapshot["narrative_tags"]
+        assert snapshot["action_outcome"] == "traded"
+        assert "raw_data" not in snapshot
+        assert "buyerWallets" not in snapshot
+        assert "do-not-store" not in str(snapshot)
+        assert "BuyerWallet11111111111111111111111111111111" not in str(snapshot)
+
+    asyncio.run(run())
+
+
+def test_strict_mode_keeps_candidate_snapshot_path_inactive_for_rejected_trade_set(tmp_path: Path) -> None:
+    async def run() -> None:
+        db_path = tmp_path / "strict-no-snapshot.db"
+        source = FakeSignalSource(
+            [[
+                build_enriched_pump_fun_signal(
+                    "strict-snapshot-mint",
+                    created_at=datetime.now(UTC),
+                )
+            ]]
+        )
+
+        summary = await cli_module.run_bounded_paper_cycle(
+            max_signals=1,
+            timeout_seconds=0.1,
+            db_path=db_path,
+            sources=[source],
+            poll_interval_s=0.0,
+        )
+
+        trades = load_recent_trades(db_path, limit=5)
+
+        assert summary.risk_profile == "strict"
+        assert summary.signals_accepted == 0
+        assert summary.accepted_candidate_diagnostics == []
+        assert trades == []
 
     asyncio.run(run())
 

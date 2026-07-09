@@ -16,7 +16,7 @@ import typer
 from rich.console import Console
 
 from src.core.config import Settings, load_settings
-from src.core.database import init_db
+from src.core.database import init_db, record_trade
 from src.execution.base import ExecutionAdapter
 from src.execution.paper import PaperExecutionAdapter
 from src.monitoring.dashboard import resolve_db_path
@@ -65,6 +65,7 @@ class PaperCycleSummary:
     holder_lookup_outcomes: dict[str, int]
     termination_reason: str
     elapsed_seconds: float
+    accepted_candidate_diagnostics: list[dict[str, object]] = field(default_factory=list)
     rejected_candidate_diagnostics: list[dict[str, object]] = field(default_factory=list)
     diagnostic_report_path: str | None = None
     evaluation_session_scope: str = "persisted"
@@ -280,6 +281,7 @@ async def run_bounded_paper_cycle(
     passed_risk_by_source: Counter[str] = Counter()
     summary_rejection_reasons: Counter[str] = Counter()
     passed_risk_checks = 0
+    accepted_candidate_diagnostics: list[dict[str, object]] = []
     rejected_candidate_diagnostics: list[dict[str, object]] = []
     termination_reason = "timeout"
 
@@ -340,6 +342,24 @@ async def run_bounded_paper_cycle(
                     continue
 
                 signals_accepted += 1
+                accepted_snapshot = _build_accepted_candidate_diagnostic(
+                    rank=signals_collected,
+                    signal=signal,
+                    decision=decision,
+                    record=record,
+                )
+                accepted_candidate_diagnostics.append(accepted_snapshot)
+                if normalized_risk_profile == "discovery":
+                    persisted_trade = decision.trade.model_copy(
+                        update={
+                            "metadata": {
+                                **decision.trade.metadata,
+                                "candidate_snapshot": _compact_candidate_snapshot(accepted_snapshot),
+                            }
+                        }
+                    )
+                    await record_trade(runtime_db_path, persisted_trade)
+                    decision.trade = persisted_trade
                 if record is None:
                     passed_risk_checks += 1
                     passed_risk_by_source[str(signal.source.value).lower()] += 1
@@ -383,6 +403,7 @@ async def run_bounded_paper_cycle(
         holder_lookup_outcomes=holder_lookup_outcomes,
         termination_reason=termination_reason,
         elapsed_seconds=round(monotonic() - start_at, 3),
+        accepted_candidate_diagnostics=accepted_candidate_diagnostics,
         rejected_candidate_diagnostics=rejected_candidate_diagnostics,
         evaluation_session_scope="fresh" if fresh_evaluation_session else "persisted",
         starting_open_positions=initial_open_positions,
@@ -425,6 +446,7 @@ def _build_rejected_candidate_diagnostic(
     decision: Any,
     record: RejectionRecord | None,
 ) -> dict[str, object]:
+    action_outcome = _decision_action_outcome(decision, record)
     payload = signal.payload if isinstance(signal.payload, dict) else {}
     token_section = payload.get("token") if isinstance(payload.get("token"), dict) else {}
     metrics = payload.get("metrics") if isinstance(payload.get("metrics"), dict) else {}
@@ -469,7 +491,8 @@ def _build_rejected_candidate_diagnostic(
         "confidence": round(signal.confidence, 6),
         "weight": round(signal.weight, 6),
         "effective_score": round(min(signal.confidence * max(signal.weight, 0.0), 1.0), 6),
-        "decision": "rejected",
+        "decision": "rejected" if action_outcome == "rejected" else "skipped",
+        "action_outcome": action_outcome,
         "failed_check": (record.failed_check if record is not None and record.failed_check is not None else _format_rejection_reason(decision.rejection_reason)),
         "rejection_reason": decision.rejection_reason or "unknown_or_other",
         "risk_score": record.risk_score if record is not None else None,
@@ -561,7 +584,166 @@ def _build_rejected_candidate_diagnostic(
         "social_hint": _social_hint(social),
         "attention_hints": attention_hints,
         "creator_repeat_flag": bool(payload.get("creator_repeat_flag")),
+        "main_warnings": _main_warnings(
+            holder_policy_state=holder_policy.get("holder_policy_state", "unknown"),
+            age_policy_state=age_policy.get("age_policy_state", "unknown"),
+            creator_policy_state=creator_policy.get("creator_policy_state", "unknown"),
+            unique_buyers_policy_state=unique_buyers_policy.get("unique_buyers_policy_state", "unknown"),
+            authority_policy_state=authority_policy.get("authority_policy_state", "unknown"),
+            honeypot_policy_state=honeypot_policy.get("honeypot_policy_state", "unknown"),
+            rejection_reason=decision.rejection_reason,
+            risk_reasons=(),
+        ),
         "notes": _diagnostic_note(payload, record),
+    }
+
+
+def _build_accepted_candidate_diagnostic(
+    *,
+    rank: int,
+    signal: Any,
+    decision: Any,
+    record: RejectionRecord | None,
+) -> dict[str, object]:
+    payload = signal.payload if isinstance(signal.payload, dict) else {}
+    token_section = payload.get("token") if isinstance(payload.get("token"), dict) else {}
+    metrics = payload.get("metrics") if isinstance(payload.get("metrics"), dict) else {}
+    social = payload.get("social_credibility") if isinstance(payload.get("social_credibility"), dict) else {}
+    attention_diagnostics = payload.get("attention_diagnostics") if isinstance(payload.get("attention_diagnostics"), dict) else {}
+    holder_diagnostics = payload.get("holder_diagnostics") if isinstance(payload.get("holder_diagnostics"), dict) else {}
+    creator_policy = payload.get("creator_policy") if isinstance(payload.get("creator_policy"), dict) else {}
+    unique_buyers_policy = payload.get("unique_buyers_policy") if isinstance(payload.get("unique_buyers_policy"), dict) else {}
+    authority_policy = payload.get("authority_policy") if isinstance(payload.get("authority_policy"), dict) else {}
+    honeypot_policy = payload.get("honeypot_policy") if isinstance(payload.get("honeypot_policy"), dict) else {}
+    holder_policy = payload.get("holder_policy") if isinstance(payload.get("holder_policy"), dict) else {}
+    age_policy = payload.get("age_policy") if isinstance(payload.get("age_policy"), dict) else {}
+    liquidity_diagnostics = payload.get("liquidity_diagnostics") if isinstance(payload.get("liquidity_diagnostics"), dict) else {}
+    market_cap = _first_present(
+        token_section,
+        payload,
+        keys=("market_cap_usd", "marketCapUsd", "usdMarketCap", "marketCapUSD", "marketCapSol"),
+    )
+    volume = _first_present(metrics, payload, keys=("volume_m5", "volume_h1", "volume_h24", "volume"))
+    buy_sell = _buy_sell_hint(metrics)
+    action_outcome = _decision_action_outcome(decision, record)
+    risk_reasons = tuple(decision.trade.metadata.get("risk_reasons", ())) if getattr(decision, "trade", None) is not None else ()
+    symbol = _stringish(_first_present(token_section, payload, keys=("symbol", "ticker", "name"))) or "unknown"
+
+    return {
+        "rank": rank,
+        "mint": signal.mint_address,
+        "mint_short": _short_mint(signal.mint_address),
+        "symbol": symbol,
+        "name": _stringish(_first_present(token_section, payload, keys=("name",))),
+        "source": str(signal.source.value).lower(),
+        "decision": "accepted",
+        "action_outcome": action_outcome,
+        "failed_check": record.failed_check if record is not None else None,
+        "rejection_reason": decision.rejection_reason,
+        "risk_score": record.risk_score if record is not None else None,
+        "attention_score": attention_diagnostics.get("attention_score", 0),
+        "attention_tier": attention_diagnostics.get("attention_tier", "ignore"),
+        "attention_reasons": tuple(attention_diagnostics.get("attention_reasons", ())),
+        "narrative_tags": tuple(attention_diagnostics.get("narrative_tags", ())),
+        "social_signal_state": attention_diagnostics.get("social_signal_state", "missing"),
+        "metadata_completeness_state": attention_diagnostics.get("metadata_completeness_state", "sparse"),
+        "token_age_minutes": holder_policy.get("token_age_minutes", age_policy.get("token_age_minutes")),
+        "stage_hint": holder_policy.get("stage_hint", age_policy.get("stage_hint", "unknown")),
+        "selected_liquidity_sol": liquidity_diagnostics.get("selected_liquidity_sol"),
+        "selected_liquidity_usd": liquidity_diagnostics.get("selected_liquidity_usd"),
+        "liquidity_source": liquidity_diagnostics.get("liquidity_source", "unknown"),
+        "liquidity_data_state": liquidity_diagnostics.get("liquidity_data_state", "unknown"),
+        "liquidity_display": _liquidity_display("pass", liquidity_diagnostics.get("selected_liquidity_sol")),
+        "top10_holder_source": _top10_holder_source_hint(payload, record),
+        "top10_holder_pct": holder_diagnostics.get("selected_top10_holder_pct", _check_metric_value(record, "top10_holder_check")),
+        "holder_policy_state": holder_policy.get("holder_policy_state", "unknown"),
+        "creator_policy_state": creator_policy.get("creator_policy_state", "unknown"),
+        "unique_buyers_policy_state": unique_buyers_policy.get("unique_buyers_policy_state", "unknown"),
+        "authority_policy_state": authority_policy.get("authority_policy_state", "unknown"),
+        "honeypot_policy_state": honeypot_policy.get("honeypot_policy_state", "unknown"),
+        "main_warnings": _main_warnings(
+            holder_policy_state=holder_policy.get("holder_policy_state", "unknown"),
+            age_policy_state=age_policy.get("age_policy_state", "unknown"),
+            creator_policy_state=creator_policy.get("creator_policy_state", "unknown"),
+            unique_buyers_policy_state=unique_buyers_policy.get("unique_buyers_policy_state", "unknown"),
+            authority_policy_state=authority_policy.get("authority_policy_state", "unknown"),
+            honeypot_policy_state=honeypot_policy.get("honeypot_policy_state", "unknown"),
+            rejection_reason=decision.rejection_reason,
+            risk_reasons=risk_reasons,
+        ),
+        "attention_hints": _attention_hints(payload, social=social, market_cap=market_cap, volume=volume, buy_sell=buy_sell),
+    }
+
+
+def _decision_action_outcome(decision: Any, record: RejectionRecord | None) -> str:
+    if getattr(decision, "trade", None) is not None:
+        return "traded"
+    if decision.rejection_reason == "max_open_positions_reached":
+        return "capacity-blocked"
+    if record is not None and record.outcome == "passed":
+        return "skipped"
+    return "rejected"
+
+
+def _main_warnings(
+    *,
+    holder_policy_state: object,
+    age_policy_state: object,
+    creator_policy_state: object,
+    unique_buyers_policy_state: object,
+    authority_policy_state: object,
+    honeypot_policy_state: object,
+    rejection_reason: str | None,
+    risk_reasons: tuple[object, ...],
+) -> tuple[str, ...]:
+    warnings: list[str] = []
+    for label, state in (
+        ("holder_policy", holder_policy_state),
+        ("age_policy", age_policy_state),
+        ("creator_policy", creator_policy_state),
+        ("unique_buyers_policy", unique_buyers_policy_state),
+        ("authority_policy", authority_policy_state),
+        ("honeypot_policy", honeypot_policy_state),
+    ):
+        if isinstance(state, str) and state not in {"pass", "age_pass", "known", "unknown", "none"}:
+            warnings.append(f"{label}:{state}")
+    if isinstance(rejection_reason, str) and rejection_reason:
+        warnings.append(f"outcome:{rejection_reason}")
+    for reason in risk_reasons:
+        if isinstance(reason, str) and reason:
+            warnings.append(f"risk:{reason}")
+    return tuple(dict.fromkeys(warnings))
+
+
+def _compact_candidate_snapshot(diagnostic: dict[str, object]) -> dict[str, object]:
+    return {
+        "symbol": diagnostic.get("symbol"),
+        "name": diagnostic.get("name"),
+        "mint": diagnostic.get("mint"),
+        "mint_short": diagnostic.get("mint_short"),
+        "source": diagnostic.get("source"),
+        "attention_score": diagnostic.get("attention_score"),
+        "attention_tier": diagnostic.get("attention_tier"),
+        "attention_reasons": list(diagnostic.get("attention_reasons", ())),
+        "narrative_tags": list(diagnostic.get("narrative_tags", ())),
+        "social_signal_state": diagnostic.get("social_signal_state"),
+        "metadata_completeness_state": diagnostic.get("metadata_completeness_state"),
+        "token_age_minutes": diagnostic.get("token_age_minutes"),
+        "stage_hint": diagnostic.get("stage_hint"),
+        "liquidity_sol": diagnostic.get("selected_liquidity_sol"),
+        "liquidity_usd": diagnostic.get("selected_liquidity_usd"),
+        "liquidity_source": diagnostic.get("liquidity_source"),
+        "liquidity_data_state": diagnostic.get("liquidity_data_state"),
+        "holder_policy_state": diagnostic.get("holder_policy_state"),
+        "holder_source": diagnostic.get("top10_holder_source"),
+        "holder_top10_pct": diagnostic.get("top10_holder_pct"),
+        "creator_policy_state": diagnostic.get("creator_policy_state"),
+        "unique_buyers_policy_state": diagnostic.get("unique_buyers_policy_state"),
+        "authority_policy_state": diagnostic.get("authority_policy_state"),
+        "honeypot_policy_state": diagnostic.get("honeypot_policy_state"),
+        "main_warnings": list(diagnostic.get("main_warnings", ())),
+        "action_outcome": diagnostic.get("action_outcome"),
+        "skip_or_rejection_reason": diagnostic.get("rejection_reason"),
     }
 
 
@@ -712,8 +894,49 @@ def build_rejection_diagnostic_report(summary: PaperCycleSummary) -> str:
         f"rejected: {summary.candidates_evaluated - summary.passed_risk_checks}",
         f"paper_trades_executed: {summary.trades_persisted}",
         "",
-        "Aggregate rejection reasons:",
+        "Accepted/passed candidate snapshots:",
     ]
+    if summary.accepted_candidate_diagnostics:
+        for diagnostic in summary.accepted_candidate_diagnostics:
+            lines.extend(
+                [
+                    "",
+                    f"[{diagnostic.get('rank', '?')}] {diagnostic.get('symbol', 'unknown')} ({diagnostic.get('mint_short', 'unknown')})",
+                    f"mint: {diagnostic.get('mint', 'unknown')}",
+                    f"source: {diagnostic.get('source', 'unknown')}",
+                    f"decision: {diagnostic.get('decision', 'unknown')}",
+                    f"action_outcome: {diagnostic.get('action_outcome', 'unknown')}",
+                    f"attention_score: {diagnostic.get('attention_score', 0)}",
+                    f"attention_tier: {diagnostic.get('attention_tier', 'ignore')}",
+                    f"attention_reasons: {diagnostic.get('attention_reasons', ())}",
+                    f"narrative_tags: {diagnostic.get('narrative_tags', ())}",
+                    f"social_signal_state: {diagnostic.get('social_signal_state', 'missing')}",
+                    f"metadata_completeness_state: {diagnostic.get('metadata_completeness_state', 'sparse')}",
+                    f"token_age_minutes: {diagnostic.get('token_age_minutes', 'unknown') if diagnostic.get('token_age_minutes') is not None else 'unknown'}",
+                    f"stage_hint: {diagnostic.get('stage_hint', 'unknown')}",
+                    f"selected_liquidity_sol: {diagnostic.get('selected_liquidity_sol', 'unknown')}",
+                    f"selected_liquidity_usd: {diagnostic.get('selected_liquidity_usd', 'unknown')}",
+                    f"liquidity_source: {diagnostic.get('liquidity_source', 'unknown')}",
+                    f"liquidity_data_state: {diagnostic.get('liquidity_data_state', 'unknown')}",
+                    f"top10_holder_pct: {diagnostic.get('top10_holder_pct', 'unknown')}",
+                    f"top10_holder_source: {diagnostic.get('top10_holder_source', 'unknown')}",
+                    f"holder_policy_state: {diagnostic.get('holder_policy_state', 'unknown')}",
+                    f"creator_policy_state: {diagnostic.get('creator_policy_state', 'unknown')}",
+                    f"unique_buyers_policy_state: {diagnostic.get('unique_buyers_policy_state', 'unknown')}",
+                    f"authority_policy_state: {diagnostic.get('authority_policy_state', 'unknown')}",
+                    f"honeypot_policy_state: {diagnostic.get('honeypot_policy_state', 'unknown')}",
+                    f"main_warnings: {diagnostic.get('main_warnings', ())}",
+                    f"skip_or_rejection_reason: {diagnostic.get('rejection_reason', 'none')}",
+                    f"attention_hints: {diagnostic.get('attention_hints', 'unknown')}",
+                ]
+            )
+    else:
+        lines.extend(["", "- none"])
+
+    lines.extend([
+        "",
+        "Aggregate rejection reasons:",
+    ])
     if summary.summary_rejection_reasons:
         lines.extend(f"- {reason}: {count}" for reason, count in summary.summary_rejection_reasons.items())
     else:
@@ -728,6 +951,7 @@ def build_rejection_diagnostic_report(summary: PaperCycleSummary) -> str:
                 f"mint: {diagnostic.get('mint', 'unknown')}",
                 f"source: {diagnostic.get('source', 'unknown')}",
                 f"decision: {diagnostic.get('decision', 'unknown')}",
+                f"action_outcome: {diagnostic.get('action_outcome', 'unknown')}",
                 f"failed_check: {diagnostic.get('failed_check', 'unknown')}",
                 f"rejection_reason: {diagnostic.get('rejection_reason', 'unknown')}",
                 f"risk_score: {diagnostic.get('risk_score', 'unknown') if diagnostic.get('risk_score') is not None else 'unknown'}",
@@ -809,6 +1033,7 @@ def build_rejection_diagnostic_report(summary: PaperCycleSummary) -> str:
                 f"graduation_flag: {diagnostic.get('graduation_flag', 'unknown')}",
                 f"social_hint: {diagnostic.get('social_hint', 'unknown')}",
                 f"attention_hints: {diagnostic.get('attention_hints', 'unknown')}",
+                f"main_warnings: {diagnostic.get('main_warnings', ())}",
                 f"notes: {diagnostic.get('notes', 'none')}",
             ]
         )
