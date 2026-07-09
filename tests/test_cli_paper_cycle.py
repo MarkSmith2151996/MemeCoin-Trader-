@@ -312,6 +312,100 @@ def test_paper_cycle_reports_stable_rejection_reason_counts(tmp_path: Path) -> N
     asyncio.run(run())
 
 
+def test_paper_cycle_capacity_blockers_report_current_open_positions(tmp_path: Path) -> None:
+    async def run() -> None:
+        db_path = tmp_path / "capacity-blocked.db"
+        constrained_settings = cli_module.load_settings().model_copy(
+            update={
+                "position": cli_module.load_settings().position.model_copy(
+                    update={"max_open_positions": 1}
+                )
+            }
+        )
+
+        first_summary = await cli_module.run_bounded_paper_cycle(
+            max_signals=1,
+            timeout_seconds=0.1,
+            db_path=db_path,
+            settings=constrained_settings,
+            sources=[FakeSignalSource([[build_signal("capacity-seed", passes=True)]])],
+            poll_interval_s=0.0,
+        )
+        blocked_summary = await cli_module.run_bounded_paper_cycle(
+            max_signals=1,
+            timeout_seconds=0.1,
+            db_path=db_path,
+            settings=constrained_settings,
+            sources=[FakeSignalSource([[build_signal("capacity-blocked", passes=True)]])],
+            poll_interval_s=0.0,
+        )
+
+        safe_lines = blocked_summary.safe_lines()
+
+        assert first_summary.open_positions == 1
+        assert blocked_summary.signals_accepted == 0
+        assert blocked_summary.signals_rejected == 1
+        assert blocked_summary.rejection_reasons == {"max_open_positions_reached": 1}
+        assert blocked_summary.capacity_blocked_candidates == 1
+        assert blocked_summary.starting_open_positions == 1
+        assert blocked_summary.persisted_open_positions == 1
+        assert blocked_summary.configured_max_open_positions == 1
+        assert "starting_open_positions=1" in safe_lines
+        assert "persisted_open_positions=1" in safe_lines
+        assert "configured_max_open_positions=1" in safe_lines
+        assert "capacity_blocked_candidates=1" in safe_lines
+
+    asyncio.run(run())
+
+
+def test_paper_cycle_fresh_evaluation_session_ignores_old_paper_positions_only_for_session(tmp_path: Path) -> None:
+    async def run() -> None:
+        db_path = tmp_path / "fresh-eval.db"
+        constrained_settings = cli_module.load_settings().model_copy(
+            update={
+                "execution": cli_module.load_settings().execution.model_copy(update={"mode": "live"}),
+                "position": cli_module.load_settings().position.model_copy(
+                    update={"max_open_positions": 1}
+                ),
+            }
+        )
+
+        await cli_module.run_bounded_paper_cycle(
+            max_signals=1,
+            timeout_seconds=0.1,
+            db_path=db_path,
+            settings=constrained_settings,
+            sources=[FakeSignalSource([[build_signal("persisted-seed", passes=True)]])],
+            poll_interval_s=0.0,
+        )
+
+        fresh_summary = await cli_module.run_bounded_paper_cycle(
+            max_signals=1,
+            timeout_seconds=0.1,
+            db_path=db_path,
+            settings=constrained_settings,
+            fresh_evaluation_session=True,
+            sources=[FakeSignalSource([[build_signal("fresh-session-mint", passes=True)]])],
+            poll_interval_s=0.0,
+        )
+
+        trades = load_recent_trades(db_path, limit=10)
+        positions = load_open_positions(db_path)
+
+        assert fresh_summary.execution_mode == "paper"
+        assert fresh_summary.evaluation_session_scope == "fresh"
+        assert fresh_summary.starting_open_positions == 1
+        assert fresh_summary.persisted_open_positions == 1
+        assert fresh_summary.open_positions == 1
+        assert fresh_summary.trades_persisted == 1
+        assert len(trades) == 2
+        assert any(trade.mint_address == "fresh-session-mint" for trade in trades)
+        assert len(positions) == 1
+        assert positions[0].mint_address == "persisted-seed"
+
+    asyncio.run(run())
+
+
 def test_paper_cycle_aggregator_combines_multi_source_signals(tmp_path: Path) -> None:
     async def run() -> None:
         db_path = tmp_path / "aggregated.db"

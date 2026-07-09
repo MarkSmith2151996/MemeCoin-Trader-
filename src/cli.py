@@ -67,6 +67,11 @@ class PaperCycleSummary:
     elapsed_seconds: float
     rejected_candidate_diagnostics: list[dict[str, object]] = field(default_factory=list)
     diagnostic_report_path: str | None = None
+    evaluation_session_scope: str = "persisted"
+    starting_open_positions: int = 0
+    persisted_open_positions: int = 0
+    configured_max_open_positions: int = 0
+    capacity_blocked_candidates: int = 0
 
     def safe_lines(self) -> list[str]:
         lines = [
@@ -79,6 +84,11 @@ class PaperCycleSummary:
             f"signals_rejected={self.signals_rejected}",
             f"trades_persisted={self.trades_persisted}",
             f"open_positions={self.open_positions}",
+            f"evaluation_session_scope={self.evaluation_session_scope}",
+            f"starting_open_positions={self.starting_open_positions}",
+            f"persisted_open_positions={self.persisted_open_positions}",
+            f"configured_max_open_positions={self.configured_max_open_positions}",
+            f"capacity_blocked_candidates={self.capacity_blocked_candidates}",
             f"sources_polled={','.join(self.sources_polled)}",
             f"composite_opportunities={self.composite_opportunities}",
             f"termination_reason={self.termination_reason}",
@@ -224,6 +234,7 @@ async def run_bounded_paper_cycle(
     timeout_seconds: float,
     *,
     risk_profile: str = "strict",
+    fresh_evaluation_session: bool = False,
     db_path: str | Path | None = None,
     settings: Settings | None = None,
     sources: list[SignalSource] | None = None,
@@ -240,11 +251,19 @@ async def run_bounded_paper_cycle(
 
     await init_db(runtime_db_path)
     initial_trade_count = _count_rows(runtime_db_path, "trades")
+    initial_open_positions = _count_rows(runtime_db_path, "positions", "status != ?", ("CLOSED",))
+
+    position_manager = PositionManager(
+        runtime_db_path,
+        runtime_settings,
+        use_persisted_positions=not fresh_evaluation_session,
+        persist_positions=not fresh_evaluation_session,
+    )
 
     engine = DecisionEngine(
         execution_adapter,
         risk_scorer or build_paper_cycle_risk_scorer(normalized_risk_profile, runtime_settings),
-        PositionManager(runtime_db_path, runtime_settings),
+        position_manager,
         runtime_settings,
         db=runtime_db_path,
     )
@@ -338,6 +357,8 @@ async def run_bounded_paper_cycle(
         await execution_adapter.close()
 
     holder_lookup_outcomes = extract_runtime_diagnostics(engine.risk_scorer)
+    session_open_positions = len(await position_manager.get_all_open())
+    persisted_open_positions = _count_rows(runtime_db_path, "positions", "status != ?", ("CLOSED",))
 
     return PaperCycleSummary(
         execution_mode=runtime_settings.execution.mode,
@@ -348,7 +369,7 @@ async def run_bounded_paper_cycle(
         signals_accepted=signals_accepted,
         signals_rejected=signals_rejected,
         trades_persisted=max(_count_rows(runtime_db_path, "trades") - initial_trade_count, 0),
-        open_positions=_count_rows(runtime_db_path, "positions", "status != ?", ("CLOSED",)),
+        open_positions=session_open_positions,
         sources_polled=[source.name for source in signal_sources],
         source_signal_counts=dict(sorted(source_signal_counts.items())),
         source_failures=dict(sorted(source_failures.items())),
@@ -363,6 +384,11 @@ async def run_bounded_paper_cycle(
         termination_reason=termination_reason,
         elapsed_seconds=round(monotonic() - start_at, 3),
         rejected_candidate_diagnostics=rejected_candidate_diagnostics,
+        evaluation_session_scope="fresh" if fresh_evaluation_session else "persisted",
+        starting_open_positions=initial_open_positions,
+        persisted_open_positions=persisted_open_positions,
+        configured_max_open_positions=runtime_settings.position.max_open_positions,
+        capacity_blocked_candidates=rejection_reasons.get("max_open_positions_reached", 0),
     )
 
 
@@ -836,6 +862,11 @@ def paper_cycle(
     timeout_seconds: float = typer.Option(30.0, min=0.0, help="Maximum wall-clock runtime before stopping."),
     risk_profile: str = typer.Option("strict", "--mode", help="Risk profile: strict or discovery."),
     db_path: str | None = typer.Option(None, help="Optional SQLite path override."),
+    fresh_evaluation_session: bool = typer.Option(
+        False,
+        "--fresh-evaluation-session",
+        help="Paper-only: ignore previously persisted paper positions for this bounded evaluation run.",
+    ),
 ) -> None:
     try:
         normalized_risk_profile = normalize_risk_profile(risk_profile)
@@ -847,6 +878,7 @@ def paper_cycle(
             max_signals=max_signals,
             timeout_seconds=timeout_seconds,
             risk_profile=normalized_risk_profile,
+            fresh_evaluation_session=fresh_evaluation_session,
             db_path=db_path,
         )
     )

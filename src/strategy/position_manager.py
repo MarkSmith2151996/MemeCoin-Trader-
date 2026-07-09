@@ -14,9 +14,18 @@ from src.strategy.exits import build_partial_exits
 
 
 class PositionManager:
-    def __init__(self, db: str | Path | None, config: Settings) -> None:
+    def __init__(
+        self,
+        db: str | Path | None,
+        config: Settings,
+        *,
+        use_persisted_positions: bool = True,
+        persist_positions: bool = True,
+    ) -> None:
         self.db = Path(db) if db is not None else None
         self.config = config
+        self.use_persisted_positions = use_persisted_positions
+        self.persist_positions = persist_positions
         self._cache: dict[str, Position] = {}
 
     async def open_position(self, trade: Trade, signal: Signal) -> Position:
@@ -39,6 +48,9 @@ class PositionManager:
         if cached is not None and cached.status != PositionStatus.CLOSED:
             return cached
 
+        if not self.use_persisted_positions:
+            return None
+
         position = await self._fetch_position(mint)
         if position is not None:
             self._cache[mint] = position
@@ -47,7 +59,7 @@ class PositionManager:
         return position
 
     async def get_all_open(self) -> list[Position]:
-        if self.db is None:
+        if self.db is None or not self.use_persisted_positions:
             return [position for position in self._cache.values() if position.status != PositionStatus.CLOSED]
 
         async with aiosqlite.connect(self.db) as conn:
@@ -109,7 +121,7 @@ class PositionManager:
         return round(sum(position.amount_sol * position.remaining_sell_pct for position in positions), 6)
 
     async def _fetch_position(self, mint: str) -> Position | None:
-        if self.db is None:
+        if self.db is None or not self.use_persisted_positions:
             return self._cache.get(mint)
 
         async with aiosqlite.connect(self.db) as conn:
@@ -123,7 +135,7 @@ class PositionManager:
         return Position.model_validate_json(row[0])
 
     async def _persist(self, position: Position) -> None:
-        if self.db is None:
+        if self.db is None or not self.persist_positions:
             return
         await record_position(self.db, position)
 
