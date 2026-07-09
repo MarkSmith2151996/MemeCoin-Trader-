@@ -110,6 +110,7 @@ class PaperCycleSummary:
         lines.extend(self.summary_table_lines())
         lines.extend(self.discovery_candidate_summary_lines())
         lines.extend(self.discovery_comparison_lines())
+        lines.extend(self.discovery_grok_prompt_lines())
         lines.extend(self.rejection_diagnostic_lines())
         return lines
 
@@ -212,6 +213,28 @@ class PaperCycleSummary:
                     note=_accepted_candidate_note(diagnostic),
                 )
             )
+        return lines
+
+    def discovery_grok_prompt_lines(self) -> list[str]:
+        if self.risk_profile != "discovery":
+            return []
+
+        candidates = sorted(
+            [*self.accepted_candidate_diagnostics, *self.rejected_candidate_diagnostics],
+            key=_candidate_sort_key,
+        )
+        if not candidates:
+            return []
+
+        lines = [
+            "Grok social check prompt (manual only):",
+            "  Review the following Solana memecoin discovery candidates using live social context only.",
+            "  Return ONLY valid JSON array entries with keys: mint, social_live_score, tweet_velocity, real_account_signal, bot_spam_risk, influencer_mentions, ticker_collision, narrative_summary, recommendation.",
+            "  This is operator-only paper-trading context. Do not assume these social checks override existing risk gates or trigger automatic buys.",
+            "  Candidates:",
+        ]
+        for diagnostic in candidates[:5]:
+            lines.append(f"  - {_grok_prompt_candidate_line(diagnostic)}")
         return lines
 
 
@@ -971,6 +994,56 @@ def _accepted_candidate_note(diagnostic: dict[str, object]) -> str:
     return "; ".join(parts) if parts else "ranked by safe passer context"
 
 
+def _grok_prompt_candidate_line(diagnostic: dict[str, object]) -> str:
+    name = _stringish(diagnostic.get("name")) or "unknown"
+    symbol = _stringish(diagnostic.get("symbol")) or "unknown"
+    mint = _stringish(diagnostic.get("mint")) or "unknown"
+    source = _stringish(diagnostic.get("source")) or "unknown"
+    source_context = _stringish(diagnostic.get("source_context_hint")) or "unknown"
+    stage_hint = _stringish(diagnostic.get("stage_hint")) or "unknown"
+    attention = f"{diagnostic.get('attention_score', 0)}/{diagnostic.get('attention_tier', 'ignore')}"
+    theme = _candidate_summary_theme(diagnostic)
+    narrative = _stringish(diagnostic.get("narrative_quality_hint")) or "unknown"
+    age = _candidate_age_display(diagnostic)
+    warning_summary = _grok_warning_summary(diagnostic)
+    return (
+        f"rank={diagnostic.get('rank', '?')}; name={name}; symbol={symbol}; mint={mint}; "
+        f"source={source}; source_context={source_context}; stage={stage_hint}; age={age}; "
+        f"attention={attention}; theme={theme}; narrative={narrative}; warnings={warning_summary}; "
+        f"wallet_cluster=pending/unavailable"
+    )
+
+
+def _candidate_age_display(diagnostic: dict[str, object]) -> str:
+    age_minutes = _coerce_numeric(diagnostic.get("token_age_minutes"))
+    if age_minutes is None:
+        return "unknown"
+    return f"{age_minutes:.2f}m"
+
+
+def _grok_warning_summary(diagnostic: dict[str, object]) -> str:
+    parts: list[str] = []
+    holder_pct = _coerce_numeric(diagnostic.get("top10_holder_pct"))
+    if holder_pct is not None:
+        parts.append(f"holder={holder_pct:.2f}%")
+    else:
+        parts.append("holder=?")
+    liquidity_sol = _coerce_numeric(diagnostic.get("selected_liquidity_sol"))
+    if liquidity_sol is not None:
+        parts.append(f"liq={liquidity_sol:.0f} SOL")
+    else:
+        parts.append("liq=?")
+    social_state = diagnostic.get("social_signal_state")
+    if social_state == "missing":
+        parts.append("social=missing")
+    warnings = diagnostic.get("main_warnings")
+    if isinstance(warnings, (list, tuple)) and warnings:
+        parts.append(f"warnings={','.join(str(item) for item in warnings[:3])}")
+    else:
+        parts.append("warnings=none")
+    return ", ".join(parts)
+
+
 def _warning_count(diagnostic: dict[str, object]) -> int:
     warnings = diagnostic.get("main_warnings")
     if isinstance(warnings, (list, tuple)):
@@ -1315,6 +1388,9 @@ def build_rejection_diagnostic_report(summary: PaperCycleSummary) -> str:
     accepted_comparison_lines = summary.discovery_comparison_lines()
     if accepted_comparison_lines:
         lines.extend(["", *accepted_comparison_lines])
+    grok_prompt_lines = summary.discovery_grok_prompt_lines()
+    if grok_prompt_lines:
+        lines.extend(["", *grok_prompt_lines])
 
     lines.extend([
         "",

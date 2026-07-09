@@ -635,3 +635,64 @@ def test_discovery_comparison_lines_surface_theme_and_holder_callouts() -> None:
     assert "clone-cluster/deep-liquidity" in output
     assert "differentiated/deep-liquidity" in output
     assert "sig=0.70x1.00" in output
+
+
+def test_build_rejection_diagnostic_report_includes_grok_prompt_export() -> None:
+    summary = cli_module.PaperCycleSummary(
+        execution_mode="paper",
+        risk_profile="discovery",
+        max_signals=5,
+        timeout_seconds=30.0,
+        signals_collected=1,
+        signals_accepted=1,
+        signals_rejected=0,
+        trades_persisted=1,
+        open_positions=1,
+        sources_polled=["pump_fun"],
+        source_signal_counts={"pump_fun": 1},
+        source_failures={},
+        composite_opportunities=0,
+        rejection_reasons={},
+        candidates_evaluated=1,
+        passed_risk_checks=1,
+        summary_rejection_reasons={},
+        source_evaluated_counts={"pump_fun": 1},
+        source_pass_counts={"pump_fun": 1},
+        holder_lookup_outcomes={},
+        termination_reason="max_signals",
+        elapsed_seconds=1.0,
+        accepted_candidate_diagnostics=[
+            {
+                "rank": 1,
+                "symbol": "fatdog",
+                "name": "Fat Dog",
+                "mint": "fatdog-mint-1111",
+                "mint_short": "Fatd...1111",
+                "source": "pump_fun",
+                "attention_score": 79,
+                "attention_tier": "strong_watch",
+                "top10_holder_pct": 49.2,
+                "top10_holder_source": "local_filtered_override",
+                "selected_liquidity_sol": 4500.0,
+                "token_age_minutes": 0.4,
+                "stage_hint": "new_pool",
+                "social_signal_state": "missing",
+                "metadata_completeness_state": "partial",
+                "main_warnings": (
+                    "age_policy:immature_warning",
+                    "creator_policy:unknown_warning",
+                ),
+                "theme_cluster_hint": "cluster:fatdog",
+                "source_context_hint": "single-source-launch",
+                "narrative_quality_hint": "clone-cluster/deep-liquidity",
+            }
+        ],
+    )
+
+    output = cli_module.build_rejection_diagnostic_report(summary)
+
+    assert "Grok social check prompt (manual only):" in output
+    assert "Return ONLY valid JSON array entries with keys: mint, social_live_score, tweet_velocity, real_account_signal, bot_spam_risk, influencer_mentions, ticker_collision, narrative_summary, recommendation." in output
+    assert "rank=1; name=Fat Dog; symbol=fatdog; mint=fatdog-mint-1111; source=pump_fun;" in output
+    assert "wallet_cluster=pending/unavailable" in output
+    assert "social=missing" in output

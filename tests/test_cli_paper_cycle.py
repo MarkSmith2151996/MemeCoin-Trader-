@@ -689,6 +689,63 @@ def test_discovery_theme_cluster_hint_allows_generic_liquidity_fallback_when_no_
     asyncio.run(run())
 
 
+def test_discovery_safe_lines_include_bounded_grok_prompt_export(tmp_path: Path) -> None:
+    async def run() -> None:
+        db_path = tmp_path / "grok-prompt.db"
+        signals: list[Signal] = []
+        for index in range(6):
+            signal = build_signal(f"grok-mint-{index}", passes=True).model_copy(
+                update={"source": SignalSourceEnum.PUMP_FUN, "type": SignalType.NEW_POOL}
+            )
+            signal.payload.update(
+                {
+                    "symbol": f"GROK{index}",
+                    "name": f"Grok Candidate {index}",
+                    "raw_provider_payload": {"secret": "should-not-appear"},
+                    "api_key": "should-not-appear",
+                    "attention_diagnostics": {
+                        "attention_score": 90 - index,
+                        "attention_tier": "strong_watch",
+                        "attention_reasons": ["launch-stage signal"],
+                        "narrative_tags": ["fresh-launch", f"theme-{index}", "pumpfun-launch"],
+                        "social_signal_state": "missing",
+                        "metadata_completeness_state": "partial",
+                    },
+                    "holder_policy": {"holder_policy_state": "pass", "stage_hint": "new_pool", "token_age_minutes": 0.2 + index},
+                    "liquidity_diagnostics": {
+                        "selected_liquidity_sol": 2500.0 + index,
+                        "liquidity_source": "signal_payload",
+                        "liquidity_data_state": "known",
+                    },
+                    "holder_diagnostics": {"selected_top10_holder_pct": 5.0 + index, "top10_holder_source": "signal_payload"},
+                }
+            )
+            signals.append(signal)
+
+        summary = await cli_module.run_bounded_paper_cycle(
+            max_signals=6,
+            timeout_seconds=0.1,
+            db_path=db_path,
+            risk_profile="discovery",
+            sources=[FakeSignalSource([signals])],
+            poll_interval_s=0.0,
+        )
+
+        joined = "\n".join(summary.safe_lines())
+
+        assert "Grok social check prompt (manual only):" in joined
+        assert "Return ONLY valid JSON array entries with keys: mint, social_live_score, tweet_velocity, real_account_signal, bot_spam_risk, influencer_mentions, ticker_collision, narrative_summary, recommendation." in joined
+        assert "name=Grok Candidate 0; symbol=GROK0; mint=grok-mint-0; source=pump_fun;" in joined
+        assert "name=Grok Candidate 4; symbol=GROK4; mint=grok-mint-4; source=pump_fun;" in joined
+        assert "name=Grok Candidate 5; symbol=GROK5; mint=grok-mint-5; source=pump_fun;" not in joined
+        assert "wallet_cluster=pending/unavailable" in joined
+        assert "social=missing" in joined
+        assert "raw_provider_payload" not in joined
+        assert "should-not-appear" not in joined
+
+    asyncio.run(run())
+
+
 def test_strict_mode_keeps_candidate_snapshot_path_inactive_for_rejected_trade_set(tmp_path: Path) -> None:
     async def run() -> None:
         db_path = tmp_path / "strict-no-snapshot.db"
