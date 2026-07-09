@@ -31,6 +31,7 @@ DEFAULT_SUBSCRIPTIONS = (
     {"method": "subscribeMigration"},
 )
 SPAM_NAME_PATTERNS = ("TEST", "AIRDROP", "FREE")
+URL_LIKE_PATTERNS = ("HTTP://", "HTTPS://", "WWW.", ".COM", "T.ME/", "DISCORD.GG/")
 CREATOR_REPEAT_WINDOW_S = 3600.0
 CREATOR_REPEAT_LIMIT = 3
 INITIAL_LIQUIDITY_FLOOR_SOL = 1.0
@@ -233,16 +234,34 @@ class PumpFunMonitor(SignalSource):
         return None
 
     def _is_spam_name_or_symbol(self, token_name: str | None, symbol: str | None) -> bool:
-        for candidate in (token_name, symbol):
+        normalized_name = token_name.strip() if isinstance(token_name, str) else ""
+        normalized_symbol = symbol.strip() if isinstance(symbol, str) else ""
+        if not normalized_name and not normalized_symbol:
+            return True
+
+        for candidate in (normalized_name, normalized_symbol):
             if not isinstance(candidate, str):
                 continue
-            normalized = candidate.strip()
-            upper = normalized.upper()
+            upper = candidate.upper()
             compact = "".join(character for character in upper if character.isalnum())
             if any(pattern in upper for pattern in SPAM_NAME_PATTERNS):
                 return True
+            if any(pattern in upper for pattern in URL_LIKE_PATTERNS):
+                return True
+            if candidate and not compact:
+                return True
             if compact and len(compact) <= 1:
                 return True
+
+        if normalized_symbol and self._looks_like_punctuated_or_placeholder_symbol(normalized_symbol):
+            return True
+        return False
+
+    def _looks_like_punctuated_or_placeholder_symbol(self, symbol: str) -> bool:
+        compact = "".join(character for character in symbol if character.isalnum())
+        punctuation_count = sum(1 for character in symbol if not character.isalnum() and not character.isspace())
+        if punctuation_count >= 2 and len(compact) <= 1:
+            return True
         return False
 
     def _creator_repeat_triggered(self, creator: str) -> bool:

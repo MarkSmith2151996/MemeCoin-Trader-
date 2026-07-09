@@ -61,3 +61,54 @@ def test_pump_fun_monitor_safely_handles_ack_and_malformed_websocket_messages() 
     assert ack_payload == {"message": "Successfully subscribed to token creation events."}
     assert monitor._payload_to_signal(ack_payload) is None
     assert malformed_payload is None
+
+
+def test_pump_fun_monitor_rejects_obvious_junk_launch_identity() -> None:
+    monitor = PumpFunMonitor(websocket_url=None)
+
+    missing_identity_payload = {
+        "mint": "Junk111111111111111111111111111111111111pump",
+        "txType": "create",
+        "pool": "pump",
+        "name": "   ",
+        "symbol": "   ",
+        "signature": "junk-sig-1",
+    }
+    url_symbol_payload = {
+        "mint": "Junk222222222222222222222222222222222222pump",
+        "txType": "create",
+        "pool": "pump",
+        "name": "real enough",
+        "symbol": "https://spam.example",
+        "signature": "junk-sig-2",
+    }
+    punctuated_symbol_payload = {
+        "mint": "Junk333333333333333333333333333333333333pump",
+        "txType": "create",
+        "pool": "pump",
+        "name": "normal name",
+        "symbol": "$-$",
+        "signature": "junk-sig-3",
+    }
+
+    assert monitor._payload_to_signal(missing_identity_payload) is None
+    assert monitor._payload_to_signal(url_symbol_payload) is None
+    assert monitor._payload_to_signal(punctuated_symbol_payload) is None
+
+
+def test_pump_fun_monitor_keeps_quirky_but_usable_identity() -> None:
+    payload = {
+        "mint": "Safe111111111111111111111111111111111111pump",
+        "txType": "create",
+        "pool": "pump",
+        "name": "cat.wif.laser",
+        "symbol": "LASR",
+        "signature": "safe-sig-1",
+    }
+
+    signal = PumpFunMonitor(websocket_url=None)._payload_to_signal(payload)
+
+    assert signal is not None
+    assert signal.source == SignalSourceEnum.PUMP_FUN
+    assert signal.type == SignalType.NEW_POOL
+    assert signal.mint_address == payload["mint"]
