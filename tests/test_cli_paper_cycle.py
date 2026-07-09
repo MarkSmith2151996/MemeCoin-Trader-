@@ -589,6 +589,7 @@ def test_discovery_cli_safe_lines_include_ranked_candidate_summary(tmp_path: Pat
         assert "capacity-blocked" in joined
         assert "pumpfun-launch" in joined
         assert "partial" in joined
+        assert "Accepted discovery comparison:" in joined
 
     asyncio.run(run())
 

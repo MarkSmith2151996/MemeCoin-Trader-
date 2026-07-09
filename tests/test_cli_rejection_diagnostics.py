@@ -416,3 +416,134 @@ def test_discovery_candidate_summary_lines_stay_safe_without_raw_payloads() -> N
     assert "do-not-print" not in output
     assert "WalletSecret111" not in output
     assert "raw_data" not in output
+
+
+def test_discovery_comparison_lines_differentiate_same_score_passers() -> None:
+    summary = cli_module.PaperCycleSummary(
+        execution_mode="paper",
+        risk_profile="discovery",
+        max_signals=2,
+        timeout_seconds=60.0,
+        signals_collected=2,
+        signals_accepted=2,
+        signals_rejected=0,
+        trades_persisted=2,
+        open_positions=2,
+        sources_polled=["pump_fun"],
+        source_signal_counts={"pump_fun": 2},
+        source_failures={},
+        composite_opportunities=0,
+        rejection_reasons={},
+        candidates_evaluated=2,
+        passed_risk_checks=2,
+        summary_rejection_reasons={},
+        source_evaluated_counts={"pump_fun": 2},
+        source_pass_counts={"pump_fun": 2},
+        holder_lookup_outcomes={},
+        termination_reason="max_signals",
+        elapsed_seconds=1.0,
+        accepted_candidate_diagnostics=[
+            {
+                "rank": 1,
+                "symbol": "EDGE",
+                "mint_short": "Edge...1111",
+                "attention_score": 79,
+                "attention_tier": "strong_watch",
+                "top10_holder_pct": 49.2,
+                "top10_holder_source": "local_filtered_override",
+                "selected_liquidity_sol": 4500.0,
+                "token_age_minutes": 0.4,
+                "social_signal_state": "missing",
+                "metadata_completeness_state": "partial",
+                "main_warnings": (
+                    "age_policy:immature_warning",
+                    "creator_policy:unknown_warning",
+                    "unique_buyers_policy:unknown_warning",
+                    "authority_policy:unknown_warning",
+                    "honeypot_policy:unknown_warning",
+                ),
+            },
+            {
+                "rank": 2,
+                "symbol": "CLEAN",
+                "mint_short": "Clea...2222",
+                "attention_score": 79,
+                "attention_tier": "strong_watch",
+                "top10_holder_pct": 4.2,
+                "top10_holder_source": "local_filtered_override",
+                "selected_liquidity_sol": 3200.0,
+                "token_age_minutes": 0.5,
+                "social_signal_state": "missing",
+                "metadata_completeness_state": "partial",
+                "main_warnings": (
+                    "age_policy:immature_warning",
+                    "creator_policy:unknown_warning",
+                ),
+            },
+        ],
+    )
+
+    lines = summary.discovery_comparison_lines()
+
+    assert lines[0] == "Accepted discovery comparison:"
+    assert "diff" in lines[1]
+    assert "CLEAN" in lines[2]
+    assert "warn=2" in lines[2]
+    assert "holder=4.20%" in lines[2]
+    assert "clean holder profile" in lines[2]
+    assert "EDGE" in lines[3]
+    assert "warn=5" in lines[3]
+    assert "holder=49.20%" in lines[3]
+    assert "near holder cutoff" in lines[3]
+
+
+def test_discovery_comparison_lines_stay_safe_without_raw_payloads() -> None:
+    summary = cli_module.PaperCycleSummary(
+        execution_mode="paper",
+        risk_profile="discovery",
+        max_signals=1,
+        timeout_seconds=60.0,
+        signals_collected=1,
+        signals_accepted=1,
+        signals_rejected=0,
+        trades_persisted=1,
+        open_positions=1,
+        sources_polled=["pump_fun"],
+        source_signal_counts={"pump_fun": 1},
+        source_failures={},
+        composite_opportunities=0,
+        rejection_reasons={},
+        candidates_evaluated=1,
+        passed_risk_checks=1,
+        summary_rejection_reasons={},
+        source_evaluated_counts={"pump_fun": 1},
+        source_pass_counts={"pump_fun": 1},
+        holder_lookup_outcomes={},
+        termination_reason="max_signals",
+        elapsed_seconds=1.0,
+        accepted_candidate_diagnostics=[
+            {
+                "rank": 1,
+                "symbol": "SAFE",
+                "mint_short": "Safe...1111",
+                "attention_score": 79,
+                "attention_tier": "strong_watch",
+                "top10_holder_pct": 12.0,
+                "top10_holder_source": "signal_payload",
+                "selected_liquidity_sol": 3000.0,
+                "token_age_minutes": 0.2,
+                "social_signal_state": "missing",
+                "metadata_completeness_state": "partial",
+                "main_warnings": ("creator_policy:unknown_warning",),
+                "raw_data": {"secret": "do-not-print"},
+                "buyerWallets": ["WalletSecret111"],
+            }
+        ],
+    )
+
+    output = "\n".join(summary.discovery_comparison_lines())
+
+    assert "SAFE" in output
+    assert "do-not-print" not in output
+    assert "WalletSecret111" not in output
+    assert "raw_data" not in output

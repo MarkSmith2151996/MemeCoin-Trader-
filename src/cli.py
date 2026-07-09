@@ -109,6 +109,7 @@ class PaperCycleSummary:
             lines.extend(f"  {reason}={count}" for reason, count in self.holder_lookup_outcomes.items())
         lines.extend(self.summary_table_lines())
         lines.extend(self.discovery_candidate_summary_lines())
+        lines.extend(self.discovery_comparison_lines())
         lines.extend(self.rejection_diagnostic_lines())
         return lines
 
@@ -189,6 +190,26 @@ class PaperCycleSummary:
                     reason=_candidate_summary_reason(diagnostic),
                     tags=_candidate_summary_tags(diagnostic),
                     meta=diagnostic.get("metadata_completeness_state", "unknown"),
+                )
+            )
+        return lines
+
+    def discovery_comparison_lines(self) -> list[str]:
+        if self.risk_profile != "discovery" or not self.accepted_candidate_diagnostics:
+            return []
+
+        candidates = sorted(self.accepted_candidate_diagnostics, key=_accepted_candidate_sort_key)
+        lines = ["Accepted discovery comparison:"]
+        lines.append("  # | symbol | mint | attn | diff | note")
+        for diagnostic in candidates[:5]:
+            lines.append(
+                "  {rank} | {symbol} | {mint_short} | {attn} | {diff} | {note}".format(
+                    rank=diagnostic.get("rank", "?"),
+                    symbol=diagnostic.get("symbol", "unknown"),
+                    mint_short=diagnostic.get("mint_short", "unknown"),
+                    attn=f"{diagnostic.get('attention_score', 0)}/{diagnostic.get('attention_tier', 'ignore')}",
+                    diff=_accepted_candidate_diff(diagnostic),
+                    note=_accepted_candidate_note(diagnostic),
                 )
             )
         return lines
@@ -819,6 +840,79 @@ def _candidate_summary_tags(diagnostic: dict[str, object]) -> str:
     return "none"
 
 
+def _accepted_candidate_sort_key(diagnostic: dict[str, object]) -> tuple[int, int, float, int, int]:
+    holder_pct = _coerce_numeric(diagnostic.get("top10_holder_pct"))
+    liquidity_sol = _coerce_numeric(diagnostic.get("selected_liquidity_sol"))
+    warning_count = _warning_count(diagnostic)
+    return (
+        -int(diagnostic.get("attention_score", 0) if isinstance(diagnostic.get("attention_score"), (int, float)) else 0),
+        warning_count,
+        holder_pct if holder_pct is not None else 10_000.0,
+        -int(liquidity_sol) if liquidity_sol is not None else 0,
+        int(diagnostic.get("rank", 10_000) if isinstance(diagnostic.get("rank"), int) else 10_000),
+    )
+
+
+def _accepted_candidate_diff(diagnostic: dict[str, object]) -> str:
+    liquidity_sol = _coerce_numeric(diagnostic.get("selected_liquidity_sol"))
+    holder_pct = _coerce_numeric(diagnostic.get("top10_holder_pct"))
+    age_minutes = _coerce_numeric(diagnostic.get("token_age_minutes"))
+    warning_count = _warning_count(diagnostic)
+    social_state = diagnostic.get("social_signal_state", "unknown")
+    meta_state = diagnostic.get("metadata_completeness_state", "unknown")
+    parts = [f"warn={warning_count}"]
+    if holder_pct is not None:
+        parts.append(f"holder={holder_pct:.2f}%")
+    else:
+        parts.append("holder=?")
+    if liquidity_sol is not None:
+        parts.append(f"liq={liquidity_sol:.0f}")
+    else:
+        parts.append("liq=?")
+    if age_minutes is not None:
+        parts.append(f"age={age_minutes:.2f}m")
+    else:
+        parts.append("age=?")
+    parts.append(f"social={social_state}")
+    parts.append(f"meta={meta_state}")
+    return ", ".join(parts)
+
+
+def _accepted_candidate_note(diagnostic: dict[str, object]) -> str:
+    holder_pct = _coerce_numeric(diagnostic.get("top10_holder_pct"))
+    holder_source = diagnostic.get("top10_holder_source", "unknown")
+    warning_count = _warning_count(diagnostic)
+    meta_state = diagnostic.get("metadata_completeness_state", "unknown")
+    parts: list[str] = []
+    if holder_pct is not None and holder_pct >= 45.0:
+        parts.append(f"near holder cutoff via {holder_source}")
+    elif holder_pct is not None and holder_pct < 10.0:
+        parts.append(f"clean holder profile via {holder_source}")
+    if warning_count <= 2:
+        parts.append("lighter warning stack")
+    elif warning_count >= 5:
+        parts.append("warning-heavy but passed")
+    if meta_state == "partial":
+        parts.append("metadata still partial")
+    social_state = diagnostic.get("social_signal_state")
+    if social_state == "missing":
+        parts.append("social still missing")
+    return "; ".join(parts) if parts else "ranked by safe passer context"
+
+
+def _warning_count(diagnostic: dict[str, object]) -> int:
+    warnings = diagnostic.get("main_warnings")
+    if isinstance(warnings, (list, tuple)):
+        return sum(1 for item in warnings if isinstance(item, str) and item)
+    return 0
+
+
+def _coerce_numeric(value: object) -> float | None:
+    if isinstance(value, (int, float)):
+        return float(value)
+    return None
+
+
 def _check_result_value(record: RejectionRecord | None, field_name: str) -> str | None:
     if record is None:
         return None
@@ -1008,6 +1102,9 @@ def build_rejection_diagnostic_report(summary: PaperCycleSummary) -> str:
     discovery_summary_lines = summary.discovery_candidate_summary_lines()
     if discovery_summary_lines:
         lines.extend(["", *discovery_summary_lines])
+    accepted_comparison_lines = summary.discovery_comparison_lines()
+    if accepted_comparison_lines:
+        lines.extend(["", *accepted_comparison_lines])
 
     lines.extend([
         "",
