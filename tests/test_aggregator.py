@@ -200,6 +200,55 @@ def test_single_source_signal_passes_through_unmodified_strength() -> None:
     asyncio.run(run())
 
 
+def test_pump_fun_promotional_identity_adds_ranking_context_without_rejecting_signal() -> None:
+    async def run() -> None:
+        original = build_signal(
+            mint="mint-weak-identity",
+            source=SignalSourceEnum.PUMP_FUN,
+            confidence=0.7,
+            observed_at=BASE_TIME,
+        )
+        original.payload.update(
+            {
+                "name": "READ INSANE FOLLOWERS",
+                "symbol": "HORDE",
+                "attention_diagnostics": {"metadata_completeness_state": "partial"},
+            }
+        )
+        aggregator = SignalAggregator([FakeSource("pump_fun", [original])])
+
+        ranked = await aggregator.poll_all()
+
+        assert len(ranked) == 1
+        context = ranked[0].payload.get("pump_fun_identity_context")
+        assert isinstance(context, dict)
+        assert context["weak_identity_name"] is True
+        assert "partial_metadata" in context["reasons"]
+        assert "weak_identity" in context["reasons"]
+        assert ranked[0].confidence == original.confidence
+        assert ranked[0].weight == original.weight
+
+    asyncio.run(run())
+
+
+def test_non_pump_fun_signal_does_not_receive_pump_fun_identity_context() -> None:
+    async def run() -> None:
+        signal = build_signal(
+            mint="mint-onchain",
+            source=SignalSourceEnum.ONCHAIN,
+            confidence=0.7,
+            observed_at=BASE_TIME,
+        )
+        aggregator = SignalAggregator([FakeSource("onchain", [signal])])
+
+        ranked = await aggregator.poll_all()
+
+        assert len(ranked) == 1
+        assert "pump_fun_identity_context" not in ranked[0].payload
+
+    asyncio.run(run())
+
+
 def test_empty_source_list_returns_empty_list() -> None:
     async def run() -> None:
         aggregator = SignalAggregator([])

@@ -17,6 +17,22 @@ from src.core.models import Signal
 from src.signals.base import SignalSource
 
 
+PROMOTIONAL_IDENTITY_TOKENS = {
+    "alert",
+    "ape",
+    "buy",
+    "follow",
+    "followers",
+    "join",
+    "moon",
+    "now",
+    "pump",
+    "raid",
+    "read",
+    "send",
+}
+
+
 class SignalAggregator:
     def __init__(
         self,
@@ -139,7 +155,17 @@ class SignalAggregator:
         if current_cluster:
             clusters.append(current_cluster)
 
-        return [self._composite_signal(cluster) for cluster in clusters]
+        return [self._decorate_cluster_signal(cluster) for cluster in clusters]
+
+    def _decorate_cluster_signal(self, cluster: list[Signal]) -> Signal:
+        signal = self._composite_signal(cluster) if len(cluster) > 1 else cluster[0]
+        context = self._pump_fun_identity_context(cluster)
+        if context is None:
+            return signal
+
+        payload = dict(signal.payload) if isinstance(signal.payload, dict) else {}
+        payload["pump_fun_identity_context"] = context
+        return signal.model_copy(update={"payload": payload})
 
     def _composite_signal(self, cluster: list[Signal]) -> Signal:
         if len(cluster) == 1:
@@ -190,10 +216,85 @@ class SignalAggregator:
         )
 
     def _composite_sort_key(self, signal: Signal) -> tuple[float, float]:
-        return (self._signal_score(signal), signal.observed_at.timestamp())
+        penalty_points = self._ranking_penalty_points(signal)
+        adjusted_score = max(self._signal_score(signal) - penalty_points, 0.0)
+        return (adjusted_score, signal.observed_at.timestamp())
 
     def _signal_score(self, signal: Signal) -> float:
         return min(signal.confidence * signal.weight, 1.0)
+
+    def _ranking_penalty_points(self, signal: Signal) -> float:
+        payload = signal.payload if isinstance(signal.payload, dict) else {}
+        context = payload.get("pump_fun_identity_context")
+        if not isinstance(context, dict):
+            return 0.0
+        penalty_points = context.get("ranking_penalty_points")
+        if isinstance(penalty_points, (int, float)):
+            return max(0.0, min(float(penalty_points), 0.12))
+        return 0.0
+
+    def _pump_fun_identity_context(self, cluster: list[Signal]) -> dict[str, object] | None:
+        pump_payloads = [
+            signal.payload
+            for signal in cluster
+            if signal.source.value == "PUMP_FUN" and isinstance(signal.payload, dict)
+        ]
+        if not pump_payloads:
+            return None
+
+        metadata_state = "rich"
+        weak_identity_name = False
+        reasons: list[str] = []
+        for payload in pump_payloads:
+            attention_diagnostics = payload.get("attention_diagnostics")
+            if isinstance(attention_diagnostics, dict):
+                candidate_state = attention_diagnostics.get("metadata_completeness_state")
+                if candidate_state == "sparse":
+                    metadata_state = "sparse"
+                elif candidate_state == "partial" and metadata_state != "sparse":
+                    metadata_state = "partial"
+            if self._looks_promotional_identity(payload):
+                weak_identity_name = True
+
+        if metadata_state == "partial":
+            reasons.append("partial_metadata")
+        elif metadata_state == "sparse":
+            reasons.append("sparse_metadata")
+        if weak_identity_name:
+            reasons.append("weak_identity")
+
+        penalty_points = 0.0
+        if metadata_state == "partial":
+            penalty_points += 0.03
+        elif metadata_state == "sparse":
+            penalty_points += 0.06
+        if weak_identity_name:
+            penalty_points += 0.06
+
+        return {
+            "has_pump_fun": True,
+            "metadata_state": metadata_state,
+            "weak_identity_name": weak_identity_name,
+            "reasons": reasons,
+            "ranking_penalty_points": round(min(penalty_points, 0.12), 6),
+        }
+
+    def _looks_promotional_identity(self, payload: dict[str, object]) -> bool:
+        for field_name in ("name", "symbol", "ticker"):
+            value = payload.get(field_name)
+            if not isinstance(value, str) or not value.strip():
+                continue
+            tokens = [
+                token.lower()
+                for token in "".join(character if character.isalnum() else " " for character in value).split()
+                if token
+            ]
+            if len(tokens) < 2:
+                continue
+            promotional_hits = sum(1 for token in tokens if token in PROMOTIONAL_IDENTITY_TOKENS)
+            if promotional_hits >= 2:
+                return True
+        return False
 
     def _aggregate_social_credibility(self, signals: Iterable[Signal]) -> dict[str, object] | None:
         author_tiers: dict[str, str] = {}

@@ -150,7 +150,7 @@ class PaperCycleSummary:
                     mint_short=diagnostic.get("mint_short", "unknown"),
                     source=diagnostic.get("source", "unknown"),
                     failed_check=diagnostic.get("failed_check", "unknown"),
-                    attn=f"{diagnostic.get('attention_score', 0)}/{diagnostic.get('attention_tier', 'ignore')}",
+                    attn=_candidate_attention_display(diagnostic),
                     holder_policy=diagnostic.get("holder_policy_state", "unknown"),
                     age_policy=diagnostic.get("age_policy_state", "unknown"),
                     creator_policy=diagnostic.get("creator_policy_state", "unknown"),
@@ -186,7 +186,7 @@ class PaperCycleSummary:
                     symbol=diagnostic.get("symbol", "unknown"),
                     mint_short=diagnostic.get("mint_short", "unknown"),
                     source=diagnostic.get("source", "unknown"),
-                    attn=f"{diagnostic.get('attention_score', 0)}/{diagnostic.get('attention_tier', 'ignore')}",
+                    attn=_candidate_attention_display(diagnostic),
                     outcome=diagnostic.get("action_outcome", diagnostic.get("decision", "unknown")),
                     reason=_candidate_summary_reason(diagnostic),
                     theme=_candidate_summary_theme(diagnostic),
@@ -208,7 +208,7 @@ class PaperCycleSummary:
                     rank=diagnostic.get("rank", "?"),
                     symbol=diagnostic.get("symbol", "unknown"),
                     mint_short=diagnostic.get("mint_short", "unknown"),
-                    attn=f"{diagnostic.get('attention_score', 0)}/{diagnostic.get('attention_tier', 'ignore')}",
+                    attn=_candidate_attention_display(diagnostic),
                     diff=_accepted_candidate_diff(diagnostic),
                     note=_accepted_candidate_note(diagnostic),
                 )
@@ -446,6 +446,10 @@ async def run_bounded_paper_cycle(
         accepted_candidate_diagnostics,
         rejected_candidate_diagnostics,
     )
+    accepted_candidate_diagnostics, rejected_candidate_diagnostics = _apply_discovery_ranking_penalties(
+        accepted_candidate_diagnostics,
+        rejected_candidate_diagnostics,
+    )
     if normalized_risk_profile == "discovery":
         for diagnostic in accepted_candidate_diagnostics:
             trade_id = diagnostic.get("trade_id")
@@ -673,6 +677,7 @@ def _build_rejected_candidate_diagnostic(
         "social_hint": _social_hint(social),
         "attention_hints": attention_hints,
         "creator_repeat_flag": bool(payload.get("creator_repeat_flag")),
+        "pump_fun_identity_context": payload.get("pump_fun_identity_context") if isinstance(payload.get("pump_fun_identity_context"), dict) else {},
         "source_count": payload.get("source_count"),
         "sources": tuple(payload.get("sources", ())) if isinstance(payload.get("sources"), list) else tuple(payload.get("sources", ())) if isinstance(payload.get("sources"), tuple) else (),
         "main_warnings": _main_warnings(
@@ -767,6 +772,7 @@ def _build_accepted_candidate_diagnostic(
             risk_reasons=risk_reasons,
         ),
         "attention_hints": _attention_hints(payload, social=social, market_cap=market_cap, volume=volume, buy_sell=buy_sell),
+        "pump_fun_identity_context": payload.get("pump_fun_identity_context") if isinstance(payload.get("pump_fun_identity_context"), dict) else {},
         "source_count": payload.get("source_count"),
         "sources": tuple(payload.get("sources", ())) if isinstance(payload.get("sources"), list) else tuple(payload.get("sources", ())) if isinstance(payload.get("sources"), tuple) else (),
     }
@@ -875,9 +881,67 @@ def _apply_candidate_narrative_hints(
     return [enrich(item) for item in accepted], [enrich(item) for item in rejected]
 
 
+def _apply_discovery_ranking_penalties(
+    accepted: list[dict[str, object]],
+    rejected: list[dict[str, object]],
+) -> tuple[list[dict[str, object]], list[dict[str, object]]]:
+    def enrich(diagnostic: dict[str, object]) -> dict[str, object]:
+        penalty_points, reasons = _discovery_ranking_penalty(diagnostic)
+        base_attention = diagnostic.get("attention_score", 0)
+        attention_score = int(base_attention) if isinstance(base_attention, (int, float)) else 0
+        return {
+            **diagnostic,
+            "ranking_penalty_points": penalty_points,
+            "ranking_penalty_reasons": reasons,
+            "ranking_attention_score": max(attention_score - penalty_points, 0),
+        }
+
+    return [enrich(item) for item in accepted], [enrich(item) for item in rejected]
+
+
+def _discovery_ranking_penalty(diagnostic: dict[str, object]) -> tuple[int, tuple[str, ...]]:
+    identity_context = diagnostic.get("pump_fun_identity_context")
+    if not isinstance(identity_context, dict) or not identity_context.get("has_pump_fun"):
+        return 0, ()
+
+    points = 0
+    reasons: list[str] = []
+    source_context = diagnostic.get("source_context_hint")
+    single_source_launch = source_context == "single-source-launch"
+    name_quality = diagnostic.get("name_quality_hint")
+    theme_hint = diagnostic.get("theme_cluster_hint")
+
+    if name_quality == "generic-clone-like":
+        points += 4
+        reasons.append("clone_cluster")
+    elif name_quality == "theme-repeated":
+        points += 3
+        reasons.append("repeated_theme")
+
+    if single_source_launch and theme_hint == "cluster:liquid":
+        points += 2
+        reasons.append("generic_theme")
+
+    metadata_state = identity_context.get("metadata_state")
+    if metadata_state == "sparse":
+        points += 4
+        reasons.append("sparse_metadata")
+    elif metadata_state == "partial" and single_source_launch:
+        points += 2
+        reasons.append("partial_metadata")
+
+    if identity_context.get("weak_identity_name"):
+        points += 4
+        reasons.append("weak_identity")
+
+    bounded_points = min(points, 8)
+    return bounded_points, tuple(dict.fromkeys(reasons))
+
+
 def _candidate_sort_key(diagnostic: dict[str, object]) -> tuple[int, int, int]:
+    ranking_attention = diagnostic.get("ranking_attention_score", diagnostic.get("attention_score", 0))
     return (
-        -int(diagnostic.get("attention_score", 0) if isinstance(diagnostic.get("attention_score"), (int, float)) else 0),
+        -int(ranking_attention if isinstance(ranking_attention, (int, float)) else 0),
         -_attention_tier_rank(diagnostic.get("attention_tier")),
         int(diagnostic.get("rank", 10_000) if isinstance(diagnostic.get("rank"), int) else 10_000),
     )
@@ -928,8 +992,9 @@ def _accepted_candidate_sort_key(diagnostic: dict[str, object]) -> tuple[int, in
     holder_pct = _coerce_numeric(diagnostic.get("top10_holder_pct"))
     liquidity_sol = _coerce_numeric(diagnostic.get("selected_liquidity_sol"))
     warning_count = _warning_count(diagnostic)
+    ranking_attention = diagnostic.get("ranking_attention_score", diagnostic.get("attention_score", 0))
     return (
-        -int(diagnostic.get("attention_score", 0) if isinstance(diagnostic.get("attention_score"), (int, float)) else 0),
+        -int(ranking_attention if isinstance(ranking_attention, (int, float)) else 0),
         warning_count,
         holder_pct if holder_pct is not None else 10_000.0,
         -int(liquidity_sol) if liquidity_sol is not None else 0,
@@ -966,6 +1031,13 @@ def _accepted_candidate_diff(diagnostic: dict[str, object]) -> str:
     weight = _coerce_numeric(diagnostic.get("weight"))
     if confidence is not None and weight is not None:
         parts.append(f"sig={confidence:.2f}x{weight:.2f}")
+    penalty_points = diagnostic.get("ranking_penalty_points")
+    penalty_reasons = diagnostic.get("ranking_penalty_reasons")
+    if isinstance(penalty_points, int) and penalty_points > 0:
+        if isinstance(penalty_reasons, (list, tuple)) and penalty_reasons:
+            parts.append(f"pen={penalty_points}:{'+'.join(str(item) for item in penalty_reasons)}")
+        else:
+            parts.append(f"pen={penalty_points}")
     return ", ".join(parts)
 
 
@@ -991,6 +1063,9 @@ def _accepted_candidate_note(diagnostic: dict[str, object]) -> str:
     narrative_quality = diagnostic.get("narrative_quality_hint")
     if isinstance(narrative_quality, str) and narrative_quality:
         parts.append(f"narrative={narrative_quality}")
+    penalty_reasons = diagnostic.get("ranking_penalty_reasons")
+    if isinstance(penalty_reasons, (list, tuple)) and penalty_reasons:
+        parts.append(f"rank-penalty={'+'.join(str(item) for item in penalty_reasons)}")
     return "; ".join(parts) if parts else "ranked by safe passer context"
 
 
@@ -1001,7 +1076,7 @@ def _grok_prompt_candidate_line(diagnostic: dict[str, object]) -> str:
     source = _stringish(diagnostic.get("source")) or "unknown"
     source_context = _stringish(diagnostic.get("source_context_hint")) or "unknown"
     stage_hint = _stringish(diagnostic.get("stage_hint")) or "unknown"
-    attention = f"{diagnostic.get('attention_score', 0)}/{diagnostic.get('attention_tier', 'ignore')}"
+    attention = _candidate_attention_display(diagnostic)
     theme = _candidate_summary_theme(diagnostic)
     narrative = _stringish(diagnostic.get("narrative_quality_hint")) or "unknown"
     age = _candidate_age_display(diagnostic)
@@ -1049,6 +1124,18 @@ def _warning_count(diagnostic: dict[str, object]) -> int:
     if isinstance(warnings, (list, tuple)):
         return sum(1 for item in warnings if isinstance(item, str) and item)
     return 0
+
+
+def _candidate_attention_display(diagnostic: dict[str, object]) -> str:
+    attention_score = diagnostic.get("ranking_attention_score", diagnostic.get("attention_score", 0))
+    if not isinstance(attention_score, (int, float)):
+        attention_score = 0
+    base_attention = diagnostic.get("attention_score", 0)
+    penalty_points = diagnostic.get("ranking_penalty_points", 0)
+    suffix = ""
+    if isinstance(base_attention, (int, float)) and isinstance(penalty_points, int) and penalty_points > 0:
+        suffix = f"(-{penalty_points})"
+    return f"{int(attention_score)}/{diagnostic.get('attention_tier', 'ignore')}{suffix}"
 
 
 def _coerce_numeric(value: object) -> float | None:

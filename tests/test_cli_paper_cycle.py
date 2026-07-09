@@ -689,6 +689,173 @@ def test_discovery_theme_cluster_hint_allows_generic_liquidity_fallback_when_no_
     asyncio.run(run())
 
 
+def test_discovery_ranking_penalty_demotes_weaker_pump_fun_identity_without_rejecting_it(tmp_path: Path) -> None:
+    async def run() -> None:
+        db_path = tmp_path / "weak-identity-ranking.db"
+        weak = build_signal("weak-pump", passes=True).model_copy(update={"source": SignalSourceEnum.PUMP_FUN, "type": SignalType.NEW_POOL})
+        clean = build_signal("clean-pump", passes=True).model_copy(update={"source": SignalSourceEnum.PUMP_FUN, "type": SignalType.NEW_POOL})
+        for signal, symbol, name, liquidity in (
+            (weak, "fatdog", "READ INSANE FOLLOWERS", 3300.0),
+            (clean, "nebulon", "Nebulon", 3200.0),
+        ):
+            signal.payload.update(
+                {
+                    "symbol": symbol,
+                    "name": name,
+                    "attention_diagnostics": {
+                        "attention_score": 79,
+                        "attention_tier": "strong_watch",
+                        "attention_reasons": ["launch-stage signal"],
+                        "narrative_tags": ["fresh-launch", "pumpfun", "pumpfun-launch"],
+                        "social_signal_state": "missing",
+                        "metadata_completeness_state": "partial",
+                    },
+                    "holder_policy": {"holder_policy_state": "pass", "stage_hint": "new_pool", "token_age_minutes": 0.2},
+                    "liquidity_diagnostics": {"selected_liquidity_sol": liquidity, "liquidity_source": "signal_payload", "liquidity_data_state": "known"},
+                    "holder_diagnostics": {"selected_top10_holder_pct": 5.0, "top10_holder_source": "signal_payload"},
+                }
+            )
+
+        summary = await cli_module.run_bounded_paper_cycle(
+            max_signals=2,
+            timeout_seconds=0.1,
+            db_path=db_path,
+            risk_profile="discovery",
+            sources=[FakeSignalSource([[weak, clean]])],
+            poll_interval_s=0.0,
+        )
+
+        ranked = sorted(summary.accepted_candidate_diagnostics, key=cli_module._accepted_candidate_sort_key)
+
+        assert summary.signals_accepted == 2
+        assert ranked[0]["symbol"] == "nebulon"
+        assert ranked[1]["symbol"] == "fatdog"
+        assert ranked[1]["ranking_penalty_points"] > 0
+        assert "weak_identity" in ranked[1]["ranking_penalty_reasons"]
+        assert ranked[1]["ranking_attention_score"] < ranked[1]["attention_score"]
+
+    asyncio.run(run())
+
+
+def test_discovery_ranking_penalty_does_not_bury_strong_multi_source_candidate_for_partial_pump_metadata(tmp_path: Path) -> None:
+    async def run() -> None:
+        db_path = tmp_path / "multi-source-partial-metadata.db"
+        pump_leg = build_signal("shared-mint", passes=True).model_copy(update={"source": SignalSourceEnum.PUMP_FUN, "type": SignalType.NEW_POOL})
+        onchain_leg = build_signal("shared-mint", passes=True).model_copy(update={"source": SignalSourceEnum.ONCHAIN, "type": SignalType.BUY})
+        standalone = build_signal("standalone-pump", passes=True).model_copy(update={"source": SignalSourceEnum.PUMP_FUN, "type": SignalType.NEW_POOL})
+
+        pump_leg.payload.update(
+            {
+                "symbol": "ALPHA",
+                "name": "Alpha",
+                "attention_diagnostics": {
+                    "metadata_completeness_state": "partial",
+                    "attention_score": 75,
+                    "attention_tier": "strong_watch",
+                    "attention_reasons": ["launch-stage signal"],
+                    "narrative_tags": ["fresh-launch", "pumpfun", "pumpfun-launch"],
+                    "social_signal_state": "missing",
+                },
+                "holder_policy": {"holder_policy_state": "pass", "stage_hint": "new_pool", "token_age_minutes": 0.2},
+                "liquidity_diagnostics": {"selected_liquidity_sol": 3000.0, "liquidity_source": "signal_payload", "liquidity_data_state": "known"},
+                "holder_diagnostics": {"selected_top10_holder_pct": 5.0, "top10_holder_source": "signal_payload"},
+            }
+        )
+        onchain_leg.payload.update(
+            {
+                "symbol": "ALPHA",
+                "name": "Alpha",
+                "attention_diagnostics": {
+                    "metadata_completeness_state": "rich",
+                    "attention_score": 75,
+                    "attention_tier": "strong_watch",
+                    "attention_reasons": ["onchain confirmation"],
+                    "narrative_tags": ["momentum"],
+                    "social_signal_state": "missing",
+                },
+                "holder_policy": {"holder_policy_state": "pass", "stage_hint": "new_pool", "token_age_minutes": 0.3},
+                "liquidity_diagnostics": {"selected_liquidity_sol": 3200.0, "liquidity_source": "signal_payload", "liquidity_data_state": "known"},
+                "holder_diagnostics": {"selected_top10_holder_pct": 4.0, "top10_holder_source": "signal_payload"},
+            }
+        )
+        standalone.payload.update(
+            {
+                "symbol": "BETA",
+                "name": "Beta",
+                "attention_diagnostics": {
+                    "metadata_completeness_state": "partial",
+                    "attention_score": 74,
+                    "attention_tier": "strong_watch",
+                    "attention_reasons": ["launch-stage signal"],
+                    "narrative_tags": ["fresh-launch", "pumpfun", "pumpfun-launch"],
+                    "social_signal_state": "missing",
+                },
+                "holder_policy": {"holder_policy_state": "pass", "stage_hint": "new_pool", "token_age_minutes": 0.2},
+                "liquidity_diagnostics": {"selected_liquidity_sol": 3100.0, "liquidity_source": "signal_payload", "liquidity_data_state": "known"},
+                "holder_diagnostics": {"selected_top10_holder_pct": 5.0, "top10_holder_source": "signal_payload"},
+            }
+        )
+
+        summary = await cli_module.run_bounded_paper_cycle(
+            max_signals=2,
+            timeout_seconds=0.1,
+            db_path=db_path,
+            risk_profile="discovery",
+            sources=[FakeSignalSource([[pump_leg, onchain_leg, standalone]])],
+            poll_interval_s=0.0,
+        )
+
+        ranked = sorted(summary.accepted_candidate_diagnostics, key=cli_module._accepted_candidate_sort_key)
+        alpha = next(item for item in ranked if item["symbol"] == "ALPHA")
+
+        assert ranked[0]["symbol"] == "ALPHA"
+        assert summary.composite_opportunities == 1
+        assert alpha["source_context_hint"] == "multi-source:2"
+        assert alpha["ranking_penalty_points"] < 8
+        assert "partial_metadata" not in alpha["ranking_penalty_reasons"]
+
+    asyncio.run(run())
+
+
+def test_discovery_ranking_penalty_does_not_apply_to_non_pump_fun_candidates(tmp_path: Path) -> None:
+    async def run() -> None:
+        db_path = tmp_path / "non-pump-no-penalty.db"
+        onchain = build_signal("onchain-only", passes=True).model_copy(update={"source": SignalSourceEnum.ONCHAIN, "type": SignalType.BUY})
+        onchain.payload.update(
+            {
+                "symbol": "WATCH",
+                "name": "Watch",
+                "attention_diagnostics": {
+                    "attention_score": 70,
+                    "attention_tier": "candidate",
+                    "attention_reasons": ["momentum signal"],
+                    "narrative_tags": ["momentum"],
+                    "social_signal_state": "missing",
+                    "metadata_completeness_state": "partial",
+                },
+                "holder_policy": {"holder_policy_state": "pass", "stage_hint": "unknown", "token_age_minutes": 2.0},
+                "liquidity_diagnostics": {"selected_liquidity_sol": 2500.0, "liquidity_source": "signal_payload", "liquidity_data_state": "known"},
+                "holder_diagnostics": {"selected_top10_holder_pct": 5.0, "top10_holder_source": "signal_payload"},
+            }
+        )
+
+        summary = await cli_module.run_bounded_paper_cycle(
+            max_signals=1,
+            timeout_seconds=0.1,
+            db_path=db_path,
+            risk_profile="discovery",
+            sources=[FakeSignalSource([[onchain]])],
+            poll_interval_s=0.0,
+        )
+
+        assert summary.signals_accepted == 1
+        assert summary.accepted_candidate_diagnostics[0]["source"] == "onchain"
+        assert summary.accepted_candidate_diagnostics[0]["ranking_penalty_points"] == 0
+        assert summary.accepted_candidate_diagnostics[0]["ranking_penalty_reasons"] == ()
+
+    asyncio.run(run())
+
+
 def test_discovery_safe_lines_include_bounded_grok_prompt_export(tmp_path: Path) -> None:
     async def run() -> None:
         db_path = tmp_path / "grok-prompt.db"
