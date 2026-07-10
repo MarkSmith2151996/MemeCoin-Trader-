@@ -296,5 +296,128 @@ def test_position_recon_diagnostics_split_by_missing_provider(tmp_path: Path) ->
     asyncio.run(run())
 
 
+def test_healthy_fake_providers_do_not_bypass_global_guardrails(tmp_path: Path) -> None:
+    async def run() -> None:
+        settings = _live_settings()
+        manager = await _seed_position_manager(tmp_path / "guard.db")
+        breaker = LiveCircuitBreaker()
+        breaker.record_health_check(True, observed_at=datetime.now(UTC))
+
+        async def wallet_holdings_lookup():
+            position = await manager.get_position("readiness-mint")
+            assert position is not None
+            return {"readiness-mint": position.token_amount}
+
+        report = await evaluate_micro_live_readiness(
+            settings,
+            env=_armed_env(settings),
+            requested_trade_sol=0.01,
+            wallet_balance_lookup=lambda: _async_return(1.0),
+            transaction_simulator=lambda _tx: _async_return(TransactionSimulationResult(ok=True)),
+            position_manager=manager,
+            wallet_holdings_lookup=wallet_holdings_lookup,
+            circuit_breaker=breaker,
+            health_status=HealthStatus(ok=True, message="ok", checked_at=datetime.now(UTC)),
+        )
+
+        assert report.ready is True
+        assert all(check.ok for check in report.checks)
+
+        # Now pass empty env (missing guardrail env vars) -> guardrails fail
+        report2 = await evaluate_micro_live_readiness(
+            settings,
+            env=None,
+            requested_trade_sol=0.01,
+            wallet_balance_lookup=lambda: _async_return(1.0),
+            transaction_simulator=lambda _tx: _async_return(TransactionSimulationResult(ok=True)),
+            position_manager=manager,
+            wallet_holdings_lookup=wallet_holdings_lookup,
+            circuit_breaker=breaker,
+            health_status=HealthStatus(ok=True, message="ok", checked_at=datetime.now(UTC)),
+        )
+        assert not report2.ready
+        assert not report2.checks[0].ok  # guardrails fail
+
+        # Default paper mode even with healthy providers -> NOT READY
+        paper_settings = load_settings()
+        report3 = await evaluate_micro_live_readiness(
+            paper_settings,
+            requested_trade_sol=0.01,
+            wallet_balance_lookup=lambda: _async_return(1.0),
+            transaction_simulator=lambda _tx: _async_return(TransactionSimulationResult(ok=True)),
+            position_manager=manager,
+            wallet_holdings_lookup=wallet_holdings_lookup,
+            circuit_breaker=breaker,
+            health_status=HealthStatus(ok=True, message="ok", checked_at=datetime.now(UTC)),
+        )
+        assert not report3.ready
+        assert not report3.checks[0].ok  # guardrails fail -> execution_mode_not_live
+
+    asyncio.run(run())
+
+
+def test_missing_malformed_config_fails_closed(tmp_path: Path) -> None:
+    async def run() -> None:
+        settings = _live_settings()
+        manager = await _seed_position_manager(tmp_path / "malformed.db")
+        breaker = LiveCircuitBreaker()
+        breaker.record_health_check(True, observed_at=datetime.now(UTC))
+
+        async def wallet_holdings_lookup():
+            position = await manager.get_position("readiness-mint")
+            assert position is not None
+            return {"readiness-mint": position.token_amount}
+
+        # Missing env (no guardrails armed) -> NOT READY
+        report = await evaluate_micro_live_readiness(
+            settings,
+            env=None,
+            wallet_balance_lookup=lambda: _async_return(1.0),
+            transaction_simulator=lambda _tx: _async_return(TransactionSimulationResult(ok=True)),
+            position_manager=manager,
+            wallet_holdings_lookup=wallet_holdings_lookup,
+            circuit_breaker=breaker,
+            health_status=HealthStatus(ok=True, message="ok", checked_at=datetime.now(UTC)),
+        )
+        assert not report.ready
+        guardrails_check = {c.name: c for c in report.checks}["guardrails"]
+        assert not guardrails_check.ok
+
+        # requested_trade_sol exceeds max -> NOT READY
+        report2 = await evaluate_micro_live_readiness(
+            settings,
+            env=_armed_env(settings),
+            requested_trade_sol=999.0,
+            wallet_balance_lookup=lambda: _async_return(1.0),
+            transaction_simulator=lambda _tx: _async_return(TransactionSimulationResult(ok=True)),
+            position_manager=manager,
+            wallet_holdings_lookup=wallet_holdings_lookup,
+            circuit_breaker=breaker,
+            health_status=HealthStatus(ok=True, message="ok", checked_at=datetime.now(UTC)),
+        )
+        assert not report2.ready
+        guardrails_check2 = {c.name: c for c in report2.checks}["guardrails"]
+        assert not guardrails_check2.ok
+        assert "requested_trade_sol_exceeds_max_live_trade_sol" in guardrails_check2.diagnostics
+
+        # wallet_balance_lookup returns None (configured but unhealthy) -> NOT READY
+        report3 = await evaluate_micro_live_readiness(
+            settings,
+            env=_armed_env(settings),
+            requested_trade_sol=0.01,
+            wallet_balance_lookup=lambda: _async_return(None),
+            transaction_simulator=lambda _tx: _async_return(TransactionSimulationResult(ok=True)),
+            position_manager=manager,
+            wallet_holdings_lookup=wallet_holdings_lookup,
+            circuit_breaker=breaker,
+            health_status=HealthStatus(ok=True, message="ok", checked_at=datetime.now(UTC)),
+        )
+        assert not report3.ready
+        preflight_check = {c.name: c for c in report3.checks}["preflight"]
+        assert "wallet_balance_unknown" in preflight_check.diagnostics
+
+    asyncio.run(run())
+
+
 async def _async_return(value):
     return value
