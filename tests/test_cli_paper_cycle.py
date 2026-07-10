@@ -6,7 +6,8 @@ from typer.testing import CliRunner
 
 import src.cli as cli_module
 from src.core.config import RiskConfig
-from src.core.models import CheckResult, RiskAssessment, Signal, SignalSource as SignalSourceEnum, SignalType, TokenInfo
+from src.core.database import init_db, record_position
+from src.core.models import CheckResult, Position, RiskAssessment, Signal, SignalSource as SignalSourceEnum, SignalType, TokenInfo
 from src.monitoring.dashboard import load_open_positions, load_recent_trades
 from src.risk.rugcheck import RugCheckResult
 from src.risk.scorer import DiscoveryRiskScorer, HolderLookupResult
@@ -358,6 +359,94 @@ def test_paper_cycle_capacity_blockers_report_current_open_positions(tmp_path: P
         assert "persisted_open_positions=1" in safe_lines
         assert "configured_max_open_positions=1" in safe_lines
         assert "capacity_blocked_candidates=1" in safe_lines
+
+    asyncio.run(run())
+
+
+def test_paper_cycle_ignores_archived_paper_rows_for_capacity_counts(tmp_path: Path) -> None:
+    async def run() -> None:
+        db_path = tmp_path / "archived-capacity.db"
+        await init_db(db_path)
+        archived_position = Position(
+            mint_address="archived-paper-mint",
+            entry_trade_id="archived-paper-trade",
+            amount_sol=1.0,
+            token_amount=0.0,
+            entry_price_sol=1.0,
+            mode="paper",
+            archived=True,
+        )
+        await record_position(db_path, archived_position)
+
+        constrained_settings = cli_module.load_settings().model_copy(
+            update={
+                "position": cli_module.load_settings().position.model_copy(update={"max_open_positions": 1})
+            }
+        )
+
+        summary = await cli_module.run_bounded_paper_cycle(
+            max_signals=1,
+            timeout_seconds=0.1,
+            db_path=db_path,
+            settings=constrained_settings,
+            sources=[FakeSignalSource([[build_signal("active-paper-mint", passes=True)]])],
+            poll_interval_s=0.0,
+        )
+
+        assert summary.signals_accepted == 1
+        assert summary.signals_rejected == 0
+        assert summary.starting_open_positions == 0
+        assert summary.persisted_open_positions == 1
+        assert summary.capacity_blocked_candidates == 0
+
+    asyncio.run(run())
+
+
+def test_paper_cycle_counts_live_rows_but_not_archived_paper_rows(tmp_path: Path) -> None:
+    async def run() -> None:
+        db_path = tmp_path / "live-capacity.db"
+        await init_db(db_path)
+        archived_paper = Position(
+            mint_address="archived-paper-live-mix",
+            entry_trade_id="archived-paper-live-mix-trade",
+            amount_sol=1.0,
+            token_amount=0.0,
+            entry_price_sol=1.0,
+            mode="paper",
+            archived=True,
+        )
+        live_position = Position(
+            mint_address="live-position-mint",
+            entry_trade_id="live-position-trade",
+            amount_sol=1.0,
+            token_amount=100000.0,
+            entry_price_sol=0.00001,
+            mode="live",
+        )
+        await record_position(db_path, archived_paper)
+        await record_position(db_path, live_position)
+
+        constrained_settings = cli_module.load_settings().model_copy(
+            update={
+                "position": cli_module.load_settings().position.model_copy(update={"max_open_positions": 1})
+            }
+        )
+
+        summary = await cli_module.run_bounded_paper_cycle(
+            max_signals=1,
+            timeout_seconds=0.1,
+            db_path=db_path,
+            settings=constrained_settings,
+            sources=[FakeSignalSource([[build_signal("blocked-by-live", passes=True)]])],
+            poll_interval_s=0.0,
+        )
+
+        assert summary.signals_accepted == 0
+        assert summary.signals_rejected == 1
+        assert summary.rejection_reasons == {"max_open_positions_reached": 1}
+        assert summary.starting_open_positions == 1
+        assert summary.persisted_open_positions == 1
+        assert summary.capacity_blocked_candidates == 1
 
     asyncio.run(run())
 

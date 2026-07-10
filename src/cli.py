@@ -336,6 +336,13 @@ def _count_rows(db_path: Path, table: str, where_clause: str | None = None, para
     return int(row[0]) if row is not None else 0
 
 
+async def _count_effective_open_positions(db_path: Path) -> int:
+    """Count persisted open positions while honoring archived exclusions."""
+    await init_db(db_path)
+    inspector = PositionManager(db_path, load_settings())
+    return len(await inspector.get_all_open())
+
+
 async def run_bounded_paper_cycle(
     max_signals: int,
     timeout_seconds: float,
@@ -358,7 +365,7 @@ async def run_bounded_paper_cycle(
 
     await init_db(runtime_db_path)
     initial_trade_count = _count_rows(runtime_db_path, "trades")
-    initial_open_positions = _count_rows(runtime_db_path, "positions", "status != ?", ("CLOSED",))
+    initial_open_positions = await _count_effective_open_positions(runtime_db_path)
 
     position_manager = PositionManager(
         runtime_db_path,
@@ -504,7 +511,7 @@ async def run_bounded_paper_cycle(
 
     holder_lookup_outcomes = extract_runtime_diagnostics(engine.risk_scorer)
     session_open_positions = len(await position_manager.get_all_open())
-    persisted_open_positions = _count_rows(runtime_db_path, "positions", "status != ?", ("CLOSED",))
+    persisted_open_positions = await _count_effective_open_positions(runtime_db_path)
 
     return PaperCycleSummary(
         execution_mode=runtime_settings.execution.mode,
