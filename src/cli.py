@@ -24,7 +24,10 @@ from src.execution.live_execution_config import evaluate_live_execution_config
 from src.execution.live_exit import execute_guarded_live_exit
 from src.execution.live_guardrails import evaluate_live_guardrails
 from src.execution.env_readiness import evaluate_env_readiness
-from src.execution.helius_providers import try_create_transaction_simulator
+from src.execution.helius_providers import (
+    try_create_balance_lookup,
+    try_create_transaction_simulator,
+)
 from src.execution.live_readiness import evaluate_micro_live_readiness
 from src.execution.jupiter_live import JupiterLiveExecutionAdapter
 from src.execution.paper import PaperExecutionAdapter
@@ -1844,10 +1847,12 @@ def live_readiness(
     settings = load_settings()
     manager = PositionManager(resolve_db_path(db_path), settings)
     simulator = try_create_transaction_simulator()
+    balance = try_create_balance_lookup()
     report = asyncio.run(
         evaluate_micro_live_readiness(
             settings,
             position_manager=manager,
+            wallet_balance_lookup=balance,
             transaction_simulator=simulator,
             circuit_breaker=LiveCircuitBreaker(),
         )
