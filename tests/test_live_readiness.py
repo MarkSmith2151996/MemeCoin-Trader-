@@ -420,5 +420,61 @@ def test_missing_malformed_config_fails_closed(tmp_path: Path) -> None:
     asyncio.run(run())
 
 
+def test_missing_private_key_keeps_readiness_not_ready() -> None:
+    """Missing TRADING_WALLET_PRIVATE_KEY keeps live-readiness NOT READY."""
+    async def run() -> None:
+        report = await evaluate_micro_live_readiness(load_settings())
+        assert report.ready is False
+        guardrails = {c.name: c for c in report.checks}["guardrails"]
+        assert not guardrails.ok
+        # execution_mode_not_live fires because private key is missing
+        # (execution mode defaults to paper when live arming is incomplete)
+        assert "execution_mode_not_live" in guardrails.diagnostics
+
+    asyncio.run(run())
+
+
+def test_insufficient_wallet_balance_keeps_readiness_not_ready(tmp_path: Path) -> None:
+    """Insufficient wallet balance keeps live-readiness NOT READY even with armed env."""
+    async def run() -> None:
+        settings = load_settings()
+        # Override execution mode to live so guardrails can be satisfied
+        live_settings = settings.model_copy(
+            update={
+                "execution": settings.execution.model_copy(
+                    update={"mode": "live", "primary_rpc_url": "https://primary.example"}
+                )
+            }
+        )
+        await init_db(tmp_path / "balance.db")
+        manager = PositionManager(tmp_path / "balance.db", settings)
+
+        report = await evaluate_micro_live_readiness(
+            live_settings,
+            env={
+                "LIVE_TRADING_ENABLED": "true",
+                "LIVE_CONFIRMATION_PHRASE": live_settings.live_guardrails.confirmation_phrase,
+                "LIVE_KILL_SWITCH": "false",
+                "PRIMARY_RPC_URL": "https://primary.example",
+                "MAX_LIVE_TRADE_SOL": "0.01",
+                "MAX_LIVE_DAILY_TRADES": "3",
+                "MAX_LIVE_DAILY_LOSS_SOL": "0.05",
+                "MIN_LIVE_WALLET_BALANCE_SOL": "0.05",
+            },
+            requested_trade_sol=0.01,
+            wallet_balance_lookup=lambda: _async_return(0.001),
+            position_manager=manager,
+            circuit_breaker=LiveCircuitBreaker(),
+            health_status=HealthStatus(ok=True, message="ok", checked_at=datetime.now(UTC)),
+        )
+
+        assert report.ready is False
+        preflight = {c.name: c for c in report.checks}["preflight"]
+        assert not preflight.ok
+        assert "insufficient_wallet_balance" in preflight.diagnostics
+
+    asyncio.run(run())
+
+
 async def _async_return(value):
     return value
