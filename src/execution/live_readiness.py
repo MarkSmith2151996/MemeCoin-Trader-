@@ -29,6 +29,7 @@ class ReadinessCheck:
     name: str
     ok: bool
     diagnostics: tuple[str, ...]
+    recommended_env: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -50,7 +51,10 @@ class MicroLiveReadinessReport:
         for check in self.checks:
             state = "ok" if check.ok else "not_ready"
             diagnostics = ",".join(check.diagnostics) if check.diagnostics else "none"
-            lines.append(f"{check.name}={state} diagnostics={diagnostics}")
+            line = f"{check.name}={state} diagnostics={diagnostics}"
+            if check.recommended_env:
+                line += f" needs={','.join(sorted(check.recommended_env))}"
+            lines.append(line)
         return lines
 
 
@@ -75,6 +79,11 @@ async def evaluate_micro_live_readiness(
     execution_config = evaluate_live_execution_config(settings, env=env)
     checks.append(ReadinessCheck("execution_config", execution_config.allowed, execution_config.diagnostics))
 
+    preflight_env: tuple[str, ...] = ()
+    if wallet_balance_lookup is None:
+        preflight_env = ("HELIUS_API_KEY", "TRADING_WALLET_PRIVATE_KEY")
+    elif transaction_simulator is None:
+        preflight_env = ("HELIUS_API_KEY",)
     preflight = await evaluate_live_preflight(
         settings,
         requested_trade_sol=trade_size,
@@ -82,17 +91,26 @@ async def evaluate_micro_live_readiness(
         wallet_balance_lookup=wallet_balance_lookup,
         transaction_simulator=transaction_simulator,
     )
-    checks.append(ReadinessCheck("preflight", preflight.allowed, preflight.diagnostics))
+    checks.append(ReadinessCheck("preflight", preflight.allowed, preflight.diagnostics, recommended_env=preflight_env))
 
-    if position_manager is None or wallet_holdings_lookup is None:
+    if position_manager is None:
         reconciliation = PositionReconciliationReport(
             ok=False,
             diagnostics=("position_reconciliation_unavailable",),
             mismatches=(),
         )
+        recon_env: tuple[str, ...] = ()
+    elif wallet_holdings_lookup is None:
+        reconciliation = PositionReconciliationReport(
+            ok=False,
+            diagnostics=("wallet_holdings_lookup_unavailable",),
+            mismatches=(),
+        )
+        recon_env = ("HELIUS_API_KEY", "TRADING_WALLET_PRIVATE_KEY")
     else:
         reconciliation = await reconcile_positions(position_manager, wallet_holdings_lookup)
-    checks.append(ReadinessCheck("position_reconciliation", reconciliation.ok, reconciliation.diagnostics))
+        recon_env = ()
+    checks.append(ReadinessCheck("position_reconciliation", reconciliation.ok, reconciliation.diagnostics, recommended_env=recon_env))
 
     if circuit_breaker is None:
         checks.append(ReadinessCheck("circuit_breaker", False, ("circuit_breaker_unavailable",)))

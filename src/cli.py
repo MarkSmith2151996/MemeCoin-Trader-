@@ -1829,11 +1829,15 @@ def paper_soak(
 
 
 @app.command("live-readiness")
-def live_readiness() -> None:
+def live_readiness(
+    db_path: str | None = typer.Option(None, help="Optional SQLite path override."),
+) -> None:
     settings = load_settings()
+    manager = PositionManager(resolve_db_path(db_path), settings)
     report = asyncio.run(
         evaluate_micro_live_readiness(
             settings,
+            position_manager=manager,
             circuit_breaker=LiveCircuitBreaker(),
         )
     )
