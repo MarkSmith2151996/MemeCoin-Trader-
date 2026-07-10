@@ -165,6 +165,7 @@ class Position(BaseModel):
     token_amount: float = Field(ge=0)
     entry_price_sol: float = Field(gt=0)
     status: PositionStatus = PositionStatus.OPEN
+    mode: str = "paper"
     opened_at: datetime = Field(default_factory=utc_now)
     closed_at: datetime | None = None
     realized_pnl_sol: float = 0.0

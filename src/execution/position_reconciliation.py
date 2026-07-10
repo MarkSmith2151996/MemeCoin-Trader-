@@ -73,7 +73,15 @@ async def reconcile_positions(
             mismatches=(),
         )
 
-    local_by_mint = {position.mint_address: position for position in local_positions}
+    live_positions = [p for p in local_positions if p.mode == "live"]
+    if not live_positions:
+        return PositionReconciliationReport(
+            ok=True,
+            diagnostics=("no_live_positions_to_reconcile",),
+            mismatches=(),
+        )
+
+    local_by_mint = {position.mint_address: position for position in live_positions}
     wallet_by_mint = {mint: amount for mint, amount in wallet_holdings.items() if amount > 0}
 
     mismatches: list[PositionReconciliationMismatch] = []

@@ -1,9 +1,11 @@
+"""Tests for position reconciliation with mode-aware filtering."""
+
 import asyncio
 from pathlib import Path
 
 from src.core.config import load_settings
 from src.core.database import init_db
-from src.core.models import CheckResult, RiskAssessment, Signal, SignalSource, SignalType, TokenInfo
+from src.core.models import CheckResult, Position, RiskAssessment, Signal, SignalSource, SignalType, TokenInfo, Trade
 from src.execution.base import ExecutionAdapter
 from src.execution.position_reconciliation import reconcile_positions
 from src.monitoring.dashboard import load_open_positions
@@ -19,8 +21,6 @@ class SmokePaperExecutionAdapter(ExecutionAdapter):
         self.price_sol = price_sol
 
     async def execute_swap(self, mint_address, side, amount_sol, slippage_bps=300):
-        from src.core.models import Trade
-
         return Trade(
             mint_address=mint_address,
             side=side,
@@ -45,6 +45,12 @@ class SmokePaperExecutionAdapter(ExecutionAdapter):
     @property
     def mode(self):
         return "paper"
+
+
+class LiveExecutionAdapter(SmokePaperExecutionAdapter):
+    @property
+    def mode(self):
+        return "live"
 
 
 class PassingRiskScorer:
@@ -79,7 +85,8 @@ def _assessment(mint_address: str) -> RiskAssessment:
     )
 
 
-async def _seed_open_position(db_path: Path, mint_address: str = FAKE_MINT):
+async def _seed_paper_position(db_path: Path, mint_address: str = FAKE_MINT):
+    """Seed a paper-mode open position via the full signal pipeline."""
     settings = load_settings()
     await init_db(db_path)
     manager = PositionManager(db_path, settings)
@@ -97,50 +104,80 @@ async def _seed_open_position(db_path: Path, mint_address: str = FAKE_MINT):
     return manager, positions[0]
 
 
-def test_clean_local_and_wallet_match_passes(tmp_path: Path) -> None:
+async def _seed_live_position(db_path: Path, mint_address: str = FAKE_MINT):
+    """Seed a live-mode open position via the full signal pipeline."""
+    settings = load_settings()
+    await init_db(db_path)
+    manager = PositionManager(db_path, settings)
+    engine = DecisionEngine(
+        LiveExecutionAdapter(),
+        PassingRiskScorer(_assessment(mint_address)),
+        manager,
+        settings,
+        db=db_path,
+    )
+    signal = Signal(source=SignalSource.PUMP_FUN, type=SignalType.NEW_POOL, mint_address=mint_address, confidence=0.8)
+    trade = await engine.evaluate_signal(signal)
+    assert trade is not None
+    positions = load_open_positions(db_path)
+    return manager, positions[0]
+
+
+# ── Backward compatibility ──────────────────────────────────────────
+
+def test_legacy_position_defaults_to_paper() -> None:
+    """Positions created without a mode field default to 'paper'."""
+    p = Position(mint_address="test", entry_trade_id="t1", amount_sol=1.0, token_amount=100.0, entry_price_sol=0.01)
+    assert p.mode == "paper"
+
+
+# ── Paper positions ignored by reconciliation ───────────────────────
+
+def test_paper_local_only_position_is_not_flagged(tmp_path: Path) -> None:
+    """Paper-mode local-only positions should NOT produce a mismatch."""
     async def run() -> None:
-        manager, position = await _seed_open_position(tmp_path / "recon-match.db")
-
-        async def wallet_holdings():
-            return {position.mint_address: position.token_amount}
-
-        report = await reconcile_positions(manager, wallet_holdings)
-
-        assert report.ok is True
-        assert report.diagnostics == ("position_reconciliation_passed",)
-        assert report.mismatches == ()
-
-    asyncio.run(run())
-
-
-def test_wallet_only_token_holding_is_flagged(tmp_path: Path) -> None:
-    async def run() -> None:
-        settings = load_settings()
-        db_path = tmp_path / "wallet-only.db"
-        await init_db(db_path)
-        manager = PositionManager(db_path, settings)
-
-        async def wallet_holdings():
-            return {"wallet-only-mint": 123.0}
-
-        report = await reconcile_positions(manager, wallet_holdings)
-
-        assert report.ok is False
-        assert report.diagnostics == ("position_reconciliation_mismatch",)
-        assert report.mismatches[0].kind == "wallet_only_holding"
-
-    asyncio.run(run())
-
-
-def test_local_only_position_is_flagged(tmp_path: Path) -> None:
-    async def run() -> None:
-        manager, position = await _seed_open_position(tmp_path / "local-only.db")
+        manager, position = await _seed_paper_position(tmp_path / "paper-only.db")
 
         async def wallet_holdings():
             return {}
 
         report = await reconcile_positions(manager, wallet_holdings)
+        assert report.ok is True
+        assert report.diagnostics == ("no_live_positions_to_reconcile",)
+        assert report.mismatches == ()
 
+    asyncio.run(run())
+
+
+def test_no_live_positions_empty_db_passes(tmp_path: Path) -> None:
+    """An empty DB with no positions at all passes reconciliation."""
+    async def run() -> None:
+        settings = load_settings()
+        db_path = tmp_path / "empty.db"
+        await init_db(db_path)
+        manager = PositionManager(db_path, settings)
+
+        async def wallet_holdings():
+            return {}
+
+        report = await reconcile_positions(manager, wallet_holdings)
+        assert report.ok is True
+        assert report.diagnostics == ("no_live_positions_to_reconcile",)
+
+    asyncio.run(run())
+
+
+# ── Live positions included in reconciliation ───────────────────────
+
+def test_live_local_only_position_is_flagged(tmp_path: Path) -> None:
+    """Live-mode local-only positions SHOULD produce a mismatch."""
+    async def run() -> None:
+        manager, position = await _seed_live_position(tmp_path / "live-only.db")
+
+        async def wallet_holdings():
+            return {}
+
+        report = await reconcile_positions(manager, wallet_holdings)
         assert report.ok is False
         assert report.diagnostics == ("position_reconciliation_mismatch",)
         assert report.mismatches[0].kind == "local_only_position"
@@ -149,15 +186,31 @@ def test_local_only_position_is_flagged(tmp_path: Path) -> None:
     asyncio.run(run())
 
 
-def test_balance_mismatch_is_flagged(tmp_path: Path) -> None:
+def test_live_and_wallet_match_passes(tmp_path: Path) -> None:
+    """Live positions matching wallet holdings pass reconciliation."""
     async def run() -> None:
-        manager, position = await _seed_open_position(tmp_path / "balance-mismatch.db")
+        manager, position = await _seed_live_position(tmp_path / "live-match.db")
+
+        async def wallet_holdings():
+            return {position.mint_address: position.token_amount}
+
+        report = await reconcile_positions(manager, wallet_holdings)
+        assert report.ok is True
+        assert report.diagnostics == ("position_reconciliation_passed",)
+        assert report.mismatches == ()
+
+    asyncio.run(run())
+
+
+def test_live_balance_mismatch_is_flagged(tmp_path: Path) -> None:
+    """Live positions with mismatched wallet balances are flagged."""
+    async def run() -> None:
+        manager, position = await _seed_live_position(tmp_path / "live-balance.db")
 
         async def wallet_holdings():
             return {position.mint_address: position.token_amount * 0.5}
 
         report = await reconcile_positions(manager, wallet_holdings)
-
         assert report.ok is False
         assert report.diagnostics == ("position_reconciliation_mismatch",)
         assert report.mismatches[0].kind == "balance_mismatch"
@@ -165,15 +218,94 @@ def test_balance_mismatch_is_flagged(tmp_path: Path) -> None:
     asyncio.run(run())
 
 
+# ── Mixed paper + live ──────────────────────────────────────────────
+
+def test_mixed_paper_and_live_only_live_is_reconciled(tmp_path: Path) -> None:
+    """When both paper and live positions exist, only live positions are reconciled."""
+    async def run() -> None:
+        settings = load_settings()
+        db_path = tmp_path / "mixed.db"
+        await init_db(db_path)
+        manager = PositionManager(db_path, settings)
+
+        # Seed a paper position
+        paper_engine = DecisionEngine(
+            SmokePaperExecutionAdapter(),
+            PassingRiskScorer(_assessment("PaperOnly111111111111111111111111111111111")),
+            manager,
+            settings,
+            db=db_path,
+        )
+        paper_signal = Signal(
+            source=SignalSource.PUMP_FUN, type=SignalType.NEW_POOL,
+            mint_address="PaperOnly111111111111111111111111111111111", confidence=0.8,
+        )
+        paper_trade = await paper_engine.evaluate_signal(paper_signal)
+        assert paper_trade is not None
+
+        # Seed a live position
+        live_signal = Signal(
+            source=SignalSource.PUMP_FUN, type=SignalType.NEW_POOL,
+            mint_address="LiveOnly1111111111111111111111111111111111", confidence=0.8,
+        )
+        live_engine = DecisionEngine(
+            LiveExecutionAdapter(),
+            PassingRiskScorer(_assessment("LiveOnly1111111111111111111111111111111111")),
+            manager,
+            settings,
+            db=db_path,
+        )
+        live_trade = await live_engine.evaluate_signal(live_signal)
+        assert live_trade is not None
+
+        all_positions = load_open_positions(db_path)
+        assert len(all_positions) == 2
+
+        # Wallet has neither — only the live position should cause a mismatch
+        async def wallet_holdings():
+            return {}
+
+        report = await reconcile_positions(manager, wallet_holdings)
+        assert report.ok is False
+        assert report.diagnostics == ("position_reconciliation_mismatch",)
+        assert len(report.mismatches) == 1
+        assert report.mismatches[0].kind == "local_only_position"
+        assert report.mismatches[0].mint_address == "LiveOnly1111111111111111111111111111111111"
+
+    asyncio.run(run())
+
+
+# ── Edge cases ──────────────────────────────────────────────────────
+
+def test_wallet_only_holding_is_flagged_with_live_positions(tmp_path: Path) -> None:
+    """Wallet-only holdings are flagged when there are live positions."""
+    async def run() -> None:
+        manager, position = await _seed_live_position(tmp_path / "wallet-only-live.db")
+
+        async def wallet_holdings():
+            return {
+                position.mint_address: position.token_amount,
+                "wallet-only-mint": 123.0,
+            }
+
+        report = await reconcile_positions(manager, wallet_holdings)
+        assert report.ok is False
+        assert report.diagnostics == ("position_reconciliation_mismatch",)
+        kinds = {m.kind for m in report.mismatches}
+        assert "wallet_only_holding" in kinds
+
+    asyncio.run(run())
+
+
 def test_missing_wallet_data_fails_closed(tmp_path: Path) -> None:
     async def run() -> None:
-        manager, _position = await _seed_open_position(tmp_path / "missing-wallet.db")
+        db_path = tmp_path / "missing-wallet.db"
+        manager, _ = await _seed_live_position(db_path, FAKE_MINT)
 
         async def wallet_holdings():
             return None
 
         report = await reconcile_positions(manager, wallet_holdings)
-
         assert report.ok is False
         assert report.diagnostics == ("wallet_holdings_unknown",)
 
@@ -182,10 +314,19 @@ def test_missing_wallet_data_fails_closed(tmp_path: Path) -> None:
 
 def test_missing_lookup_fails_closed(tmp_path: Path) -> None:
     async def run() -> None:
-        manager, _position = await _seed_open_position(tmp_path / "missing-lookup.db")
-        report = await reconcile_positions(manager, None)
+        db_path = tmp_path / "missing-lookup.db"
+        manager, _ = await _seed_live_position(db_path, FAKE_MINT)
 
+        report = await reconcile_positions(manager, None)
         assert report.ok is False
         assert report.diagnostics == ("wallet_holdings_lookup_unavailable",)
 
     asyncio.run(run())
+
+
+# ── Default mode ────────────────────────────────────────────────────
+
+def test_default_mode_is_paper() -> None:
+    """Default mode for new positions without explicit mode is 'paper'."""
+    p = Position(mint_address="test", entry_trade_id="t1", amount_sol=1.0, token_amount=100.0, entry_price_sol=0.01)
+    assert p.mode == "paper"

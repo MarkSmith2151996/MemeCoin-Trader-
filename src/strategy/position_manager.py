@@ -37,6 +37,7 @@ class PositionManager:
             amount_sol=trade.amount_sol,
             token_amount=token_amount,
             entry_price_sol=entry_price,
+            mode=trade.mode or "paper",
             partial_exits=build_partial_exits(self.config.exits),
         )
         self._cache[position.mint_address] = position
