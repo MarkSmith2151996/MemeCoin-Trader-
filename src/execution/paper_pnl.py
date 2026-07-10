@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
-from src.core.models import Position, PositionStatus
+from src.core.models import PaperFillQuality, Position, PositionStatus
 from src.execution.price_provider import PriceProvider, UnavailablePriceProvider
 from src.strategy.position_manager import PositionManager
 
@@ -16,6 +16,7 @@ class PaperPnLPosition:
     amount_sol: float
     token_amount: float
     status: PositionStatus
+    fill_quality: PaperFillQuality
     close_price_sol: float | None = None
     mark_price_sol: float | None = None
     realized_pnl_sol: float = 0.0
@@ -23,6 +24,7 @@ class PaperPnLPosition:
     unrealized_pnl_pct: float | None = None
     mark_unavailable: bool = False
     mark_reason: str = "price_unavailable"
+    pnl_confidence: str = "low_confidence"
 
 
 @dataclass
@@ -37,6 +39,7 @@ class PaperPnLSummary:
     unrealized_incomplete: bool = False
     positions: list[PaperPnLPosition] = field(default_factory=list)
     marks_mode: str = "unavailable"
+    fill_quality_counts: dict[str, int] = field(default_factory=dict)
 
 
 class PaperPnLCalculator:
@@ -73,11 +76,16 @@ class PaperPnLCalculator:
                 amount_sol=pos.amount_sol,
                 token_amount=pos.token_amount,
                 status=pos.status,
+                fill_quality=pos.fill_quality,
                 close_price_sol=pos.close_price_sol,
                 realized_pnl_sol=pos.realized_pnl_sol,
             )
 
+            if pos.status == PositionStatus.OPEN:
+                summary.fill_quality_counts[pos.fill_quality.value] = summary.fill_quality_counts.get(pos.fill_quality.value, 0) + 1
+
             if pos.status == PositionStatus.CLOSED:
+                pnl_pos.pnl_confidence = _confidence_for_fill_quality(pos.fill_quality)
                 summary.positions.append(pnl_pos)
                 continue
 
@@ -89,7 +97,21 @@ class PaperPnLCalculator:
                 mark = None
                 pnl_pos.mark_reason = "price_unavailable"
 
-            if mark is not None and mark > 0 and pos.token_amount > 0:
+            if pos.fill_quality == PaperFillQuality.LEGACY_UNKNOWN:
+                pnl_pos.mark_price_sol = mark if mark is not None and mark > 0 else None
+                pnl_pos.mark_unavailable = True
+                pnl_pos.mark_reason = "legacy_low_confidence"
+                pnl_pos.pnl_confidence = "low_confidence"
+                any_mark_unavailable = True
+                mark_unavailable_count += 1
+            elif pos.fill_quality == PaperFillQuality.UNPRICED:
+                pnl_pos.mark_price_sol = mark if mark is not None and mark > 0 else None
+                pnl_pos.mark_unavailable = True
+                pnl_pos.mark_reason = "unpriced_entry"
+                pnl_pos.pnl_confidence = "unavailable"
+                any_mark_unavailable = True
+                mark_unavailable_count += 1
+            elif mark is not None and mark > 0 and pos.token_amount > 0:
                 pnl_pos.mark_price_sol = mark
                 pnl_pos.unrealized_pnl_sol = round(pos.token_amount * mark - pos.amount_sol, 9)
                 pnl_pos.unrealized_pnl_pct = (
@@ -97,9 +119,11 @@ class PaperPnLCalculator:
                     if pos.entry_price_sol > 0
                     else None
                 )
+                pnl_pos.pnl_confidence = "high_confidence"
                 unrealized_total += pnl_pos.unrealized_pnl_sol
             else:
                 pnl_pos.mark_unavailable = True
+                pnl_pos.pnl_confidence = "partial"
                 any_mark_unavailable = True
                 mark_unavailable_count += 1
 
@@ -130,3 +154,11 @@ class PaperPnLCalculator:
 
         positions = [Position.model_validate_json(row[0]) for row in rows]
         return [p for p in positions if p.mode == "paper"]
+
+
+def _confidence_for_fill_quality(fill_quality: PaperFillQuality) -> str:
+    if fill_quality == PaperFillQuality.PRICED_QUOTE:
+        return "high_confidence"
+    if fill_quality == PaperFillQuality.UNPRICED:
+        return "unavailable"
+    return "low_confidence"

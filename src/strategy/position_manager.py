@@ -10,7 +10,7 @@ import aiosqlite
 
 from src.core.config import Settings
 from src.core.database import record_position
-from src.core.models import PartialExit, Position, PositionStatus, Signal, Trade
+from src.core.models import PaperFillQuality, PartialExit, Position, PositionStatus, Signal, Trade
 from src.strategy.exits import build_partial_exits
 
 
@@ -37,6 +37,11 @@ class PositionManager:
         token_amount = trade.token_amount
         if token_amount is None:
             token_amount = trade.amount_sol / entry_price if entry_price > 0 else 0.0
+        fill_quality = (
+            PaperFillQuality.PRICED_QUOTE
+            if entry_price > 0 and token_amount > 0
+            else PaperFillQuality.UNPRICED
+        )
         position = Position(
             mint_address=trade.mint_address,
             entry_trade_id=trade.id,
@@ -44,6 +49,7 @@ class PositionManager:
             token_amount=token_amount,
             entry_price_sol=entry_price,
             mode=trade.mode or "paper",
+            fill_quality=fill_quality,
             partial_exits=build_partial_exits(self.config.exits),
         )
         self._cache[position.mint_address] = position

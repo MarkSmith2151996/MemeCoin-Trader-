@@ -19,7 +19,7 @@ from rich.console import Console
 
 from src.core.config import Settings, load_settings
 from src.core.database import get_recent_soak_runs, init_db, record_soak_run, record_trade
-from src.core.models import PositionStatus, SoakRunRecord
+from src.core.models import PaperFillQuality, Position, PositionStatus, SoakRunRecord
 from src.execution.base import ExecutionAdapter
 from src.execution.live_buy import execute_guarded_live_buy
 from src.execution.live_circuit_breaker import LiveCircuitBreaker
@@ -2204,8 +2204,25 @@ async def _print_paper_state(manager: PositionManager) -> None:
                 f"sol={pos.amount_sol:.4f}  "
                 f"tokens={pos.token_amount:.0f}  "
                 f"price={pos.entry_price_sol:.8f}  "
+                f"quality={pos.fill_quality.value}  "
                 f"opened={pos.opened_at.strftime('%H:%M:%S')}"
             )
+
+
+def _fill_quality_label(fill_quality: PaperFillQuality) -> str:
+    if fill_quality == PaperFillQuality.PRICED_QUOTE:
+        return "reliable"
+    if fill_quality == PaperFillQuality.UNPRICED:
+        return "unpriced"
+    return "legacy/unknown"
+
+
+def _fill_quality_confidence(fill_quality: PaperFillQuality) -> str:
+    if fill_quality == PaperFillQuality.PRICED_QUOTE:
+        return "high_confidence"
+    if fill_quality == PaperFillQuality.UNPRICED:
+        return "unavailable"
+    return "low_confidence"
 
 
 def _format_pnl_summary(summary: PaperPnLSummary) -> None:
@@ -2230,6 +2247,16 @@ def _format_pnl_summary(summary: PaperPnLSummary) -> None:
     summary_line += "\n[yellow]WARNING: Paper PnL is simulated. Not real profit or loss.[/yellow]"
     console.print(summary_line)
 
+    if summary.fill_quality_counts:
+        console.print("\n--- Paper Fill Quality ---")
+        for fill_quality in (
+            PaperFillQuality.PRICED_QUOTE,
+            PaperFillQuality.UNPRICED,
+            PaperFillQuality.LEGACY_UNKNOWN,
+        ):
+            count = summary.fill_quality_counts.get(fill_quality.value, 0)
+            console.print(f"  {fill_quality.value}: {count} ({_fill_quality_label(fill_quality)})")
+
     if summary.positions:
         console.print("\n--- Per-Position Detail ---")
         for pos in sorted(summary.positions, key=lambda p: p.mint_address):
@@ -2247,11 +2274,12 @@ def _format_pnl_summary(summary: PaperPnLSummary) -> None:
                 else f"entry={pos.entry_price_sol:.10f} mark={pos.mark_price_sol:.10f}"
             )
             reason_str = f"  reason={pos.mark_reason}" if pos.mark_reason != "ok" and pos.mark_reason != "live_dexscreener" else ""
+            confidence_str = f"  quality={pos.fill_quality.value} confidence={pos.pnl_confidence}"
             console.print(
                 f"  mint={pos.mint_address[:16]}  {status_icon}  "
                 f"sol={pos.amount_sol:.4f}  tokens={pos.token_amount:.0f}  "
                 f"{price_str}  "
-                f"pnl={pnl_str}{reason_str}"
+                f"pnl={pnl_str}{confidence_str}{reason_str}"
             )
 
 
@@ -2343,8 +2371,13 @@ def _print_paper_close_preview_position(
 ) -> float:
     """Print single position preview line. Returns estimated PnL."""
     pnl = None
+    confidence = _fill_quality_confidence(pos.fill_quality)
+    quality_label = pos.fill_quality.value
     if exit_price is not None and exit_price > 0 and pos.token_amount > 0:
         pnl = round(pos.token_amount * exit_price - pos.amount_sol, 9)
+
+    if pos.fill_quality == PaperFillQuality.UNPRICED:
+        pnl = None
 
     src_label = f"({source})" if source != "unavailable" else ""
     pnl_str = _fmt_pnl(pnl) if pnl is not None else "[yellow]N/A[/yellow]"
@@ -2355,7 +2388,7 @@ def _print_paper_close_preview_position(
         f"  {pos.mint_address[:16]}  "
         f"Entry={entry_str}  "
         f"Exit={price_str}  "
-        f"Est.PnL={pnl_str}"
+        f"Est.PnL={pnl_str}  quality={quality_label} confidence={confidence}"
     )
     return pnl or 0.0
 
@@ -2437,10 +2470,13 @@ def paper_close(
         console.print(f"[bold]Paper Close Preview[/bold]")
         console.print(f"  Position: {mint[:16]}")
         console.print(f"  Entry: {position.entry_price_sol:.10f} SOL | Tokens: {position.token_amount:.0f}")
+        console.print(f"  Fill quality: {position.fill_quality.value} ({_fill_quality_confidence(position.fill_quality)})")
         console.print(f"  Exit price: {exit_price:.10f} ({source})" if exit_price is not None else f"  Exit price: [yellow]unavailable ({source})[/yellow]")
-        if exit_price is not None:
+        if exit_price is not None and position.fill_quality != PaperFillQuality.UNPRICED:
             pnl = round(position.token_amount * exit_price - position.amount_sol, 9)
             console.print(f"  Estimated realized PnL: {_fmt_pnl(pnl)}")
+        elif position.fill_quality == PaperFillQuality.UNPRICED:
+            console.print("  Estimated realized PnL: [yellow]N/A (unpriced entry)[/yellow]")
         console.print("\n[yellow]Preview only — no position closed. Paper close is simulated.[/yellow]")
         return
 
@@ -2529,6 +2565,16 @@ def paper_report(
     console.print(f"  Live positions (untouched): {len(live_positions)}")
     console.print("")
 
+    console.print("[bold]Paper Data Quality[/bold]")
+    for fill_quality in (
+        PaperFillQuality.PRICED_QUOTE,
+        PaperFillQuality.UNPRICED,
+        PaperFillQuality.LEGACY_UNKNOWN,
+    ):
+        count = pnl_summary.fill_quality_counts.get(fill_quality.value, 0)
+        console.print(f"  {_fill_quality_label(fill_quality)} ({fill_quality.value}): {count}")
+    console.print("")
+
     console.print("[bold]Best/Worst Closed Trades[/bold]")
     if best_trade is not None:
         console.print(f"  Best closed trade: {_fmt_pnl(best_trade)}")
@@ -2544,7 +2590,7 @@ def paper_report(
             console.print(
                 f"  {pos.mint_address[:16]}  {status_str}  "
                 f"sol={pos.amount_sol:.4f}  tokens={pos.token_amount:.0f}  "
-                f"entry={pos.entry_price_sol:.10f}"
+                f"entry={pos.entry_price_sol:.10f}  quality={pos.fill_quality.value}"
             )
     else:
         console.print("  [yellow](no open paper positions)[/yellow]")

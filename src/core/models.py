@@ -48,6 +48,12 @@ class CheckResult(StrEnum):
     UNKNOWN = "UNKNOWN"
 
 
+class PaperFillQuality(StrEnum):
+    PRICED_QUOTE = "priced_quote"
+    UNPRICED = "unpriced"
+    LEGACY_UNKNOWN = "legacy_unknown"
+
+
 class TokenInfo(BaseModel):
     """Known facts about a Solana token mint."""
 
@@ -170,6 +176,7 @@ class Position(BaseModel):
     closed_at: datetime | None = None
     realized_pnl_sol: float = 0.0
     close_price_sol: float | None = None
+    fill_quality: PaperFillQuality = PaperFillQuality.LEGACY_UNKNOWN
     partial_exits: list[PartialExit] = Field(default_factory=list)
 
     @property

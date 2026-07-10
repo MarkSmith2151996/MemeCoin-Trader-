@@ -15,7 +15,7 @@ from typer.testing import CliRunner
 import src.cli as cli_module
 from src.core.config import load_settings
 from src.core.database import get_recent_soak_runs, init_db, record_soak_run
-from src.core.models import Position, PositionStatus, Signal, SignalSource, SignalType, SoakRunRecord, Trade
+from src.core.models import PaperFillQuality, Position, PositionStatus, Signal, SignalSource, SignalType, SoakRunRecord, Trade
 from src.execution.paper_pnl import PaperPnLCalculator
 from src.execution.price_provider import FakePriceProvider, UnavailablePriceProvider
 from src.strategy.position_manager import PositionManager
@@ -81,6 +81,8 @@ def test_valid_paper_fill_produces_meaningful_entry(tmp_path: Path) -> None:
     assert summary.total_sol_deployed == 1.0
     assert summary.positions[0].token_amount == 100000.0
     assert summary.positions[0].entry_price_sol == 0.00001
+    assert summary.positions[0].fill_quality == PaperFillQuality.PRICED_QUOTE
+    assert summary.fill_quality_counts[PaperFillQuality.PRICED_QUOTE.value] == 1
 
 
 def test_missing_price_does_not_invent_price(tmp_path: Path) -> None:
@@ -115,6 +117,8 @@ def test_missing_price_does_not_invent_price(tmp_path: Path) -> None:
     assert pos.mark_price_sol is None
     assert pos.mark_unavailable is True
     assert pos.unrealized_pnl_sol is None
+    assert pos.fill_quality == PaperFillQuality.UNPRICED
+    assert pos.mark_reason == "unpriced_entry"
 
 
 def test_legacy_zero_token_readable_as_na(tmp_path: Path) -> None:
@@ -147,6 +151,102 @@ def test_legacy_zero_token_readable_as_na(tmp_path: Path) -> None:
     assert pos.token_amount == 0.0
     assert pos.mark_unavailable is True
     assert pos.unrealized_pnl_sol is None
+    assert pos.fill_quality == PaperFillQuality.LEGACY_UNKNOWN
+    assert pos.mark_reason == "legacy_low_confidence"
+
+
+def test_legacy_row_with_live_mark_stays_low_confidence(tmp_path: Path) -> None:
+    db = tmp_path / "legacy_mark.db"
+    asyncio.run(init_db(db))
+    settings = load_settings()
+    manager = PositionManager(db, settings)
+
+    position = Position(
+        mint_address="LegacyMark11111111111111111111111111111111",
+        entry_trade_id="legacy-trade-2",
+        amount_sol=1.0,
+        token_amount=100000.0,
+        entry_price_sol=1.0,
+        mode="paper",
+    )
+    from src.core.database import record_position
+    asyncio.run(record_position(db, position))
+    manager._cache[position.mint_address] = position
+
+    calculator = PaperPnLCalculator(
+        manager,
+        price_provider=FakePriceProvider({"LegacyMark11111111111111111111111111111111": 0.00002}),
+    )
+    summary = asyncio.run(calculator.compute_summary())
+
+    assert summary.unrealized_pnl_sol is None
+    assert summary.mark_unavailable_count == 1
+    pos = summary.positions[0]
+    assert pos.mark_price_sol == 0.00002
+    assert pos.unrealized_pnl_sol is None
+    assert pos.pnl_confidence == "low_confidence"
+    assert pos.mark_reason == "legacy_low_confidence"
+
+
+def test_paper_report_includes_data_quality_counts(tmp_path: Path) -> None:
+    db = tmp_path / "report_quality.db"
+    asyncio.run(init_db(db))
+    settings = load_settings()
+    manager = PositionManager(db, settings)
+
+    _paper_position(manager, "QualityPrice1111111111111111111111111111111111", amount_sol=1.0, price_sol=0.00001)
+    unpriced_trade = Trade(
+        mint_address="QualityUnpriced111111111111111111111111111111",
+        side="BUY",
+        amount_sol=1.0,
+        token_amount=None,
+        price_sol=None,
+        mode="paper",
+        status="simulated",
+    )
+    asyncio.run(manager.open_position(unpriced_trade, None))
+    legacy_position = Position(
+        mint_address="QualityLegacy11111111111111111111111111111111",
+        entry_trade_id="legacy-trade-3",
+        amount_sol=1.0,
+        token_amount=100000.0,
+        entry_price_sol=1.0,
+        mode="paper",
+    )
+    from src.core.database import record_position
+    asyncio.run(record_position(db, legacy_position))
+
+    result = runner.invoke(cli_module.app, ["paper-report", "--db-path", str(db)])
+    assert result.exit_code == 0
+    assert "Paper Data Quality" in result.stdout
+    assert "reliable (priced_quote): 1" in result.stdout
+    assert "unpriced (unpriced): 1" in result.stdout
+    assert "legacy/unknown (legacy_unknown): 1" in result.stdout
+
+
+def test_paper_close_preview_labels_legacy_low_confidence(tmp_path: Path) -> None:
+    db = tmp_path / "preview_legacy_quality.db"
+    asyncio.run(init_db(db))
+    settings = load_settings()
+    manager = PositionManager(db, settings)
+
+    legacy_position = Position(
+        mint_address="PreviewLegacy1111111111111111111111111111111",
+        entry_trade_id="legacy-trade-4",
+        amount_sol=1.0,
+        token_amount=100000.0,
+        entry_price_sol=1.0,
+        mode="paper",
+    )
+    from src.core.database import record_position
+    asyncio.run(record_position(db, legacy_position))
+
+    result = runner.invoke(
+        cli_module.app,
+        ["paper-close", "--mint", "PreviewLegacy1111111111111111111111111111111", "--price", "0.00002", "--preview", "--db-path", str(db)],
+    )
+    assert result.exit_code == 0
+    assert "Fill quality: legacy_unknown (low_confidence)" in result.stdout
 
 
 def test_paper_fill_rejects_invalid_price(tmp_path: Path) -> None:
