@@ -589,12 +589,62 @@ def test_discovery_cli_safe_lines_include_ranked_candidate_summary(tmp_path: Pat
         joined = "\n".join(lines)
 
         assert "Top discovery candidates:" in joined
+        assert "candidate_mode_counts:" in joined
+        assert "launch=" in joined
         assert "TOP" in joined
         assert "BLOCK" in joined
+        assert "launch |" in joined
         assert "capacity-blocked" in joined
         assert "cluster:" in joined or "distinct-theme" in joined
         assert "partial" in joined
         assert "Accepted discovery comparison:" in joined
+        assert "Mode routing guidance:" in joined
+        assert "launch: fast-path only; no AI required or consulted" in joined
+
+    asyncio.run(run())
+
+
+def test_discovery_cli_safe_lines_show_migration_mode_as_diagnostic_only(tmp_path: Path) -> None:
+    async def run() -> None:
+        db_path = tmp_path / "migration-mode-summary.db"
+        migration_signal = build_signal("migration-summary", passes=True).model_copy(
+            update={"source": SignalSourceEnum.PUMP_FUN, "type": SignalType.GRADUATION}
+        )
+        migration_signal.payload.update(
+            {
+                "symbol": "GRAD",
+                "name": "Graduated Token",
+                "txType": "migrate",
+                "pool": "raydium",
+                "attention_diagnostics": {
+                    "attention_score": 79,
+                    "attention_tier": "strong_watch",
+                    "attention_reasons": ["migration-stage signal"],
+                    "narrative_tags": ["pumpfun", "graduation"],
+                    "social_signal_state": "missing",
+                    "metadata_completeness_state": "partial",
+                },
+                "holder_policy": {"holder_policy_state": "pass", "stage_hint": "graduation", "token_age_minutes": 15.0},
+                "liquidity_diagnostics": {"selected_liquidity_sol": 3000.0, "liquidity_source": "signal_payload", "liquidity_data_state": "known"},
+                "holder_diagnostics": {"selected_top10_holder_pct": 5.0, "top10_holder_source": "signal_payload"},
+            }
+        )
+
+        summary = await cli_module.run_bounded_paper_cycle(
+            max_signals=1,
+            timeout_seconds=0.1,
+            db_path=db_path,
+            risk_profile="discovery",
+            sources=[FakeSignalSource([[migration_signal]])],
+            poll_interval_s=0.0,
+        )
+
+        joined = "\n".join(summary.safe_lines())
+
+        assert "migration=1" in joined
+        assert "migration |" in joined
+        assert "migration: diagnostic only for now; may later become AI-eligible" in joined
+        assert summary.accepted_candidate_diagnostics[0]["candidate_mode"] == "migration"
 
     asyncio.run(run())
 

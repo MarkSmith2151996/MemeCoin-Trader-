@@ -66,6 +66,7 @@ class PaperCycleSummary:
     holder_lookup_outcomes: dict[str, int]
     termination_reason: str
     elapsed_seconds: float
+    candidate_mode_counts: dict[str, int] = field(default_factory=dict)
     accepted_candidate_diagnostics: list[dict[str, object]] = field(default_factory=list)
     rejected_candidate_diagnostics: list[dict[str, object]] = field(default_factory=list)
     diagnostic_report_path: str | None = None
@@ -108,6 +109,9 @@ class PaperCycleSummary:
         if self.holder_lookup_outcomes:
             lines.append("holder_lookup_outcomes:")
             lines.extend(f"  {reason}={count}" for reason, count in self.holder_lookup_outcomes.items())
+        if self.candidate_mode_counts:
+            lines.append("candidate_mode_counts:")
+            lines.extend(f"  {mode}={count}" for mode, count in self.candidate_mode_counts.items())
         lines.extend(self.summary_table_lines())
         lines.extend(self.discovery_candidate_summary_lines())
         lines.extend(self.discovery_comparison_lines())
@@ -179,14 +183,15 @@ class PaperCycleSummary:
             return []
 
         lines = ["Top discovery candidates:"]
-        lines.append("  # | symbol | mint | source | attn | outcome | reason | theme | meta")
+        lines.append("  # | symbol | mint | source | mode | attn | outcome | reason | theme | meta")
         for diagnostic in candidates[:8]:
             lines.append(
-                "  {rank} | {symbol} | {mint_short} | {source} | {attn} | {outcome} | {reason} | {theme} | {meta}".format(
+                "  {rank} | {symbol} | {mint_short} | {source} | {mode} | {attn} | {outcome} | {reason} | {theme} | {meta}".format(
                     rank=diagnostic.get("rank", "?"),
                     symbol=diagnostic.get("symbol", "unknown"),
                     mint_short=diagnostic.get("mint_short", "unknown"),
                     source=diagnostic.get("source", "unknown"),
+                    mode=diagnostic.get("candidate_mode", "unknown"),
                     attn=_candidate_attention_display(diagnostic),
                     outcome=diagnostic.get("action_outcome", diagnostic.get("decision", "unknown")),
                     reason=_candidate_summary_reason(diagnostic),
@@ -194,6 +199,14 @@ class PaperCycleSummary:
                     meta=diagnostic.get("metadata_completeness_state", "unknown"),
                 )
             )
+        lines.extend(
+            [
+                "Mode routing guidance:",
+                "  - launch: fast-path only; no AI required or consulted",
+                "  - migration: diagnostic only for now; may later become AI-eligible",
+                "  - unknown: safe fallback; no AI/live routing changes",
+            ]
+        )
         return lines
 
     def discovery_comparison_lines(self) -> list[str]:
@@ -202,13 +215,14 @@ class PaperCycleSummary:
 
         candidates = sorted(self.accepted_candidate_diagnostics, key=_accepted_candidate_sort_key)
         lines = ["Accepted discovery comparison:"]
-        lines.append("  # | symbol | mint | attn | diff | note")
+        lines.append("  # | symbol | mint | mode | attn | diff | note")
         for diagnostic in candidates[:5]:
             lines.append(
-                "  {rank} | {symbol} | {mint_short} | {attn} | {diff} | {note}".format(
+                "  {rank} | {symbol} | {mint_short} | {mode} | {attn} | {diff} | {note}".format(
                     rank=diagnostic.get("rank", "?"),
                     symbol=diagnostic.get("symbol", "unknown"),
                     mint_short=diagnostic.get("mint_short", "unknown"),
+                    mode=diagnostic.get("candidate_mode", "unknown"),
                     attn=_candidate_attention_display(diagnostic),
                     diff=_accepted_candidate_diff(diagnostic),
                     note=_accepted_candidate_note(diagnostic),
@@ -451,6 +465,7 @@ async def run_bounded_paper_cycle(
         accepted_candidate_diagnostics,
         rejected_candidate_diagnostics,
     )
+    candidate_mode_counts = _candidate_mode_counts(accepted_candidate_diagnostics, rejected_candidate_diagnostics)
     if normalized_risk_profile == "discovery":
         for diagnostic in accepted_candidate_diagnostics:
             trade_id = diagnostic.get("trade_id")
@@ -495,6 +510,7 @@ async def run_bounded_paper_cycle(
         source_evaluated_counts=dict(sorted(evaluated_by_source.items())),
         source_pass_counts=dict(sorted(passed_risk_by_source.items())),
         holder_lookup_outcomes=holder_lookup_outcomes,
+        candidate_mode_counts=candidate_mode_counts,
         termination_reason=termination_reason,
         elapsed_seconds=round(monotonic() - start_at, 3),
         accepted_candidate_diagnostics=accepted_candidate_diagnostics,
@@ -594,6 +610,7 @@ def _build_rejected_candidate_diagnostic(
         "attention_tier": attention_diagnostics.get("attention_tier", "ignore"),
         "attention_reasons": tuple(attention_diagnostics.get("attention_reasons", ())),
         "narrative_tags": tuple(attention_diagnostics.get("narrative_tags", ())),
+        "candidate_mode": payload.get("candidate_mode", "unknown"),
         "social_signal_state": attention_diagnostics.get("social_signal_state", "missing"),
         "metadata_completeness_state": attention_diagnostics.get("metadata_completeness_state", "sparse"),
         "rugcheck_top10_holder_pct": holder_diagnostics.get("rugcheck_top10_holder_pct", "unknown"),
@@ -746,6 +763,7 @@ def _build_accepted_candidate_diagnostic(
         "attention_tier": attention_diagnostics.get("attention_tier", "ignore"),
         "attention_reasons": tuple(attention_diagnostics.get("attention_reasons", ())),
         "narrative_tags": tuple(attention_diagnostics.get("narrative_tags", ())),
+        "candidate_mode": payload.get("candidate_mode", "unknown"),
         "social_signal_state": attention_diagnostics.get("social_signal_state", "missing"),
         "metadata_completeness_state": attention_diagnostics.get("metadata_completeness_state", "sparse"),
         "token_age_minutes": holder_policy.get("token_age_minutes", age_policy.get("token_age_minutes")),
@@ -833,6 +851,7 @@ def _compact_candidate_snapshot(diagnostic: dict[str, object]) -> dict[str, obje
         "attention_tier": diagnostic.get("attention_tier"),
         "attention_reasons": list(diagnostic.get("attention_reasons", ())),
         "narrative_tags": list(diagnostic.get("narrative_tags", ())),
+        "candidate_mode": diagnostic.get("candidate_mode"),
         "social_signal_state": diagnostic.get("social_signal_state"),
         "metadata_completeness_state": diagnostic.get("metadata_completeness_state"),
         "token_age_minutes": diagnostic.get("token_age_minutes"),
@@ -1125,6 +1144,18 @@ def _warning_count(diagnostic: dict[str, object]) -> int:
     if isinstance(warnings, (list, tuple)):
         return sum(1 for item in warnings if isinstance(item, str) and item)
     return 0
+
+
+def _candidate_mode_counts(
+    accepted: list[dict[str, object]],
+    rejected: list[dict[str, object]],
+) -> dict[str, int]:
+    counts: Counter[str] = Counter()
+    for diagnostic in [*accepted, *rejected]:
+        mode = diagnostic.get("candidate_mode")
+        if isinstance(mode, str) and mode:
+            counts[mode] += 1
+    return dict(sorted(counts.items()))
 
 
 def _candidate_attention_display(diagnostic: dict[str, object]) -> str:

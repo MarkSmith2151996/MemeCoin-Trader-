@@ -29,6 +29,7 @@ def test_paper_cycle_summary_table_has_stable_structure() -> None:
         source_evaluated_counts={"pump_fun": 10, "twitter": 2, "whale_tracker": 3},
         source_pass_counts={"pump_fun": 1, "twitter": 0, "whale_tracker": 1},
         holder_lookup_outcomes={},
+        candidate_mode_counts={"launch": 2, "unknown": 13},
         termination_reason="max_signals",
         elapsed_seconds=12.345,
     )
