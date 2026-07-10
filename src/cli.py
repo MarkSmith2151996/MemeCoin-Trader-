@@ -2228,6 +2228,55 @@ def paper_pnl(
     _format_pnl_summary(summary)
 
 
+def _resolve_close_price(
+    mint_address: str,
+    manual_price: float | None,
+    use_mark: bool,
+    position: Position | None = None,
+) -> tuple[float | None, str]:
+    """Resolve exit price and return (price_sol, source).
+
+    Source is 'manual', 'live_mark', or 'unavailable'.
+    """
+    if manual_price is not None and manual_price > 0:
+        return manual_price, "manual"
+    if use_mark:
+        provider = DexScreenerPriceProvider()
+        try:
+            mark = asyncio.run(provider.get_current_price(mint_address))
+            if mark is not None and mark > 0:
+                return mark, "live_mark"
+        except Exception:
+            pass
+    if position is not None and position.close_price_sol is not None and position.close_price_sol > 0:
+        return position.close_price_sol, "manual"
+    return None, "unavailable"
+
+
+def _print_paper_close_preview_position(
+    pos: Position,
+    exit_price: float | None,
+    source: str,
+) -> float:
+    """Print single position preview line. Returns estimated PnL."""
+    pnl = None
+    if exit_price is not None and exit_price > 0 and pos.token_amount > 0:
+        pnl = round(pos.token_amount * exit_price - pos.amount_sol, 9)
+
+    src_label = f"({source})" if source != "unavailable" else ""
+    pnl_str = _fmt_pnl(pnl) if pnl is not None else "[yellow]N/A[/yellow]"
+    price_str = f"{exit_price:.10f} {src_label}" if exit_price is not None else "[yellow]unavailable[/yellow]"
+    entry_str = f"{pos.entry_price_sol:.10f}"
+
+    console.print(
+        f"  {pos.mint_address[:16]}  "
+        f"Entry={entry_str}  "
+        f"Exit={price_str}  "
+        f"Est.PnL={pnl_str}"
+    )
+    return pnl or 0.0
+
+
 @app.command("paper-close")
 def paper_close(
     mint: str = typer.Option("", "--mint", help="Mint address to close."),
@@ -2235,29 +2284,45 @@ def paper_close(
     use_mark: bool = typer.Option(False, "--use-mark", help="Attempt to use a live DexScreener mark price if no --price given."),
     close_all: bool = typer.Option(False, "--all", help="Close all open paper positions."),
     confirm: bool = typer.Option(False, "--confirm", help="Required confirmation for --all."),
+    preview: bool = typer.Option(False, "--preview", help="Preview close without mutating DB."),
     db_path: str | None = typer.Option(None, help="Optional SQLite path override."),
 ) -> None:
-    """Close a paper position by mint address or close all with --all --confirm."""
+    """Close a paper position by mint address or close all with --all --confirm.
+
+    Paper close is simulated. Not real profit or loss.
+    """
     settings = load_settings()
     runtime_db_path = resolve_db_path(db_path)
     asyncio.run(init_db(runtime_db_path))
     manager = PositionManager(runtime_db_path, settings)
 
     if close_all:
+        paper_positions = asyncio.run(manager.get_paper_positions())
+        live_positions = [p for p in asyncio.run(manager.get_all_open()) if p.mode == "live"]
+
+        if preview:
+            console.print(f"[bold]Paper Close Preview[/bold]")
+            console.print(f"  Paper positions to close: {len(paper_positions)}")
+            console.print(f"  Live positions (untouched): {len(live_positions)}")
+            total_pnl = 0.0
+            for pos in paper_positions:
+                exit_price, source = _resolve_close_price(pos.mint_address, price, use_mark, pos)
+                total_pnl += _print_paper_close_preview_position(pos, exit_price, source)
+            console.print(f"\n  Estimated total realized PnL: {_fmt_pnl(total_pnl)}")
+            console.print("\n[yellow]Preview only — no positions closed. Paper close is simulated.[/yellow]")
+            return
+
         if not confirm:
-            paper_positions = asyncio.run(manager.get_paper_positions())
-            live_positions = [p for p in asyncio.run(manager.get_all_open()) if p.mode == "live"]
             console.print(f"Paper positions to close: {len(paper_positions)}")
             console.print(f"Live positions (untouched): {len(live_positions)}")
             console.print("\n[yellow]Use --confirm to close all paper positions. Live positions are never closed.[/yellow]")
             return
 
         closed_count = 0
-        paper_positions = asyncio.run(manager.get_paper_positions())
         price_provider = DexScreenerPriceProvider() if use_mark else None
         for pos in paper_positions:
             exit_price = price
-            if exit_price is None and use_mark:
+            if exit_price is None and use_mark and price_provider is not None:
                 result = asyncio.run(price_provider.get_current_price(pos.mint_address))
                 if result is not None and result > 0:
                     exit_price = result
@@ -2267,6 +2332,7 @@ def paper_close(
         remaining = asyncio.run(manager.get_all_open())
         live_count = sum(1 for p in remaining if p.mode == "live")
         console.print(f"Closed {closed_count} paper position(s) with PnL. {live_count} live position(s) untouched.")
+        console.print("[yellow]Paper close is simulated. Not real profit or loss.[/yellow]")
         return
 
     if not mint:
@@ -2282,21 +2348,31 @@ def paper_close(
         console.print("[red]Refusing to close a live position via paper-close.[/red]")
         raise typer.Exit(code=1)
 
-    resolved_price = price
-    if resolved_price is None:
-        resolved_price = position.close_price_sol
-    if resolved_price is None or resolved_price <= 0 and use_mark:
-        live_provider = DexScreenerPriceProvider()
-        mark = asyncio.run(live_provider.get_current_price(mint))
-        if mark is not None and mark > 0:
-            resolved_price = mark
-    if resolved_price is None or resolved_price <= 0:
-        console.print("[red]No exit price available. Provide --price or use --use-mark to attempt a live price fetch.[/red]")
+    exit_price, source = _resolve_close_price(mint, price, use_mark, position)
+
+    if preview:
+        console.print(f"[bold]Paper Close Preview[/bold]")
+        console.print(f"  Position: {mint[:16]}")
+        console.print(f"  Entry: {position.entry_price_sol:.10f} SOL | Tokens: {position.token_amount:.0f}")
+        console.print(f"  Exit price: {exit_price:.10f} ({source})" if exit_price is not None else f"  Exit price: [yellow]unavailable ({source})[/yellow]")
+        if exit_price is not None:
+            pnl = round(position.token_amount * exit_price - position.amount_sol, 9)
+            console.print(f"  Estimated realized PnL: {_fmt_pnl(pnl)}")
+        console.print("\n[yellow]Preview only — no position closed. Paper close is simulated.[/yellow]")
+        return
+
+    if exit_price is None or exit_price <= 0:
+        src_help = "Provide --price for manual, or --use-mark for a live DexScreener price."
+        console.print(f"[red]No exit price available (source: {source}). {src_help}[/red]")
         raise typer.Exit(code=1)
 
-    closed = asyncio.run(manager.close_position(mint, exit_price_sol=resolved_price))
+    closed = asyncio.run(manager.close_position(mint, exit_price_sol=exit_price))
     pnl_str = _fmt_pnl(closed.realized_pnl_sol if closed else 0.0)
-    console.print(f"Closed paper position {mint[:16]} at price {resolved_price:.10f}. Realized PnL: {pnl_str}")
+    console.print(
+        f"Closed paper position {mint[:16]} at price {exit_price:.10f} ({source}). "
+        f"Realized PnL: {pnl_str}"
+    )
+    console.print("[yellow]Paper close is simulated. Not real profit or loss.[/yellow]")
 
 
 if __name__ == "__main__":

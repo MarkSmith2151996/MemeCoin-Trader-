@@ -162,6 +162,7 @@ def test_paper_close_all_with_confirm_closes_paper(tmp_path: Path) -> None:
     result = runner.invoke(cli_module.app, ["paper-close", "--all", "--confirm", "--db-path", str(db)])
     assert result.exit_code == 0
     assert "Closed 2 paper position(s)" in result.stdout
+    assert "simulated" in result.stdout.lower()
 
     positions = asyncio.run(manager.get_all_open())
     assert len(positions) == 0
@@ -334,8 +335,9 @@ def test_paper_close_by_mint_with_price(tmp_path: Path) -> None:
     )
     assert result.exit_code == 0, f"stdout: {result.stdout}"
     assert "Closed paper position" in result.stdout
-    assert "Realized PnL" in result.stdout
     assert "+1.000000 SOL" in result.stdout
+    assert "(manual)" in result.stdout
+    assert "simulated" in result.stdout.lower()
 
     state_result = runner.invoke(cli_module.app, ["paper-state", "--db-path", str(db)])
     assert "Open paper positions: 0" in state_result.stdout
@@ -357,3 +359,116 @@ def test_paper_close_position_not_found(tmp_path: Path) -> None:
     )
     assert result.exit_code != 0
     assert "Position not found" in result.stdout
+
+
+# --- MT-121: paper-close preview and safeguards ---
+
+def test_paper_close_preview_does_not_mutate(tmp_path: Path) -> None:
+    db = tmp_path / "preview_no_mutate.db"
+    asyncio.run(init_db(db))
+    settings = load_settings()
+    manager = PositionManager(db, settings)
+    _paper_position(manager, "PreviewMint111111111111111111111111111111111", amount_sol=1.0, price_sol=0.00001)
+
+    result = runner.invoke(
+        cli_module.app,
+        ["paper-close", "--mint", "PreviewMint111111111111111111111111111111111", "--price", "0.00002", "--preview", "--db-path", str(db)],
+    )
+    assert result.exit_code == 0
+    assert "Preview only" in result.stdout
+    assert "Estimated realized PnL" in result.stdout
+    assert "(manual)" in result.stdout
+    assert "simulated" in result.stdout.lower()
+
+    positions = asyncio.run(manager.get_all_open())
+    assert len(positions) == 1
+    position = positions[0]
+    assert position.status != "CLOSED"
+
+
+def test_paper_close_preview_all_does_not_mutate(tmp_path: Path) -> None:
+    db = tmp_path / "preview_all_no_mutate.db"
+    asyncio.run(init_db(db))
+    settings = load_settings()
+    manager = PositionManager(db, settings)
+    _paper_position(manager, "PreviewA11111111111111111111111111111111111", amount_sol=1.0, price_sol=0.00001)
+    _paper_position(manager, "PreviewB11111111111111111111111111111111111", amount_sol=2.0, price_sol=0.00002)
+
+    result = runner.invoke(
+        cli_module.app,
+        ["paper-close", "--all", "--price", "0.00003", "--preview", "--db-path", str(db)],
+    )
+    assert result.exit_code == 0
+    assert "Preview only" in result.stdout
+    assert "Estimated total realized PnL" in result.stdout
+
+    positions = asyncio.run(manager.get_all_open())
+    assert len(positions) == 2
+
+
+def test_paper_close_refuses_without_price(tmp_path: Path) -> None:
+    db = tmp_path / "no_price_refuse.db"
+    asyncio.run(init_db(db))
+    settings = load_settings()
+    manager = PositionManager(db, settings)
+    _paper_position(manager, "NoPriceClose1111111111111111111111111111111", amount_sol=1.0, price_sol=0.00001)
+
+    result = runner.invoke(
+        cli_module.app,
+        ["paper-close", "--mint", "NoPriceClose1111111111111111111111111111111", "--db-path", str(db)],
+    )
+    assert result.exit_code != 0
+    assert "No exit price available" in result.stdout
+    assert "Provide --price" in result.stdout
+    assert "--use-mark" in result.stdout
+
+
+def test_paper_close_shows_price_source(tmp_path: Path) -> None:
+    db = tmp_path / "price_source.db"
+    asyncio.run(init_db(db))
+    settings = load_settings()
+    manager = PositionManager(db, settings)
+    _paper_position(manager, "SourceMint1111111111111111111111111111111111", amount_sol=1.0, price_sol=0.00001)
+
+    result = runner.invoke(
+        cli_module.app,
+        ["paper-close", "--mint", "SourceMint1111111111111111111111111111111111", "--price", "0.00002", "--db-path", str(db)],
+    )
+    assert result.exit_code == 0
+    assert "(manual)" in result.stdout
+    assert "simulated" in result.stdout.lower()
+
+
+def test_paper_close_preview_shows_price_source(tmp_path: Path) -> None:
+    db = tmp_path / "preview_source.db"
+    asyncio.run(init_db(db))
+    settings = load_settings()
+    manager = PositionManager(db, settings)
+    _paper_position(manager, "PrevSrcMint111111111111111111111111111111111", amount_sol=1.0, price_sol=0.00001)
+
+    result = runner.invoke(
+        cli_module.app,
+        ["paper-close", "--mint", "PrevSrcMint111111111111111111111111111111111", "--price", "0.00003", "--preview", "--db-path", str(db)],
+    )
+    assert result.exit_code == 0
+    assert "(manual)" in result.stdout
+    assert "Preview only" in result.stdout
+    assert "Estimated realized PnL" in result.stdout
+    assert "+2.000000 SOL" in result.stdout
+
+
+def test_paper_close_no_secrets_in_preview(tmp_path: Path) -> None:
+    db = tmp_path / "preview_secrets.db"
+    asyncio.run(init_db(db))
+    settings = load_settings()
+    manager = PositionManager(db, settings)
+    _paper_position(manager, "SecPreview11111111111111111111111111111111", amount_sol=1.0, price_sol=0.00001)
+
+    result = runner.invoke(
+        cli_module.app,
+        ["paper-close", "--mint", "SecPreview11111111111111111111111111111111", "--price", "0.00002", "--preview", "--db-path", str(db)],
+    )
+    assert result.exit_code == 0
+    output = result.stdout.lower()
+    assert "private_key" not in output
+    assert "api-key=" not in output
