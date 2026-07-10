@@ -89,7 +89,7 @@ class PaperPnLCalculator:
                 mark = None
                 pnl_pos.mark_reason = "price_unavailable"
 
-            if mark is not None and mark > 0:
+            if mark is not None and mark > 0 and pos.token_amount > 0:
                 pnl_pos.mark_price_sol = mark
                 pnl_pos.unrealized_pnl_sol = round(pos.token_amount * mark - pos.amount_sol, 9)
                 pnl_pos.unrealized_pnl_pct = (

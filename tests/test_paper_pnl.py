@@ -13,7 +13,7 @@ from typer.testing import CliRunner
 import src.cli as cli_module
 from src.core.config import load_settings
 from src.core.database import init_db
-from src.core.models import Position, PositionStatus, Trade
+from src.core.models import Position, PositionStatus, Signal, SignalSource, SignalType, Trade
 from src.execution.paper_pnl import PaperPnLCalculator
 from src.execution.price_provider import FakePriceProvider, UnavailablePriceProvider
 from src.strategy.position_manager import PositionManager
@@ -46,6 +46,130 @@ def _live_position(manager: PositionManager, mint: str) -> None:
         status="simulated",
     )
     asyncio.run(manager.open_position(trade, None))
+
+
+# --- MT-123: paper fill modeling improvements ---
+
+def test_valid_paper_fill_produces_meaningful_entry(tmp_path: Path) -> None:
+    db = tmp_path / "valid_fill.db"
+    asyncio.run(init_db(db))
+    settings = load_settings()
+    manager = PositionManager(db, settings)
+
+    trade = Trade(
+        mint_address="ValidFill1111111111111111111111111111111111",
+        side="BUY",
+        amount_sol=1.0,
+        token_amount=100000.0,
+        price_sol=0.00001,
+        mode="paper",
+        status="simulated",
+    )
+    position = asyncio.run(manager.open_position(trade, None))
+
+    assert position.token_amount == 100000.0
+    assert position.entry_price_sol == 0.00001
+    assert position.amount_sol == 1.0
+
+    calculator = PaperPnLCalculator(manager, price_provider=UnavailablePriceProvider())
+    summary = asyncio.run(calculator.compute_summary())
+
+    assert summary.total_positions == 1
+    assert summary.open_positions == 1
+    assert summary.total_sol_deployed == 1.0
+    assert summary.positions[0].token_amount == 100000.0
+    assert summary.positions[0].entry_price_sol == 0.00001
+
+
+def test_missing_price_does_not_invent_price(tmp_path: Path) -> None:
+    db = tmp_path / "no_price_fill.db"
+    asyncio.run(init_db(db))
+    settings = load_settings()
+    manager = PositionManager(db, settings)
+
+    trade = Trade(
+        mint_address="NoPriceMint22222222222222222222222222222222",
+        side="BUY",
+        amount_sol=1.0,
+        token_amount=None,
+        price_sol=None,
+        mode="paper",
+        status="simulated",
+    )
+    position = asyncio.run(manager.open_position(trade, None))
+
+    assert position.token_amount == 0.0
+    assert position.entry_price_sol == 0.0
+    assert position.amount_sol == 1.0
+
+    calculator = PaperPnLCalculator(manager, price_provider=UnavailablePriceProvider())
+    summary = asyncio.run(calculator.compute_summary())
+
+    assert summary.total_positions == 1
+    assert summary.open_positions == 1
+    assert summary.mark_unavailable_count == 1
+    assert summary.unrealized_pnl_sol is None
+    pos = summary.positions[0]
+    assert pos.mark_price_sol is None
+    assert pos.mark_unavailable is True
+    assert pos.unrealized_pnl_sol is None
+
+
+def test_legacy_zero_token_readable_as_na(tmp_path: Path) -> None:
+    db = tmp_path / "legacy_zero.db"
+    asyncio.run(init_db(db))
+    settings = load_settings()
+    manager = PositionManager(db, settings)
+
+    position = Position(
+        mint_address="LegacyZero11111111111111111111111111111111",
+        entry_trade_id="legacy-trade-1",
+        amount_sol=1.0,
+        token_amount=0.0,
+        entry_price_sol=1.0,
+        mode="paper",
+    )
+    from src.core.database import record_position
+    asyncio.run(record_position(db, position))
+    manager._cache[position.mint_address] = position
+
+    calculator = PaperPnLCalculator(manager, price_provider=UnavailablePriceProvider())
+    summary = asyncio.run(calculator.compute_summary())
+
+    assert summary.total_positions == 1
+    assert summary.open_positions == 1
+    assert summary.unrealized_pnl_sol is None
+    assert summary.mark_unavailable_count == 1
+
+    pos = summary.positions[0]
+    assert pos.token_amount == 0.0
+    assert pos.mark_unavailable is True
+    assert pos.unrealized_pnl_sol is None
+
+
+def test_paper_fill_rejects_invalid_price(tmp_path: Path) -> None:
+    db = tmp_path / "reject_invalid.db"
+    asyncio.run(init_db(db))
+    settings = load_settings()
+    manager = PositionManager(db, settings)
+
+    import math
+
+    trade = Trade(
+        mint_address="InvalidZeroPrice11111111111111111111111111",
+        side="BUY",
+        amount_sol=1.0,
+        token_amount=None,
+        price_sol=0.0,
+        mode="paper",
+        status="simulated",
+    )
+    raised = False
+    try:
+        asyncio.run(manager.open_position(trade, None))
+    except ValueError:
+        raised = True
+    assert raised, "Expected ValueError for price_sol=0.0 via trade"
 
 
 # Requirement 1: paper-pnl reports exposure but no PnL when no marks/exits exist

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 from datetime import UTC, datetime, timedelta
 
 from src.core.models import Side, SwapQuote, Trade
@@ -46,7 +47,31 @@ class PaperExecutionAdapter(ExecutionAdapter):
         slippage_bps: int = 300,
     ) -> SwapQuote:
         self._ensure_open()
-        price = await self.get_current_price(mint_address) or 1.0
+        price = await self.get_current_price(mint_address)
+        if price is None:
+            return SwapQuote(
+                mint_address=mint_address,
+                side=side,
+                amount_sol=amount_sol,
+                estimated_out_amount=0.0,
+                price_sol=None,
+                price_impact_pct=0.0,
+                slippage_bps=slippage_bps,
+                provider=self.mode,
+                expires_at=datetime.now(UTC) + timedelta(seconds=30),
+            )
+        if price <= 0 or math.isnan(price):
+            return SwapQuote(
+                mint_address=mint_address,
+                side=side,
+                amount_sol=amount_sol,
+                estimated_out_amount=0.0,
+                price_sol=None,
+                price_impact_pct=0.0,
+                slippage_bps=slippage_bps,
+                provider=self.mode,
+                expires_at=datetime.now(UTC) + timedelta(seconds=30),
+            )
         estimated_out = amount_sol / price if side == Side.BUY else amount_sol * price
         return SwapQuote(
             mint_address=mint_address,

@@ -163,7 +163,7 @@ class Position(BaseModel):
     entry_trade_id: str
     amount_sol: float = Field(gt=0)
     token_amount: float = Field(ge=0)
-    entry_price_sol: float = Field(gt=0)
+    entry_price_sol: float = Field(ge=0)
     status: PositionStatus = PositionStatus.OPEN
     mode: str = "paper"
     opened_at: datetime = Field(default_factory=utc_now)

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -29,8 +30,13 @@ class PositionManager:
         self._cache: dict[str, Position] = {}
 
     async def open_position(self, trade: Trade, signal: Signal) -> Position:
-        entry_price = trade.price_sol or self._signal_price(signal) or 1.0
-        token_amount = trade.token_amount or (trade.amount_sol / entry_price)
+        known_price = trade.price_sol if trade.price_sol is not None else self._signal_price(signal)
+        if known_price is not None and (known_price <= 0 or math.isnan(known_price)):
+            raise ValueError(f"Invalid entry price for paper position: {known_price}")
+        entry_price = known_price if known_price is not None and known_price > 0 else 0.0
+        token_amount = trade.token_amount
+        if token_amount is None:
+            token_amount = trade.amount_sol / entry_price if entry_price > 0 else 0.0
         position = Position(
             mint_address=trade.mint_address,
             entry_trade_id=trade.id,
@@ -162,7 +168,9 @@ class PositionManager:
         await record_position(self.db, position)
 
     @staticmethod
-    def _signal_price(signal: Signal) -> float | None:
+    def _signal_price(signal: Signal | None) -> float | None:
+        if signal is None:
+            return None
         raw_price = signal.payload.get("price_sol")
         if isinstance(raw_price, (int, float)) and raw_price > 0:
             return float(raw_price)
