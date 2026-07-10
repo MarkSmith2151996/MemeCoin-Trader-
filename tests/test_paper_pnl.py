@@ -249,6 +249,110 @@ def test_paper_close_preview_labels_legacy_low_confidence(tmp_path: Path) -> Non
     assert "Fill quality: legacy_unknown (low_confidence)" in result.stdout
 
 
+def test_paper_state_legacy_lists_archive_candidates(tmp_path: Path) -> None:
+    db = tmp_path / "legacy_list.db"
+    asyncio.run(init_db(db))
+    settings = load_settings()
+    manager = PositionManager(db, settings)
+
+    legacy_position = Position(
+        mint_address="LegacyList11111111111111111111111111111111",
+        entry_trade_id="legacy-trade-5",
+        amount_sol=1.0,
+        token_amount=0.0,
+        entry_price_sol=1.0,
+        mode="paper",
+    )
+    from src.core.database import record_position
+    asyncio.run(record_position(db, legacy_position))
+
+    result = runner.invoke(cli_module.app, ["paper-state", "--legacy", "--db-path", str(db)])
+    assert result.exit_code == 0
+    assert "Legacy paper positions eligible for archive: 1" in result.stdout
+    assert "LegacyList111111" in result.stdout
+
+
+def test_paper_state_archive_legacy_requires_confirm(tmp_path: Path) -> None:
+    db = tmp_path / "legacy_confirm.db"
+    asyncio.run(init_db(db))
+
+    legacy_position = Position(
+        mint_address="LegacyConfirm111111111111111111111111111111",
+        entry_trade_id="legacy-trade-6",
+        amount_sol=1.0,
+        token_amount=0.0,
+        entry_price_sol=1.0,
+        mode="paper",
+    )
+    from src.core.database import record_position
+    asyncio.run(record_position(db, legacy_position))
+
+    result = runner.invoke(cli_module.app, ["paper-state", "--archive-legacy", "--db-path", str(db)])
+    assert result.exit_code == 0
+    assert "Use --confirm with --archive-legacy" in result.stdout
+
+    settings = load_settings()
+    manager = PositionManager(db, settings)
+    assert len(asyncio.run(manager.get_legacy_paper_positions())) == 1
+
+
+def test_paper_state_archive_legacy_only_mutates_paper_rows(tmp_path: Path) -> None:
+    db = tmp_path / "legacy_archive.db"
+    asyncio.run(init_db(db))
+    settings = load_settings()
+    manager = PositionManager(db, settings)
+
+    legacy_position = Position(
+        mint_address="LegacyArchive111111111111111111111111111111",
+        entry_trade_id="legacy-trade-7",
+        amount_sol=1.0,
+        token_amount=0.0,
+        entry_price_sol=1.0,
+        mode="paper",
+    )
+    from src.core.database import record_position
+    asyncio.run(record_position(db, legacy_position))
+    _live_position(manager, "LiveArchive111111111111111111111111111111111")
+
+    result = runner.invoke(cli_module.app, ["paper-state", "--archive-legacy", "--confirm", "--db-path", str(db)])
+    assert result.exit_code == 0
+    assert "Archived 1 legacy paper position(s)" in result.stdout
+    assert "1 live position(s) untouched" in result.stdout
+
+    archived = asyncio.run(manager.get_archived_paper_positions())
+    assert len(archived) == 1
+    assert archived[0].archive_reason == "legacy_fill_quality"
+    remaining = asyncio.run(manager.get_all_open())
+    assert len(remaining) == 1
+    assert remaining[0].mode == "live"
+
+
+def test_paper_report_excludes_archived_legacy_rows(tmp_path: Path) -> None:
+    db = tmp_path / "report_archive_excluded.db"
+    asyncio.run(init_db(db))
+    settings = load_settings()
+    manager = PositionManager(db, settings)
+
+    _paper_position(manager, "ActivePaper111111111111111111111111111111111", amount_sol=1.0, price_sol=0.00001)
+    legacy_position = Position(
+        mint_address="ArchivedLegacy111111111111111111111111111111",
+        entry_trade_id="legacy-trade-8",
+        amount_sol=1.0,
+        token_amount=0.0,
+        entry_price_sol=1.0,
+        mode="paper",
+        archived=True,
+    )
+    from src.core.database import record_position
+    asyncio.run(record_position(db, legacy_position))
+
+    result = runner.invoke(cli_module.app, ["paper-report", "--db-path", str(db)])
+    assert result.exit_code == 0
+    assert "Open paper positions: 1" in result.stdout
+    assert "Archived legacy paper positions excluded: 1" in result.stdout
+    assert "legacy/unknown (legacy_unknown): 0" in result.stdout
+
+
 def test_paper_fill_rejects_invalid_price(tmp_path: Path) -> None:
     db = tmp_path / "reject_invalid.db"
     asyncio.run(init_db(db))

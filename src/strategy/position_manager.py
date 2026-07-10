@@ -58,7 +58,7 @@ class PositionManager:
 
     async def get_position(self, mint: str) -> Position | None:
         cached = self._cache.get(mint)
-        if cached is not None and cached.status != PositionStatus.CLOSED:
+        if cached is not None and cached.status != PositionStatus.CLOSED and not cached.archived:
             return cached
 
         if not self.use_persisted_positions:
@@ -67,13 +67,17 @@ class PositionManager:
         position = await self._fetch_position(mint)
         if position is not None:
             self._cache[mint] = position
-        if position is None or position.status == PositionStatus.CLOSED:
+        if position is None or position.status == PositionStatus.CLOSED or position.archived:
             return None
         return position
 
-    async def get_all_open(self) -> list[Position]:
+    async def get_all_open(self, *, include_archived: bool = False) -> list[Position]:
         if self.db is None or not self.use_persisted_positions:
-            return [position for position in self._cache.values() if position.status != PositionStatus.CLOSED]
+            return [
+                position
+                for position in self._cache.values()
+                if position.status != PositionStatus.CLOSED and (include_archived or not position.archived)
+            ]
 
         async with aiosqlite.connect(self.db) as conn:
             cursor = await conn.execute(
@@ -84,7 +88,9 @@ class PositionManager:
 
         positions = [Position.model_validate_json(row[0]) for row in rows]
         self._cache.update({position.mint_address: position for position in positions})
-        return positions
+        if include_archived:
+            return positions
+        return [position for position in positions if not position.archived]
 
     async def record_partial_exit(
         self,
@@ -138,10 +144,36 @@ class PositionManager:
         await self._persist(closed)
         return closed
 
-    async def get_paper_positions(self) -> list[Position]:
+    async def get_paper_positions(self, *, include_archived: bool = False) -> list[Position]:
         """Return all open positions with mode == 'paper'."""
-        all_open = await self.get_all_open()
+        all_open = await self.get_all_open(include_archived=include_archived)
         return [p for p in all_open if p.mode == "paper"]
+
+    async def get_archived_paper_positions(self) -> list[Position]:
+        """Return archived paper positions excluded from default reports."""
+        all_positions = await self.get_all_open(include_archived=True)
+        return [p for p in all_positions if p.mode == "paper" and p.archived]
+
+    async def get_legacy_paper_positions(self) -> list[Position]:
+        """Return active legacy paper positions that are safe archive candidates."""
+        paper_positions = await self.get_paper_positions()
+        return [p for p in paper_positions if p.fill_quality == PaperFillQuality.LEGACY_UNKNOWN]
+
+    async def archive_legacy_paper_positions(self) -> int:
+        """Archive active legacy paper positions without touching live or priced rows."""
+        legacy_positions = await self.get_legacy_paper_positions()
+        archived_at = datetime.now(UTC)
+        for position in legacy_positions:
+            archived = position.model_copy(
+                update={
+                    "archived": True,
+                    "archived_at": archived_at,
+                    "archive_reason": "legacy_fill_quality",
+                }
+            )
+            self._cache[position.mint_address] = archived
+            await self._persist(archived)
+        return len(legacy_positions)
 
     async def close_paper_positions(self) -> int:
         """Close all open paper positions. Returns count closed. Never touches live positions."""

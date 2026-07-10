@@ -177,6 +177,9 @@ class Position(BaseModel):
     realized_pnl_sol: float = 0.0
     close_price_sol: float | None = None
     fill_quality: PaperFillQuality = PaperFillQuality.LEGACY_UNKNOWN
+    archived: bool = False
+    archived_at: datetime | None = None
+    archive_reason: str | None = None
     partial_exits: list[PartialExit] = Field(default_factory=list)
 
     @property

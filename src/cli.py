@@ -2162,6 +2162,8 @@ def live_buy(
 @app.command("paper-state")
 def paper_state(
     cleanup: bool = typer.Option(False, "--cleanup", help="Close all open paper positions."),
+    legacy: bool = typer.Option(False, "--legacy", help="List active legacy paper positions that are archive candidates."),
+    archive_legacy: bool = typer.Option(False, "--archive-legacy", help="Archive active legacy paper positions from current paper reports."),
     confirm: bool = typer.Option(False, "--confirm", help="Required confirmation for cleanup."),
     db_path: str | None = typer.Option(None, help="Optional SQLite path override."),
 ) -> None:
@@ -2170,6 +2172,10 @@ def paper_state(
     runtime_db_path = resolve_db_path(db_path)
     asyncio.run(init_db(runtime_db_path))
     manager = PositionManager(runtime_db_path, settings)
+
+    if cleanup and archive_legacy:
+        console.print("[red]Choose either --cleanup or --archive-legacy, not both.[/red]")
+        raise typer.Exit(code=1)
 
     if cleanup:
         if not confirm:
@@ -2183,6 +2189,29 @@ def paper_state(
         console.print(f"Closed {count} paper position(s). {live_count} live position(s) untouched.")
         return
 
+    if archive_legacy:
+        if not confirm:
+            asyncio.run(_print_paper_state(manager))
+            asyncio.run(_print_legacy_paper_positions(manager))
+            console.print("\n[yellow]Use --confirm with --archive-legacy to archive active legacy paper positions. Live positions are never touched.[/yellow]")
+            return
+
+        archived_count = asyncio.run(manager.archive_legacy_paper_positions())
+        archived_total = len(asyncio.run(manager.get_archived_paper_positions()))
+        live_count = sum(1 for p in asyncio.run(manager.get_all_open()) if p.mode == "live")
+        console.print(
+            f"Archived {archived_count} legacy paper position(s). "
+            f"Archived total excluded from current reports: {archived_total}. "
+            f"{live_count} live position(s) untouched."
+        )
+        console.print("[yellow]Paper archive is simulated bookkeeping. No live positions were changed.[/yellow]")
+        return
+
+    if legacy:
+        asyncio.run(_print_paper_state(manager))
+        asyncio.run(_print_legacy_paper_positions(manager))
+        return
+
     asyncio.run(_print_paper_state(manager))
 
 
@@ -2191,10 +2220,12 @@ async def _print_paper_state(manager: PositionManager) -> None:
     all_open = await manager.get_all_open()
     paper_positions = [p for p in all_open if p.mode == "paper"]
     live_positions = [p for p in all_open if p.mode == "live"]
+    archived_paper_positions = await manager.get_archived_paper_positions()
 
     console.print(f"Open paper positions: {len(paper_positions)}")
     console.print(f"Open live positions:  {len(live_positions)}")
     console.print(f"Total open positions: {len(all_open)}")
+    console.print(f"Archived paper positions excluded: {len(archived_paper_positions)}")
 
     if paper_positions:
         console.print("\n--- Paper Positions ---")
@@ -2207,6 +2238,25 @@ async def _print_paper_state(manager: PositionManager) -> None:
                 f"quality={pos.fill_quality.value}  "
                 f"opened={pos.opened_at.strftime('%H:%M:%S')}"
             )
+
+
+async def _print_legacy_paper_positions(manager: PositionManager) -> None:
+    """Print active legacy paper positions eligible for archive."""
+    legacy_positions = await manager.get_legacy_paper_positions()
+    console.print(f"\nLegacy paper positions eligible for archive: {len(legacy_positions)}")
+
+    if not legacy_positions:
+        console.print("  [yellow](no active legacy paper positions)[/yellow]")
+        return
+
+    for pos in sorted(legacy_positions, key=lambda p: p.opened_at):
+        console.print(
+            f"  mint={pos.mint_address[:16]}  "
+            f"sol={pos.amount_sol:.4f}  "
+            f"tokens={pos.token_amount:.0f}  "
+            f"price={pos.entry_price_sol:.8f}  "
+            f"quality={pos.fill_quality.value}"
+        )
 
 
 def _fill_quality_label(fill_quality: PaperFillQuality) -> str:
@@ -2531,6 +2581,7 @@ def paper_report(
     all_open = asyncio.run(manager.get_all_open())
     paper_positions = [p for p in all_open if p.mode == "paper"]
     live_positions = [p for p in all_open if p.mode == "live"]
+    archived_paper_positions = asyncio.run(manager.get_archived_paper_positions())
 
     total_trades = _count_paper_trades(runtime_db_path)
 
@@ -2563,6 +2614,7 @@ def paper_report(
     else:
         console.print(f"  Unrealized PnL: [yellow]mark_unavailable ({pnl_summary.mark_unavailable_count} position(s) without mark)[/yellow]")
     console.print(f"  Live positions (untouched): {len(live_positions)}")
+    console.print(f"  Archived legacy paper positions excluded: {len(archived_paper_positions)}")
     console.print("")
 
     console.print("[bold]Paper Data Quality[/bold]")
