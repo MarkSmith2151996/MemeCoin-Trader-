@@ -7,6 +7,7 @@ from src.core.config import load_settings
 from src.chain.jito import JitoBlockEngineClient
 from src.core.models import Side
 from src.execution.jupiter_live import JupiterLiveExecutionAdapter
+from src.execution.live_preflight import TransactionSimulationResult
 
 
 class FakeResponse:
@@ -42,6 +43,42 @@ class RecordingRpcSubmitter:
         if isinstance(self.result, Exception):
             raise self.result
         return self.result
+
+
+class RecordingBalanceLookup:
+    def __init__(self, result: float | None | Exception) -> None:
+        self.result = result
+        self.calls = 0
+
+    async def __call__(self) -> float | None:
+        self.calls += 1
+        if isinstance(self.result, Exception):
+            raise self.result
+        return self.result
+
+
+class RecordingSimulator:
+    def __init__(self, result: object) -> None:
+        self.result = result
+        self.calls: list[str | bytes] = []
+
+    async def __call__(self, transaction: str | bytes) -> object:
+        self.calls.append(transaction)
+        if isinstance(self.result, Exception):
+            raise self.result
+        return self.result
+
+
+def _armed_env(settings) -> dict[str, str]:
+    return {
+        "LIVE_TRADING_ENABLED": "true",
+        "LIVE_CONFIRMATION_PHRASE": settings.live_guardrails.confirmation_phrase,
+        "LIVE_KILL_SWITCH": "false",
+        "MAX_LIVE_TRADE_SOL": "0.01",
+        "MAX_LIVE_DAILY_TRADES": "3",
+        "MAX_LIVE_DAILY_LOSS_SOL": "0.05",
+        "MIN_LIVE_WALLET_BALANCE_SOL": "0.05",
+    }
 
 
 def test_bundle_request_payload_construction() -> None:
@@ -201,14 +238,9 @@ def test_live_adapter_calls_jito_when_explicitly_enabled() -> None:
             jito_client=JitoBlockEngineClient(http_client=http_client),
             rpc_submitter=RecordingRpcSubmitter(),
             settings=settings,
-            guardrail_env={
-                "LIVE_TRADING_ENABLED": "true",
-                "LIVE_CONFIRMATION_PHRASE": settings.live_guardrails.confirmation_phrase,
-                "LIVE_KILL_SWITCH": "false",
-                "MAX_LIVE_TRADE_SOL": "0.01",
-                "MAX_LIVE_DAILY_TRADES": "3",
-                "MAX_LIVE_DAILY_LOSS_SOL": "0.05",
-            },
+            guardrail_env=_armed_env(settings),
+            wallet_balance_lookup=RecordingBalanceLookup(1.0),
+            transaction_simulator=RecordingSimulator(TransactionSimulationResult(ok=True)),
         )
 
         result = await adapter.submit_serialized_swap("serialized-tx", amount_sol=0.01)
@@ -236,14 +268,9 @@ def test_live_adapter_handles_successful_jito_response() -> None:
             jito_tip_lamports=5_000,
             jito_client=JitoBlockEngineClient(http_client=http_client),
             settings=settings,
-            guardrail_env={
-                "LIVE_TRADING_ENABLED": "true",
-                "LIVE_CONFIRMATION_PHRASE": settings.live_guardrails.confirmation_phrase,
-                "LIVE_KILL_SWITCH": "false",
-                "MAX_LIVE_TRADE_SOL": "0.01",
-                "MAX_LIVE_DAILY_TRADES": "3",
-                "MAX_LIVE_DAILY_LOSS_SOL": "0.05",
-            },
+            guardrail_env=_armed_env(settings),
+            wallet_balance_lookup=RecordingBalanceLookup(1.0),
+            transaction_simulator=RecordingSimulator(TransactionSimulationResult(ok=True)),
         )
 
         result = await adapter.submit_serialized_swap(b"serialized-tx", amount_sol=0.01)
@@ -273,14 +300,9 @@ def test_live_adapter_falls_back_to_rpc_when_jito_fails_and_fallback_enabled() -
             jito_client=JitoBlockEngineClient(http_client=http_client),
             rpc_submitter=rpc_submitter,
             settings=settings,
-            guardrail_env={
-                "LIVE_TRADING_ENABLED": "true",
-                "LIVE_CONFIRMATION_PHRASE": settings.live_guardrails.confirmation_phrase,
-                "LIVE_KILL_SWITCH": "false",
-                "MAX_LIVE_TRADE_SOL": "0.01",
-                "MAX_LIVE_DAILY_TRADES": "3",
-                "MAX_LIVE_DAILY_LOSS_SOL": "0.05",
-            },
+            guardrail_env=_armed_env(settings),
+            wallet_balance_lookup=RecordingBalanceLookup(1.0),
+            transaction_simulator=RecordingSimulator(TransactionSimulationResult(ok=True)),
         )
 
         result = await adapter.submit_serialized_swap("serialized-tx", amount_sol=0.01)
@@ -311,14 +333,9 @@ def test_live_adapter_fails_safely_when_jito_fails_and_fallback_disabled() -> No
             jito_client=JitoBlockEngineClient(http_client=http_client),
             rpc_submitter=rpc_submitter,
             settings=settings,
-            guardrail_env={
-                "LIVE_TRADING_ENABLED": "true",
-                "LIVE_CONFIRMATION_PHRASE": settings.live_guardrails.confirmation_phrase,
-                "LIVE_KILL_SWITCH": "false",
-                "MAX_LIVE_TRADE_SOL": "0.01",
-                "MAX_LIVE_DAILY_TRADES": "3",
-                "MAX_LIVE_DAILY_LOSS_SOL": "0.05",
-            },
+            guardrail_env=_armed_env(settings),
+            wallet_balance_lookup=RecordingBalanceLookup(1.0),
+            transaction_simulator=RecordingSimulator(TransactionSimulationResult(ok=True)),
         )
 
         result = await adapter.submit_serialized_swap("serialized-tx", amount_sol=0.01)
@@ -358,6 +375,127 @@ def test_live_adapter_diagnostics_do_not_echo_confirmation_phrase_or_transaction
         assert result.ok is False
         assert "serialized-tx" not in str(result.diagnostics)
         assert settings.live_guardrails.confirmation_phrase not in str(result.diagnostics)
+
+        await adapter.close()
+
+    asyncio.run(run())
+
+
+def test_live_adapter_low_sol_balance_blocks_submission() -> None:
+    async def run() -> None:
+        settings = load_settings().model_copy(
+            update={"execution": load_settings().execution.model_copy(update={"mode": "live"})}
+        )
+        adapter = JupiterLiveExecutionAdapter(
+            settings=settings,
+            guardrail_env=_armed_env(settings),
+            wallet_balance_lookup=RecordingBalanceLookup(0.02),
+            transaction_simulator=RecordingSimulator(TransactionSimulationResult(ok=True)),
+        )
+
+        result = await adapter.submit_serialized_swap("serialized-tx", amount_sol=0.01)
+
+        assert result.ok is False
+        assert result.provider == "preflight"
+        assert result.error == "live preflight blocked submission"
+        assert result.diagnostics == ["insufficient_wallet_balance"]
+
+        await adapter.close()
+
+    asyncio.run(run())
+
+
+def test_live_adapter_missing_balance_data_fails_closed() -> None:
+    async def run() -> None:
+        settings = load_settings().model_copy(
+            update={"execution": load_settings().execution.model_copy(update={"mode": "live"})}
+        )
+        adapter = JupiterLiveExecutionAdapter(
+            settings=settings,
+            guardrail_env=_armed_env(settings),
+            wallet_balance_lookup=RecordingBalanceLookup(None),
+            transaction_simulator=RecordingSimulator(TransactionSimulationResult(ok=True)),
+        )
+
+        result = await adapter.submit_serialized_swap("serialized-tx", amount_sol=0.01)
+
+        assert result.ok is False
+        assert result.provider == "preflight"
+        assert "wallet_balance_unknown" in result.diagnostics
+
+        await adapter.close()
+
+    asyncio.run(run())
+
+
+def test_live_adapter_simulation_failure_blocks_submission() -> None:
+    async def run() -> None:
+        settings = load_settings().model_copy(
+            update={"execution": load_settings().execution.model_copy(update={"mode": "live"})}
+        )
+        adapter = JupiterLiveExecutionAdapter(
+            settings=settings,
+            guardrail_env=_armed_env(settings),
+            wallet_balance_lookup=RecordingBalanceLookup(1.0),
+            transaction_simulator=RecordingSimulator(TransactionSimulationResult(ok=False, error="simulation failed")),
+        )
+
+        result = await adapter.submit_serialized_swap("serialized-tx", amount_sol=0.01)
+
+        assert result.ok is False
+        assert result.provider == "preflight"
+        assert result.diagnostics == ["transaction_simulation_failed"]
+
+        await adapter.close()
+
+    asyncio.run(run())
+
+
+def test_live_adapter_preflight_success_passes_without_network_or_wallet_side_effects() -> None:
+    async def run() -> None:
+        settings = load_settings().model_copy(
+            update={"execution": load_settings().execution.model_copy(update={"mode": "live"})}
+        )
+        rpc_submitter = RecordingRpcSubmitter("rpc-signature-preflight")
+        balance_lookup = RecordingBalanceLookup(1.0)
+        simulator = RecordingSimulator(TransactionSimulationResult(ok=True))
+        adapter = JupiterLiveExecutionAdapter(
+            rpc_submitter=rpc_submitter,
+            settings=settings,
+            guardrail_env=_armed_env(settings),
+            wallet_balance_lookup=balance_lookup,
+            transaction_simulator=simulator,
+        )
+
+        result = await adapter.submit_serialized_swap("serialized-tx", amount_sol=0.01)
+
+        assert result.ok is True
+        assert result.provider == "rpc"
+        assert balance_lookup.calls == 1
+        assert simulator.calls == ["serialized-tx"]
+        assert rpc_submitter.calls == ["serialized-tx"]
+
+        await adapter.close()
+
+    asyncio.run(run())
+
+
+def test_live_adapter_preflight_diagnostics_do_not_echo_transaction() -> None:
+    async def run() -> None:
+        settings = load_settings().model_copy(
+            update={"execution": load_settings().execution.model_copy(update={"mode": "live"})}
+        )
+        adapter = JupiterLiveExecutionAdapter(
+            settings=settings,
+            guardrail_env=_armed_env(settings),
+            wallet_balance_lookup=RecordingBalanceLookup(0.0),
+            transaction_simulator=RecordingSimulator(TransactionSimulationResult(ok=False, error="bad simulation")),
+        )
+
+        result = await adapter.submit_serialized_swap("serialized-tx", amount_sol=0.01)
+
+        assert result.ok is False
+        assert "serialized-tx" not in str(result.diagnostics)
 
         await adapter.close()
 

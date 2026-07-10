@@ -15,6 +15,12 @@ from src.core.config import Settings, load_settings
 from src.core.models import Side, SwapQuote, Trade
 from src.execution.base import ExecutionAdapter
 from src.execution.live_guardrails import LiveGuardrailDecision, evaluate_live_guardrails
+from src.execution.live_preflight import (
+    LivePreflightDecision,
+    SupportsTransactionSimulation,
+    SupportsWalletBalanceLookup,
+    evaluate_live_preflight,
+)
 
 
 class SupportsRpcSubmit(Protocol):
@@ -43,6 +49,8 @@ class JupiterLiveExecutionAdapter(ExecutionAdapter):
         rpc_submitter: SupportsRpcSubmit | None = None,
         settings: Settings | None = None,
         guardrail_env: dict[str, str] | None = None,
+        wallet_balance_lookup: SupportsWalletBalanceLookup | None = None,
+        transaction_simulator: SupportsTransactionSimulation | None = None,
     ) -> None:
         self._jito_enabled = jito_enabled
         self._jito_fallback_to_rpc = jito_fallback_to_rpc
@@ -52,6 +60,8 @@ class JupiterLiveExecutionAdapter(ExecutionAdapter):
         self._rpc_submitter = rpc_submitter
         self._settings = settings or load_settings()
         self._guardrail_env = guardrail_env
+        self._wallet_balance_lookup = wallet_balance_lookup
+        self._transaction_simulator = transaction_simulator
 
     @property
     def mode(self) -> str:
@@ -70,6 +80,15 @@ class JupiterLiveExecutionAdapter(ExecutionAdapter):
                 provider="guardrails",
                 error="live guardrails blocked submission",
                 diagnostics=list(guardrails.diagnostics),
+            )
+
+        preflight = await self.live_preflight(transaction=transaction, amount_sol=amount_sol)
+        if not preflight.allowed:
+            return LiveSubmissionResult(
+                ok=False,
+                provider="preflight",
+                error="live preflight blocked submission",
+                diagnostics=list(preflight.diagnostics),
             )
 
         diagnostics: list[str] = []
@@ -136,6 +155,20 @@ class JupiterLiveExecutionAdapter(ExecutionAdapter):
             self._settings,
             requested_trade_sol=requested_trade_sol,
             env=self._guardrail_env,
+        )
+
+    async def live_preflight(
+        self,
+        *,
+        transaction: str | bytes,
+        amount_sol: float | None,
+    ) -> LivePreflightDecision:
+        return await evaluate_live_preflight(
+            self._settings,
+            requested_trade_sol=amount_sol,
+            transaction=transaction,
+            wallet_balance_lookup=self._wallet_balance_lookup,
+            transaction_simulator=self._transaction_simulator,
         )
 
     async def _submit_via_rpc(

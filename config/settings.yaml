@@ -42,6 +42,7 @@ live_guardrails:
   max_trade_sol: 0.01
   max_daily_trades: 3
   max_daily_loss_sol: 0.05
+  min_wallet_balance_sol: 0.05
 
 monitoring:
   heartbeat_interval_s: 60

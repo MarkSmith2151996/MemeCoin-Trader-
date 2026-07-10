@@ -65,6 +65,7 @@ class LiveGuardrailsConfig(BaseModel):
     max_trade_sol: float = 0.01
     max_daily_trades: int = 3
     max_daily_loss_sol: float = 0.05
+    min_wallet_balance_sol: float = 0.05
 
 
 class MonitoringConfig(BaseModel):
@@ -108,6 +109,7 @@ def load_settings(path: str | Path = "config/settings.yaml") -> Settings:
         "MAX_LIVE_TRADE_SOL": "max_trade_sol",
         "MAX_LIVE_DAILY_TRADES": "max_daily_trades",
         "MAX_LIVE_DAILY_LOSS_SOL": "max_daily_loss_sol",
+        "MIN_LIVE_WALLET_BALANCE_SOL": "min_wallet_balance_sol",
     }
     for env_name, field_name in live_guardrail_env_overrides.items():
         if os.getenv(env_name):
