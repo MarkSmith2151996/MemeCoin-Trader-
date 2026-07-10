@@ -1484,3 +1484,100 @@ def test_paper_cycle_cli_prints_discovery_risk_profile(tmp_path: Path, monkeypat
     assert "risk_profile=discovery" in result.stdout
     assert "sources_polled=fake" in result.stdout
     assert "age_check_failed" not in result.stdout
+
+
+def test_paper_soak_audit_includes_all_diagnostic_sections(tmp_path: Path) -> None:
+    async def run() -> None:
+        db_path = tmp_path / "paper-soak.db"
+        sources = [
+            FakeSignalSource(
+                [
+                    [
+                        build_signal("accepted-1", passes=True),
+                        build_signal("rejected-1", passes=False),
+                    ]
+                ]
+            )
+        ]
+
+        audit = await cli_module.run_paper_soak(
+            max_signals=2,
+            timeout_seconds=0.1,
+            db_path=db_path,
+            sources=sources,
+        )
+
+        lines = audit.lines()
+        joined = "\n".join(lines)
+
+        assert "Paper Soak Audit" in joined
+        assert "Signals scanned:" in joined
+        assert "Candidates accepted:" in joined
+        assert "Candidates rejected:" in joined
+        assert "Paper trades entered:" in joined
+        assert "Skipped trades:" in joined
+        assert "Blocked trades (capacity):" in joined
+        assert "Guardrail diagnostics:" in joined
+        assert "Circuit breaker (paper):" in joined
+        assert "Health status:" in joined
+        assert "Live readiness:" in joined
+        assert "does not affect paper mode" in joined
+        assert "Source failures:" in joined
+        assert "Risk rejection breakdown:" in joined
+        assert "Stale data warnings:" in joined
+
+        assert audit.cycle.signals_collected == 2
+        assert audit.cycle.signals_accepted == 1
+        assert audit.cycle.signals_rejected == 1
+        assert audit.cycle.trades_persisted == 1
+        assert audit.health_ok is True
+        assert "paper_mode_unaffected" in audit.guardrail_diagnostics
+        assert "paper_mode_unaffected" in audit.circuit_breaker_diagnostics
+
+    asyncio.run(run())
+
+
+def test_paper_soak_circuit_breaker_paper_mode_unaffected(tmp_path: Path) -> None:
+    async def run() -> None:
+        db_path = tmp_path / "paper-soak-breaker.db"
+        sources = [FakeSignalSource([[build_signal("breaker-mint", passes=True)]])]
+
+        audit = await cli_module.run_paper_soak(
+            max_signals=1,
+            timeout_seconds=0.1,
+            db_path=db_path,
+            sources=sources,
+        )
+
+        assert "paper_mode_unaffected" in audit.circuit_breaker_diagnostics
+        assert audit.cycle.trades_persisted == 1
+        assert audit.cycle.execution_mode == "paper"
+
+    asyncio.run(run())
+
+
+def test_paper_soak_cli_prints_audit_sections(tmp_path: Path, monkeypatch) -> None:
+    signal = build_signal("soak-cli-mint", passes=True)
+    monkeypatch.setattr(cli_module, "build_signal_sources", lambda: [FakeSignalSource([[signal]])])
+
+    result = runner.invoke(
+        cli_module.app,
+        [
+            "paper-soak",
+            "--max-signals",
+            "1",
+            "--timeout-seconds",
+            "0.1",
+            "--db-path",
+            str(tmp_path / "soak-cli.db"),
+        ],
+    )
+
+    assert result.exit_code == 0
+    assert "Paper Soak Audit" in result.stdout
+    assert "Signals scanned:" in result.stdout
+    assert "Health status:" in result.stdout
+    assert "Live readiness:" in result.stdout
+    assert "Guardrail diagnostics:" in result.stdout
+    assert "Circuit breaker (paper):" in result.stdout
+    assert "paper_mode_unaffected" in result.stdout

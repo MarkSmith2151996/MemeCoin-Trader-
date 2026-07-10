@@ -1653,6 +1653,108 @@ def write_rejection_diagnostic_report(summary: PaperCycleSummary, path: Path) ->
     summary.diagnostic_report_path = str(path)
 
 
+@dataclass(slots=True)
+class PaperSoakAudit:
+    cycle: PaperCycleSummary
+    health_ok: bool
+    health_message: str
+    guardrail_diagnostics: tuple[str, ...]
+    circuit_breaker_diagnostics: tuple[str, ...]
+    readiness_checks: tuple[dict[str, object], ...]
+
+    def lines(self) -> list[str]:
+        lines = [
+            "═══ Paper Soak Audit ═══",
+            f"Signals scanned:           {self.cycle.signals_collected}",
+            f"Candidates accepted:       {self.cycle.signals_accepted}",
+            f"Candidates rejected:       {self.cycle.candidates_evaluated - self.cycle.passed_risk_checks}",
+            f"Paper trades entered:      {self.cycle.trades_persisted}",
+            f"Skipped trades:            {self.cycle.signals_accepted - self.cycle.trades_persisted}",
+            f"Blocked trades (capacity): {self.cycle.capacity_blocked_candidates}",
+            f"Guardrail diagnostics:     {','.join(self.guardrail_diagnostics) if self.guardrail_diagnostics else 'none'}",
+            f"Circuit breaker (paper):   {','.join(self.circuit_breaker_diagnostics) if self.circuit_breaker_diagnostics else 'clear'}",
+            f"Health status:             {'ok' if self.health_ok else self.health_message}",
+        ]
+
+        readiness_state = "ready" if all(check["ok"] for check in self.readiness_checks) else "not_ready"
+        lines.append(f"Live readiness:            {readiness_state} (diagnostic only — does not affect paper mode)")
+        for check in self.readiness_checks:
+            diag = ",".join(check["diagnostics"]) if check["diagnostics"] else "none"
+            lines.append(f"  {check['name']}: {'ok' if check['ok'] else 'not_ready'} ({diag})")
+
+        if self.cycle.source_failures:
+            lines.append("Source failures:")
+            for source, count in self.cycle.source_failures.items():
+                lines.append(f"  - {source}: {count}")
+        else:
+            lines.append("Source failures:           none")
+
+        if self.cycle.rejection_reasons:
+            lines.append("Risk rejection breakdown:")
+            for reason, count in sorted(self.cycle.rejection_reasons.items(), key=lambda item: -item[1]):
+                lines.append(f"  - {reason}: {count}")
+        else:
+            lines.append("Risk rejection breakdown:  none")
+
+        if self.cycle.summary_rejection_reasons:
+            stale = {r: c for r, c in self.cycle.summary_rejection_reasons.items() if "_unknown" in r}
+            if stale:
+                lines.append("Stale data warnings:")
+                for reason, count in stale.items():
+                    lines.append(f"  - {reason}: {count} candidates had unavailable data")
+            else:
+                lines.append("Stale data warnings:       none")
+        else:
+            lines.append("Stale data warnings:       none")
+
+        lines.append("═══════════════════════════")
+        return lines
+
+
+async def run_paper_soak(
+    max_signals: int = 20,
+    timeout_seconds: float = 60.0,
+    *,
+    risk_profile: str = "discovery",
+    fresh_evaluation_session: bool = True,
+    db_path: str | Path | None = None,
+    sources: list[SignalSource] | None = None,
+) -> PaperSoakAudit:
+    cycle = await run_bounded_paper_cycle(
+        max_signals=max_signals,
+        timeout_seconds=timeout_seconds,
+        risk_profile=risk_profile,
+        fresh_evaluation_session=fresh_evaluation_session,
+        db_path=db_path,
+        sources=sources,
+    )
+
+    settings = load_settings()
+    health_status = check_health()
+
+    guardrails = evaluate_live_guardrails(settings)
+    guardrail_diagnostics = ("paper_mode_unaffected",) if settings.execution.mode != "live" else guardrails.diagnostics
+
+    breaker = LiveCircuitBreaker()
+    breaker_decision = breaker.status(execution_mode="paper")
+    circuit_breaker_diagnostics = breaker_decision.diagnostics if not breaker_decision.allowed else ("paper_mode_unaffected",)
+
+    readiness = await evaluate_micro_live_readiness(settings, circuit_breaker=breaker)
+    readiness_checks = [
+        {"name": check.name, "ok": check.ok, "diagnostics": list(check.diagnostics)}
+        for check in readiness.checks
+    ]
+
+    return PaperSoakAudit(
+        cycle=cycle,
+        health_ok=health_status.ok,
+        health_message=health_status.message,
+        guardrail_diagnostics=guardrail_diagnostics,
+        circuit_breaker_diagnostics=circuit_breaker_diagnostics,
+        readiness_checks=readiness_checks,
+    )
+
+
 @app.command()
 def health() -> None:
     status = check_health()
@@ -1706,6 +1808,23 @@ def paper_cycle(
         raise RuntimeError(f"Shared diagnostic directory missing: {MT038_REPORT_PATH.parent}")
     write_rejection_diagnostic_report(summary, MT038_REPORT_PATH)
     for line in summary.safe_lines():
+        console.print(line)
+
+
+@app.command("paper-soak")
+def paper_soak(
+    max_signals: int = typer.Option(20, min=1, help="Maximum number of signals to evaluate before stopping."),
+    timeout_seconds: float = typer.Option(60.0, min=0.0, help="Maximum wall-clock runtime before stopping."),
+    db_path: str | None = typer.Option(None, help="Optional SQLite path override."),
+) -> None:
+    audit = asyncio.run(
+        run_paper_soak(
+            max_signals=max_signals,
+            timeout_seconds=timeout_seconds,
+            db_path=db_path,
+        )
+    )
+    for line in audit.lines():
         console.print(line)
 
 
