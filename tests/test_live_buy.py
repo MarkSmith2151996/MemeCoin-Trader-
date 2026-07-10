@@ -273,7 +273,8 @@ def test_live_buy_cli_fails_closed_by_default() -> None:
     result = runner.invoke(cli_module.app, ["live-buy", "--mint", "buy-mint", "--amount-sol", "0.01"])
 
     assert result.exit_code == 0
-    assert "buy_transaction_builder_unavailable" in result.stdout
+    assert "Preflight Explainer" in result.stdout
+    assert "BLOCKED" in result.stdout
 
 
 async def _async_return(value):

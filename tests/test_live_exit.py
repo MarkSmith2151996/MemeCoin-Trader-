@@ -259,7 +259,8 @@ def test_live_exit_cli_fails_closed_by_default() -> None:
     result = runner.invoke(cli_module.app, ["live-exit", "--mint", "missing-mint"])
 
     assert result.exit_code == 0
-    assert "exit_transaction_builder_unavailable" in result.stdout
+    assert "Preflight Explainer" in result.stdout
+    assert "BLOCKED" in result.stdout
 
 
 async def _async_return(value):

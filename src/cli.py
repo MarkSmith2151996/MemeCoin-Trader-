@@ -1864,16 +1864,24 @@ def paper_soak(
         console.print(line)
 
 
-def _run_dry_report(
+def _preflight_explainer(
     settings: Settings,
     manager: PositionManager,
 ) -> list[str]:
-    """Run a dry-run readiness report without executing any trade."""
+    """Rich preflight explainer for blocked micro-live commands.
+
+    Includes env-readiness summary, provider status, readiness detail,
+    and actionable next steps. No secrets printed.
+    """
     simulator = try_create_transaction_simulator()
     balance = try_create_balance_lookup()
     holdings = try_create_holdings_lookup()
 
     env = evaluate_env_readiness()
+
+    env_present = sum(1 for i in env.items if i.present)
+    env_total = len(env.items)
+    env_missing_names = sorted(i.name for i in env.items if not i.present)
 
     helius_key = "present" if any(i.present for i in env.items if i.name == "HELIUS_API_KEY") else "MISSING"
     pub_key = "present" if any(i.present for i in env.items if i.name == "TRADING_WALLET_PUBLIC_KEY") else "MISSING"
@@ -1890,40 +1898,102 @@ def _run_dry_report(
         )
     )
 
+    sim_status = "available" if simulator is not None else "unavailable"
+    bal_status = "available" if balance is not None else "unavailable"
+    hold_status = "available" if holdings is not None else "unavailable"
+
     lines = [
-        "═══ Live Dry-Run Report ═══",
+        "═══ Preflight Explainer ═══",
         f"Execution mode:           {settings.execution.mode}",
-        f"Live trading enabled:     {settings.execution.mode == 'live'}",
-        f"HELIUS_API_KEY:           {helius_key}",
-        f"TRADING_WALLET_PUBLIC_KEY:{pub_key}",
-        f"TRADING_WALLET_PRIVATE_KEY:{priv_key}",
-        f"Guardrail state:          {'READY' if report.checks[0].ok else 'BLOCKED'}",
-        f"  diagnostics:            {','.join(report.checks[0].diagnostics) if report.checks[0].diagnostics else 'none'}",
-        f"Preflight state:          {'READY' if report.checks[2].ok else 'BLOCKED'}",
-        f"  diagnostics:            {','.join(report.checks[2].diagnostics) if report.checks[2].diagnostics else 'none'}",
-        f"Position reconciliation:  {'READY' if report.checks[3].ok else 'BLOCKED'}",
-        f"  diagnostics:            {','.join(report.checks[3].diagnostics) if report.checks[3].diagnostics else 'none'}",
+        f"Live trading:             {'ENABLED' if settings.execution.mode == 'live' else 'DISABLED'}",
+        "",
+        "--- Env Readiness ---",
+        f"  Vars present:           {env_present}/{env_total}",
+        f"  HELIUS_API_KEY:         {helius_key}",
+        f"  TRADING_WALLET_PUBLIC_KEY: {pub_key}",
+        f"  TRADING_WALLET_PRIVATE_KEY:{priv_key}",
+        "",
+        "--- Provider Status ---",
+        f"  transaction_simulator:  {sim_status}",
+        f"  wallet_balance_lookup:  {bal_status}",
+        f"  wallet_holdings_lookup: {hold_status}",
+        "",
+        "--- Live Readiness ---",
     ]
 
-    all_ready = report.ready and settings.execution.mode == "live"
-    if all_ready:
-        lines.append("Verdict:                  COMMAND WOULD PROCEED")
-    else:
+    for check in report.checks:
+        state = "ok" if check.ok else "BLOCKED"
+        diag = ",".join(check.diagnostics) if check.diagnostics else "none"
+        line = f"  {check.name}: {state} ({diag})"
+        if check.recommended_env:
+            line += f" needs={','.join(sorted(check.recommended_env))}"
+        lines.append(line)
+
+    if not report.ready or settings.execution.mode != "live":
+        lines.append("")
+        lines.append("--- Blocking Reasons ---")
         blockers: list[str] = []
         if settings.execution.mode != "live":
-            blockers.append("execution_mode_not_live")
-        if any(not c.ok for c in report.checks):
-            for check in report.checks:
-                if not check.ok:
-                    for diag in check.diagnostics:
-                        if diag not in blockers:
-                            blockers.append(diag)
-        lines.append(f"Verdict:                  BLOCKED")
-        if blockers:
-            lines.append(f"  blocking reasons:       {','.join(blockers)}")
+            blockers.append("execution_mode_not_live — set LIVE_TRADING_ENABLED=true and execution.mode=live")
+        for check in report.checks:
+            if not check.ok:
+                for diag in check.diagnostics:
+                    if diag not in blockers:
+                        blockers.append(f"{diag}")
+        for blocker in blockers:
+            lines.append(f"  - {blocker}")
+
+        lines.append("")
+        lines.append("--- Missing Arming Gates ---")
+        missing_gates: list[str] = []
+        if any(i.name == "TRADING_WALLET_PUBLIC_KEY" and not i.present for i in env.items):
+            missing_gates.append("TRADING_WALLET_PUBLIC_KEY — needed for balance/holdings checks")
+        if any(i.name == "TRADING_WALLET_PRIVATE_KEY" and not i.present for i in env.items):
+            missing_gates.append("TRADING_WALLET_PRIVATE_KEY — needed for signing (add only at smoke time)")
+        if any(i.name == "LIVE_TRADING_ENABLED" and not i.present for i in env.items):
+            missing_gates.append("LIVE_TRADING_ENABLED=true — arms live execution")
+        if any(i.name == "LIVE_CONFIRMATION_PHRASE" and not i.present for i in env.items):
+            missing_gates.append("LIVE_CONFIRMATION_PHRASE — required by guardrails")
+        if any(i.name == "LIVE_KILL_SWITCH" and not i.present for i in env.items):
+            missing_gates.append("LIVE_KILL_SWITCH=false — disable kill switch for live")
+        if any(i.name == "MAX_LIVE_TRADE_SOL" and not i.present for i in env.items):
+            missing_gates.append("MAX_LIVE_TRADE_SOL — tiny per-trade cap (e.g. 0.005)")
+        if any(i.name == "MAX_DAILY_LIVE_TRADES" and not i.present for i in env.items):
+            missing_gates.append("MAX_DAILY_LIVE_TRADES — daily count cap (e.g. 1)")
+        if any(i.name == "MAX_DAILY_LOSS_SOL" and not i.present for i in env.items):
+            missing_gates.append("MAX_DAILY_LOSS_SOL — daily loss limit (e.g. 0.02)")
+        if any(i.name == "PRIMARY_RPC_URL" and not i.present for i in env.items):
+            missing_gates.append("PRIMARY_RPC_URL — execution RPC endpoint")
+        if any(i.name == "BACKUP_RPC_URL" and not i.present for i in env.items):
+            missing_gates.append("BACKUP_RPC_URL — optional failover RPC")
+
+        if missing_gates:
+            for gate in missing_gates:
+                lines.append(f"  - {gate}")
+        else:
+            lines.append("  (all env vars present — check readiness diagnostics above)")
+
+        lines.append("")
+        lines.append("--- Operator Next Steps ---")
+        if env_present < env_total:
+            lines.append(f"  1. Add {env_total - env_present} missing env var(s) to .env: {', '.join(env_missing_names)}")
+        if settings.execution.mode != "live":
+            lines.append("  2. Set LIVE_TRADING_ENABLED=true and execution.mode=live in .env")
+        if not report.ready:
+            lines.append("  3. Re-run live-readiness and confirm all checks ok")
+        lines.append(f"  4. See docs/MICRO_LIVE_RUNBOOK.md for the full smoke procedure")
+        lines.append(f"  5. See docs/WALLET_SETUP.md for safe disposable wallet creation")
 
     lines.append("═══════════════════════════")
     return lines
+
+
+def _run_dry_report(
+    settings: Settings,
+    manager: PositionManager,
+) -> list[str]:
+    """Legacy wrapper — delegates to _preflight_explainer."""
+    return _preflight_explainer(settings, manager)
 
 
 @app.command("env-readiness")
@@ -1982,7 +2052,11 @@ def live_exit(
             circuit_breaker=LiveCircuitBreaker(),
         )
     )
-    console.print({"ok": result.ok, "diagnostics": list(result.diagnostics), "provider": result.provider, "tx_signature": result.tx_signature})
+    if result.ok:
+        console.print({"ok": result.ok, "diagnostics": list(result.diagnostics), "provider": result.provider, "tx_signature": result.tx_signature})
+    else:
+        for line in _preflight_explainer(settings, manager):
+            console.print(line)
 
 
 @app.command("live-buy")
@@ -2013,7 +2087,11 @@ def live_buy(
             circuit_breaker=LiveCircuitBreaker(),
         )
     )
-    console.print({"ok": result.ok, "diagnostics": list(result.diagnostics), "provider": result.provider, "tx_signature": result.tx_signature})
+    if result.ok:
+        console.print({"ok": result.ok, "diagnostics": list(result.diagnostics), "provider": result.provider, "tx_signature": result.tx_signature})
+    else:
+        for line in _preflight_explainer(settings, manager):
+            console.print(line)
 
 
 if __name__ == "__main__":
