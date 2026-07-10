@@ -1773,6 +1773,7 @@ class PaperSoakAudit:
             f"Candidates accepted:       {self.cycle.signals_accepted}",
             f"Candidates rejected:       {self.cycle.candidates_evaluated - self.cycle.passed_risk_checks}",
             f"Paper trades entered:      {self.cycle.trades_persisted}",
+            f"Eval session scope:        {self.cycle.evaluation_session_scope}",
             f"Skipped trades:            {self.cycle.signals_accepted - self.cycle.trades_persisted}",
             f"Guardrail diagnostics:     {','.join(self.guardrail_diagnostics) if self.guardrail_diagnostics else 'none'}",
             f"Circuit breaker (paper):   {','.join(self.circuit_breaker_diagnostics) if self.circuit_breaker_diagnostics else 'clear'}",
@@ -1859,14 +1860,16 @@ async def run_paper_soak(
     *,
     risk_profile: str = "discovery",
     fresh_evaluation_session: bool = True,
+    persist_positions: bool = False,
     db_path: str | Path | None = None,
     sources: list[SignalSource] | None = None,
 ) -> PaperSoakAudit:
+    effective_fresh = fresh_evaluation_session and not persist_positions
     cycle = await run_bounded_paper_cycle(
         max_signals=max_signals,
         timeout_seconds=timeout_seconds,
         risk_profile=risk_profile,
-        fresh_evaluation_session=fresh_evaluation_session,
+        fresh_evaluation_session=effective_fresh,
         db_path=db_path,
         sources=sources,
     )
@@ -2003,12 +2006,18 @@ def paper_cycle(
 def paper_soak(
     max_signals: int = typer.Option(20, min=1, help="Maximum number of signals to evaluate before stopping."),
     timeout_seconds: float = typer.Option(60.0, min=0.0, help="Maximum wall-clock runtime before stopping."),
+    persist_positions: bool = typer.Option(
+        False,
+        "--persist-positions",
+        help="Persist paper positions so they appear in paper-state/paper-pnl reports.",
+    ),
     db_path: str | None = typer.Option(None, help="Optional SQLite path override."),
 ) -> None:
     audit = asyncio.run(
         run_paper_soak(
             max_signals=max_signals,
             timeout_seconds=timeout_seconds,
+            persist_positions=persist_positions,
             db_path=db_path,
         )
     )

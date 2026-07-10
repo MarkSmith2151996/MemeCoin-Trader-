@@ -1641,6 +1641,7 @@ def test_paper_soak_audit_includes_all_diagnostic_sections(tmp_path: Path) -> No
         assert "Candidates accepted:" in joined
         assert "Candidates rejected:" in joined
         assert "Paper trades entered:" in joined
+        assert "Eval session scope:        fresh" in joined
         assert "Skipped trades:" in joined
         assert "Guardrail diagnostics:" in joined
         assert "Circuit breaker (paper):" in joined
@@ -1747,6 +1748,69 @@ def test_paper_soak_capacity_audit_details(tmp_path: Path) -> None:
         assert "configured_max_open_positions=1" in lines
         assert "starting_open_positions=1" in lines
         assert "persisted_open_positions=1" in lines
+
+    asyncio.run(run())
+
+
+def test_paper_soak_persist_positions_flag(tmp_path: Path) -> None:
+    async def run() -> None:
+        db_path = tmp_path / "persist-positions.db"
+        sources = [
+            FakeSignalSource(
+                [
+                    [
+                        build_signal("persist-1", passes=True),
+                        build_signal("persist-2", passes=True),
+                    ]
+                ]
+            )
+        ]
+
+        audit = await cli_module.run_paper_soak(
+            max_signals=2,
+            timeout_seconds=0.1,
+            db_path=db_path,
+            sources=sources,
+            persist_positions=True,
+        )
+
+        assert audit.cycle.evaluation_session_scope == "persisted"
+        assert audit.cycle.trades_persisted == 2
+        lines = "\n".join(audit.lines())
+        assert "Eval session scope:        persisted" in lines
+
+        position_manager = cli_module.PositionManager(db_path, cli_module.load_settings())
+        open_positions = await position_manager.get_all_open()
+        assert len(open_positions) == 2
+
+    asyncio.run(run())
+
+
+def test_paper_soak_default_is_fresh_session(tmp_path: Path) -> None:
+    async def run() -> None:
+        db_path = tmp_path / "default-fresh.db"
+        sources = [
+            FakeSignalSource(
+                [
+                    [
+                        build_signal("fresh-mint", passes=True),
+                    ]
+                ]
+            )
+        ]
+
+        audit = await cli_module.run_paper_soak(
+            max_signals=1,
+            timeout_seconds=0.1,
+            db_path=db_path,
+            sources=sources,
+        )
+
+        assert audit.cycle.evaluation_session_scope == "fresh"
+
+        position_manager = cli_module.PositionManager(db_path, cli_module.load_settings())
+        open_positions = await position_manager.get_all_open()
+        assert len(open_positions) == 0
 
     asyncio.run(run())
 
