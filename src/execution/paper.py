@@ -7,11 +7,17 @@ from datetime import UTC, datetime, timedelta
 
 from src.core.models import Side, SwapQuote, Trade
 from src.execution.base import ExecutionAdapter
+from src.execution.price_provider import PriceProvider
 
 
 class PaperExecutionAdapter(ExecutionAdapter):
-    def __init__(self, price_lookup: dict[str, float] | None = None) -> None:
+    def __init__(
+        self,
+        price_lookup: dict[str, float] | None = None,
+        price_provider: PriceProvider | None = None,
+    ) -> None:
         self._price_lookup = price_lookup or {}
+        self._price_provider = price_provider
         self._closed = False
 
     @property
@@ -87,7 +93,15 @@ class PaperExecutionAdapter(ExecutionAdapter):
 
     async def get_current_price(self, mint_address: str) -> float | None:
         self._ensure_open()
-        return self._price_lookup.get(mint_address)
+        provider_price: float | None = None
+        if self._price_provider is not None:
+            provider_price = await self._price_provider.get_current_price(mint_address)
+        if provider_price is not None and provider_price > 0:
+            return provider_price
+        static = self._price_lookup.get(mint_address)
+        if static is not None and static > 0:
+            return static
+        return provider_price or static
 
     async def close(self) -> None:
         self._closed = True

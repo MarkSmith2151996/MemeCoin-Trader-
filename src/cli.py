@@ -363,7 +363,7 @@ async def run_bounded_paper_cycle(
     runtime_db_path = resolve_db_path(db_path)
     signal_sources = list(sources) if sources is not None else build_signal_sources()
     aggregator = build_signal_aggregator(signal_sources, runtime_db_path)
-    execution_adapter = execution or PaperExecutionAdapter()
+    execution_adapter = execution or PaperExecutionAdapter(price_provider=DexScreenerPriceProvider())
 
     await init_db(runtime_db_path)
     initial_trade_count = _count_rows(runtime_db_path, "trades")
