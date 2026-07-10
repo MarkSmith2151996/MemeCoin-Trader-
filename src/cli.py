@@ -18,6 +18,7 @@ from rich.console import Console
 from src.core.config import Settings, load_settings
 from src.core.database import init_db, record_trade
 from src.execution.base import ExecutionAdapter
+from src.execution.live_buy import execute_guarded_live_buy
 from src.execution.live_circuit_breaker import LiveCircuitBreaker
 from src.execution.live_execution_config import evaluate_live_execution_config
 from src.execution.live_exit import execute_guarded_live_exit
@@ -1736,6 +1737,32 @@ def live_exit(
             position_manager=manager,
             adapter=adapter,
             exit_transaction_builder=None,
+            wallet_holdings_lookup=None,
+            wallet_balance_lookup=None,
+            transaction_simulator=None,
+            circuit_breaker=LiveCircuitBreaker(),
+        )
+    )
+    console.print({"ok": result.ok, "diagnostics": list(result.diagnostics), "provider": result.provider, "tx_signature": result.tx_signature})
+
+
+@app.command("live-buy")
+def live_buy(
+    mint: str = typer.Option(..., "--mint", help="Mint address to buy."),
+    amount_sol: float = typer.Option(..., "--amount-sol", min=0.000001, help="Requested SOL size."),
+    db_path: str | None = typer.Option(None, help="Optional SQLite path override."),
+) -> None:
+    settings = load_settings()
+    manager = PositionManager(resolve_db_path(db_path), settings)
+    adapter = JupiterLiveExecutionAdapter(settings=settings, circuit_breaker=LiveCircuitBreaker())
+    result = asyncio.run(
+        execute_guarded_live_buy(
+            settings=settings,
+            mint_address=mint,
+            amount_sol=amount_sol,
+            position_manager=manager,
+            adapter=adapter,
+            buy_transaction_builder=None,
             wallet_holdings_lookup=None,
             wallet_balance_lookup=None,
             transaction_simulator=None,
