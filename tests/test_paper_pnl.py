@@ -612,6 +612,24 @@ def test_paper_close_all_never_touches_live(tmp_path: Path) -> None:
     assert remaining[0].mode == "live"
 
 
+def test_paper_close_all_only_closes_paper_same_mint_as_live(tmp_path: Path) -> None:
+    db = tmp_path / "close_same_mint_live_protected.db"
+    asyncio.run(init_db(db))
+    settings = load_settings()
+    manager = PositionManager(db, settings)
+    mint = "SharedMint111111111111111111111111111111111"
+    _paper_position(manager, mint)
+    _live_position(manager, mint)
+
+    result = runner.invoke(cli_module.app, ["paper-close", "--all", "--confirm", "--db-path", str(db)])
+
+    assert result.exit_code == 0
+    assert "Closed 1 paper position(s)" in result.stdout
+    persisted_manager = PositionManager(db, settings)
+    assert asyncio.run(persisted_manager.get_position(mint, mode="paper")) is None
+    assert asyncio.run(persisted_manager.get_position(mint, mode="live")) is not None
+
+
 def test_paper_close_rejects_live_position(tmp_path: Path) -> None:
     db = tmp_path / "reject_live_close.db"
     asyncio.run(init_db(db))

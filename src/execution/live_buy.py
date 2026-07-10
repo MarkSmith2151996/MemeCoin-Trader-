@@ -47,7 +47,7 @@ async def execute_guarded_live_buy(
     if amount_sol <= 0:
         return LiveBuyResult(ok=False, diagnostics=("requested_trade_sol_invalid",))
 
-    existing = await position_manager.get_position(mint_address)
+    existing = await position_manager.get_position(mint_address, mode="live")
     if existing is not None:
         return LiveBuyResult(ok=False, diagnostics=("open_position_exists",))
 

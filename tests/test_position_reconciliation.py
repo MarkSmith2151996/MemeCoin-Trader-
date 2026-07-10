@@ -275,6 +275,40 @@ def test_mixed_paper_and_live_only_live_is_reconciled(tmp_path: Path) -> None:
     asyncio.run(run())
 
 
+def test_same_mint_paper_and_live_positions_coexist_by_mode(tmp_path: Path) -> None:
+    async def run() -> None:
+        settings = load_settings()
+        db_path = tmp_path / "same-mint.db"
+        await init_db(db_path)
+        manager = PositionManager(db_path, settings)
+
+        for mode, amount_sol in (("paper", 0.1), ("live", 0.2)):
+            await manager.open_position(
+                Trade(
+                    mint_address=FAKE_MINT,
+                    side="BUY",
+                    amount_sol=amount_sol,
+                    token_amount=amount_sol * 1000,
+                    price_sol=0.001,
+                    mode=mode,
+                ),
+                None,
+            )
+
+        reloaded = PositionManager(db_path, settings)
+        paper = await reloaded.get_position(FAKE_MINT, mode="paper")
+        live = await reloaded.get_position(FAKE_MINT, mode="live")
+
+        assert paper is not None and paper.amount_sol == 0.1
+        assert live is not None and live.amount_sol == 0.2
+        assert len(await reloaded.get_all_open(mode="paper")) == 1
+        assert len(await reloaded.get_all_open(mode="live")) == 1
+        assert await reloaded.total_exposure_sol(mode="paper") == 0.1
+        assert await reloaded.total_exposure_sol(mode="live") == 0.2
+
+    asyncio.run(run())
+
+
 # ── Edge cases ──────────────────────────────────────────────────────
 
 def test_wallet_only_holding_is_flagged_with_live_positions(tmp_path: Path) -> None:

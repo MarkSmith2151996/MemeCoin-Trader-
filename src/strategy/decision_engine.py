@@ -88,7 +88,8 @@ class DecisionEngine:
                 metadata={"rejection_record": asdict(telemetry)},
             )
 
-        existing = await self.position_manager.get_position(signal.mint_address)
+        execution_mode = self.execution.mode
+        existing = await self.position_manager.get_position(signal.mint_address, mode=execution_mode)
         if existing is not None:
             logger.info("Skipping %s: open position already exists", signal.mint_address)
             telemetry = self._build_rejection_record(signal, outcome="rejected")
@@ -116,7 +117,7 @@ class DecisionEngine:
                 metadata={**regime_metadata, "rejection_record": asdict(rejection_record)},
             )
 
-        open_positions = await self.position_manager.get_all_open()
+        open_positions = await self.position_manager.get_all_open(mode=execution_mode)
         if len(open_positions) >= self.config.position.max_open_positions:
             logger.info("Skipping %s: max open positions reached", signal.mint_address)
             self._log_rejection_record(rejection_record)
@@ -127,7 +128,7 @@ class DecisionEngine:
             )
 
         remaining_portfolio = (
-            self.config.position.max_portfolio_sol - await self.position_manager.total_exposure_sol()
+            self.config.position.max_portfolio_sol - await self.position_manager.total_exposure_sol(mode=execution_mode)
         )
         if remaining_portfolio <= 0:
             logger.info("Skipping %s: max portfolio exposure reached", signal.mint_address)
@@ -186,7 +187,7 @@ class DecisionEngine:
 
     async def check_exits(self) -> list[Trade]:
         exit_trades: list[Trade] = []
-        for position in await self.position_manager.get_all_open():
+        for position in await self.position_manager.get_all_open(mode=self.execution.mode):
             current_price = await self.execution.get_current_price(position.mint_address)
             if current_price is None or current_price <= 0:
                 logger.info("Skipping exit evaluation for %s: no current price", position.mint_address)
@@ -233,10 +234,11 @@ class DecisionEngine:
                 position.mint_address,
                 exit_marker,
                 realized_pnl_sol=realized_pnl,
+                mode=self.execution.mode,
             )
 
             if any(action.is_full_exit for action in actions) or sell_pct >= remaining_pct:
-                await self.position_manager.close_position(position.mint_address)
+                await self.position_manager.close_position(position.mint_address, mode=self.execution.mode)
 
             exit_trades.append(trade)
 

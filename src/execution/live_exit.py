@@ -58,7 +58,7 @@ async def execute_guarded_live_exit(
             diagnostics=tuple(f"readiness:{check.name}" for check in readiness.checks if not check.ok),
         )
 
-    position = await position_manager.get_position(mint_address)
+    position = await position_manager.get_position(mint_address, mode="live")
     if position is None:
         return LiveExitResult(ok=False, diagnostics=("position_not_found",))
 
@@ -75,7 +75,7 @@ async def execute_guarded_live_exit(
             provider=submission.provider,
         )
 
-    await position_manager.close_position(mint_address)
+    await position_manager.close_position(mint_address, mode="live")
     return LiveExitResult(
         ok=True,
         diagnostics=("live_exit_submitted",),

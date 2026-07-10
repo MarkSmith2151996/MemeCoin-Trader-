@@ -439,7 +439,7 @@ def test_paper_cycle_ignores_archived_paper_rows_for_capacity_counts(tmp_path: P
     asyncio.run(run())
 
 
-def test_paper_cycle_counts_live_rows_but_not_archived_paper_rows(tmp_path: Path) -> None:
+def test_paper_cycle_ignores_live_rows_for_paper_capacity(tmp_path: Path) -> None:
     async def run() -> None:
         db_path = tmp_path / "live-capacity.db"
         await init_db(db_path)
@@ -478,12 +478,12 @@ def test_paper_cycle_counts_live_rows_but_not_archived_paper_rows(tmp_path: Path
             poll_interval_s=0.0,
         )
 
-        assert summary.signals_accepted == 0
-        assert summary.signals_rejected == 1
-        assert summary.rejection_reasons == {"max_open_positions_reached": 1}
-        assert summary.starting_open_positions == 1
+        assert summary.signals_accepted == 1
+        assert summary.signals_rejected == 0
+        assert summary.rejection_reasons == {}
+        assert summary.starting_open_positions == 0
         assert summary.persisted_open_positions == 1
-        assert summary.capacity_blocked_candidates == 1
+        assert summary.capacity_blocked_candidates == 0
 
     asyncio.run(run())
 

@@ -49,8 +49,7 @@ async def reconcile_positions(
     *,
     material_balance_ratio: float = 0.05,
 ) -> PositionReconciliationReport:
-    local_positions = await position_manager.get_all_open()
-    live_positions = [p for p in local_positions if p.mode == "live"]
+    live_positions = await position_manager.get_all_open(mode="live")
     if not live_positions:
         return PositionReconciliationReport(
             ok=True,

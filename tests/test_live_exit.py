@@ -6,7 +6,7 @@ from typer.testing import CliRunner
 import src.cli as cli_module
 from src.core.config import load_settings
 from src.core.database import init_db
-from src.core.models import CheckResult, RiskAssessment, Signal, SignalSource, SignalType, TokenInfo
+from src.core.models import CheckResult, RiskAssessment, Signal, SignalSource, SignalType, TokenInfo, Trade
 from src.execution.base import ExecutionAdapter
 from src.execution.live_circuit_breaker import LiveCircuitBreaker
 from src.execution.live_exit import execute_guarded_live_exit
@@ -221,6 +221,17 @@ def test_fully_fake_ready_live_exit_can_close_existing_position(tmp_path: Path) 
     async def run() -> None:
         settings = _live_settings()
         manager = await _seed_position_manager(tmp_path / "success.db", max_single_position_sol=0.01)
+        await manager.open_position(
+            Trade(
+                mint_address="exit-mint",
+                side="BUY",
+                amount_sol=0.01,
+                token_amount=10.0,
+                price_sol=0.001,
+                mode="live",
+            ),
+            None,
+        )
         submitter = RecordingRpcSubmitter()
         breaker = LiveCircuitBreaker()
         breaker.record_health_check(True)
@@ -239,7 +250,7 @@ def test_fully_fake_ready_live_exit_can_close_existing_position(tmp_path: Path) 
             position_manager=manager,
             adapter=adapter,
             exit_transaction_builder=lambda mint, amount: _async_return(f"sell:{mint}:{amount}"),
-            wallet_holdings_lookup=lambda: _wallet_holdings_for(manager, "exit-mint"),
+            wallet_holdings_lookup=lambda: _wallet_holdings_for(manager, "exit-mint", mode="live"),
             wallet_balance_lookup=lambda: _async_return(1.0),
             transaction_simulator=lambda _tx: _async_return(TransactionSimulationResult(ok=True)),
             circuit_breaker=breaker,
@@ -250,7 +261,8 @@ def test_fully_fake_ready_live_exit_can_close_existing_position(tmp_path: Path) 
         assert result.diagnostics == ("live_exit_submitted",)
         assert result.provider == "rpc"
         assert submitter.calls and str(submitter.calls[0]).startswith("sell:exit-mint:")
-        assert await manager.get_position("exit-mint") is None
+        assert await manager.get_position("exit-mint", mode="live") is None
+        assert await manager.get_position("exit-mint", mode="paper") is not None
 
     asyncio.run(run())
 
@@ -261,6 +273,12 @@ def test_live_exit_cli_fails_closed_by_default() -> None:
     assert result.exit_code == 0
     assert "Preflight Explainer" in result.stdout
     assert "BLOCKED" in result.stdout
+
+
+async def _wallet_holdings_for(manager: PositionManager, mint: str, *, mode: str | None = None):
+    position = await manager.get_position(mint, mode=mode)
+    assert position is not None
+    return {mint: position.token_amount}
 
 
 async def _async_return(value):

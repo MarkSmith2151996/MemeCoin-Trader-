@@ -54,17 +54,16 @@ class PaperPnLCalculator:
         self._price_provider = price_provider
 
     async def compute_summary(self) -> PaperPnLSummary:
-        all_positions = await self._manager.get_all_open()
+        all_positions = await self._manager.get_all_open(mode="paper")
         closed_positions = await self._get_closed_positions()
-        paper_positions = [p for p in all_positions if p.mode == "paper"]
-        all_paper = paper_positions + closed_positions
+        all_paper = all_positions + closed_positions
 
         summary = PaperPnLSummary()
         summary.total_positions = len(all_paper)
-        summary.open_positions = len(paper_positions)
+        summary.open_positions = len(all_positions)
         summary.closed_positions = len(closed_positions)
 
-        for pos in paper_positions:
+        for pos in all_positions:
             summary.total_sol_deployed += pos.amount_sol * pos.remaining_sell_pct
 
         summary.realized_pnl_sol = round(sum(p.realized_pnl_sol for p in closed_positions), 9)

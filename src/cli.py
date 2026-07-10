@@ -339,10 +339,10 @@ def _count_rows(db_path: Path, table: str, where_clause: str | None = None, para
 
 
 async def _count_effective_open_positions(db_path: Path) -> int:
-    """Count persisted open positions while honoring archived exclusions."""
+    """Count persisted open paper positions while honoring archived exclusions."""
     await init_db(db_path)
     inspector = PositionManager(db_path, load_settings())
-    return len(await inspector.get_all_open())
+    return len(await inspector.get_all_open(mode="paper"))
 
 
 async def run_bounded_paper_cycle(
@@ -521,7 +521,7 @@ async def run_bounded_paper_cycle(
             accepted_trades_by_id[trade_id] = persisted_trade
 
     holder_lookup_outcomes = extract_runtime_diagnostics(engine.risk_scorer)
-    session_open_positions = len(await position_manager.get_all_open())
+    session_open_positions = len(await position_manager.get_all_open(mode="paper"))
     persisted_open_positions = await _count_effective_open_positions(runtime_db_path)
 
     return PaperCycleSummary(
@@ -2672,7 +2672,7 @@ def paper_close(
                 result = asyncio.run(price_provider.get_current_price(pos.mint_address))
                 if result is not None and result > 0:
                     exit_price = result
-            result = asyncio.run(manager.close_position(pos.mint_address, exit_price_sol=exit_price))
+            result = asyncio.run(manager.close_position(pos.mint_address, exit_price_sol=exit_price, mode="paper"))
             if result is not None:
                 closed_count += 1
         remaining = asyncio.run(manager.get_all_open())
@@ -2685,13 +2685,13 @@ def paper_close(
         console.print("[red]Provide --mint <address> or --all --confirm[/red]")
         raise typer.Exit(code=1)
 
-    position = asyncio.run(manager.get_position(mint))
+    position = asyncio.run(manager.get_position(mint, mode="paper"))
     if position is None:
+        live_position = asyncio.run(manager.get_position(mint, mode="live"))
+        if live_position is not None:
+            console.print("[red]Refusing to close a live position via paper-close.[/red]")
+            raise typer.Exit(code=1)
         console.print(f"[red]Position not found for mint: {mint}[/red]")
-        raise typer.Exit(code=1)
-
-    if position.mode != "paper":
-        console.print("[red]Refusing to close a live position via paper-close.[/red]")
         raise typer.Exit(code=1)
 
     exit_price, source = _resolve_close_price(mint, price, use_mark, position)
@@ -2715,7 +2715,7 @@ def paper_close(
         console.print(f"[red]No exit price available (source: {source}). {src_help}[/red]")
         raise typer.Exit(code=1)
 
-    closed = asyncio.run(manager.close_position(mint, exit_price_sol=exit_price))
+    closed = asyncio.run(manager.close_position(mint, exit_price_sol=exit_price, mode="paper"))
     pnl_str = _fmt_pnl(closed.realized_pnl_sol if closed else 0.0)
     console.print(
         f"Closed paper position {mint[:16]} at price {exit_price:.10f} ({source}). "

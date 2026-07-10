@@ -6,7 +6,7 @@ from typer.testing import CliRunner
 import src.cli as cli_module
 from src.core.config import load_settings
 from src.core.database import init_db
-from src.core.models import CheckResult, RiskAssessment, Signal, SignalSource, SignalType, TokenInfo
+from src.core.models import CheckResult, RiskAssessment, Signal, SignalSource, SignalType, TokenInfo, Trade
 from src.execution.base import ExecutionAdapter
 from src.execution.live_buy import execute_guarded_live_buy
 from src.execution.live_circuit_breaker import LiveCircuitBreaker
@@ -185,7 +185,7 @@ def test_oversized_trade_is_blocked(tmp_path: Path) -> None:
     asyncio.run(run())
 
 
-def test_open_position_blocks_live_buy(tmp_path: Path) -> None:
+def test_paper_position_does_not_block_live_buy(tmp_path: Path) -> None:
     async def run() -> None:
         settings = _live_settings()
         manager = await _position_manager(tmp_path / "existing-position.db")
@@ -218,6 +218,54 @@ def test_open_position_blocks_live_buy(tmp_path: Path) -> None:
             adapter=adapter,
             buy_transaction_builder=lambda _mint, _amount: _async_return("tx"),
             wallet_holdings_lookup=lambda: _async_return({"buy-mint": 0.0}),
+            wallet_balance_lookup=lambda: _async_return(1.0),
+            transaction_simulator=lambda _tx: _async_return(TransactionSimulationResult(ok=True)),
+            circuit_breaker=breaker,
+            env=_armed_env(settings),
+        )
+
+        assert result.ok is True
+        assert result.diagnostics == ("live_buy_submitted",)
+        assert len(await manager.get_all_open(mode="paper")) == 1
+        assert len(await manager.get_all_open(mode="live")) == 1
+
+    asyncio.run(run())
+
+
+def test_live_position_blocks_live_buy(tmp_path: Path) -> None:
+    async def run() -> None:
+        settings = _live_settings()
+        manager = await _position_manager(tmp_path / "existing-live-position.db")
+        await manager.open_position(
+            Trade(
+                mint_address="buy-mint",
+                side="BUY",
+                amount_sol=0.01,
+                token_amount=10.0,
+                price_sol=0.001,
+                mode="live",
+            ),
+            None,
+        )
+        breaker = LiveCircuitBreaker()
+        breaker.record_health_check(True)
+        adapter = JupiterLiveExecutionAdapter(
+            rpc_submitter=RecordingRpcSubmitter(),
+            settings=settings,
+            guardrail_env=_armed_env(settings),
+            wallet_balance_lookup=lambda: _async_return(1.0),
+            transaction_simulator=lambda _tx: _async_return(TransactionSimulationResult(ok=True)),
+            circuit_breaker=breaker,
+        )
+
+        result = await execute_guarded_live_buy(
+            settings=settings,
+            mint_address="buy-mint",
+            amount_sol=0.01,
+            position_manager=manager,
+            adapter=adapter,
+            buy_transaction_builder=lambda _mint, _amount: _async_return("tx"),
+            wallet_holdings_lookup=lambda: _async_return({"buy-mint": 10.0}),
             wallet_balance_lookup=lambda: _async_return(1.0),
             transaction_simulator=lambda _tx: _async_return(TransactionSimulationResult(ok=True)),
             circuit_breaker=breaker,
