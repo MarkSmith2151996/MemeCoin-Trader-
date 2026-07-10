@@ -14,6 +14,7 @@ from src.chain.jito import JitoBlockEngineClient, JitoSubmitResult
 from src.core.config import Settings, load_settings
 from src.core.models import Side, SwapQuote, Trade
 from src.execution.base import ExecutionAdapter
+from src.execution.live_circuit_breaker import LiveCircuitBreaker
 from src.execution.live_execution_config import LiveExecutionConfigDecision, evaluate_live_execution_config
 from src.execution.live_guardrails import LiveGuardrailDecision, evaluate_live_guardrails
 from src.execution.live_preflight import (
@@ -53,6 +54,7 @@ class JupiterLiveExecutionAdapter(ExecutionAdapter):
         guardrail_env: dict[str, str] | None = None,
         wallet_balance_lookup: SupportsWalletBalanceLookup | None = None,
         transaction_simulator: SupportsTransactionSimulation | None = None,
+        circuit_breaker: LiveCircuitBreaker | None = None,
     ) -> None:
         self._jito_enabled = jito_enabled
         self._jito_fallback_to_rpc = jito_fallback_to_rpc
@@ -65,6 +67,7 @@ class JupiterLiveExecutionAdapter(ExecutionAdapter):
         self._guardrail_env = guardrail_env
         self._wallet_balance_lookup = wallet_balance_lookup
         self._transaction_simulator = transaction_simulator
+        self._circuit_breaker = circuit_breaker
 
         if self._jito_tip_lamports is None:
             self._jito_tip_lamports = self._settings.execution.jito_tip_lamports
@@ -79,6 +82,16 @@ class JupiterLiveExecutionAdapter(ExecutionAdapter):
         *,
         amount_sol: float | None = None,
     ) -> LiveSubmissionResult:
+        if self._circuit_breaker is not None:
+            breaker_decision = self._circuit_breaker.status(execution_mode=self._settings.execution.mode)
+            if not breaker_decision.allowed:
+                return LiveSubmissionResult(
+                    ok=False,
+                    provider="circuit_breaker",
+                    error="live circuit breaker blocked submission",
+                    diagnostics=list(breaker_decision.diagnostics),
+                )
+
         guardrails = self.live_guardrails(amount_sol)
         if not guardrails.allowed:
             return LiveSubmissionResult(
@@ -90,12 +103,14 @@ class JupiterLiveExecutionAdapter(ExecutionAdapter):
 
         preflight = await self.live_preflight(transaction=transaction, amount_sol=amount_sol)
         if not preflight.allowed:
+            self._record_preflight_failure(preflight.diagnostics)
             return LiveSubmissionResult(
                 ok=False,
                 provider="preflight",
                 error="live preflight blocked submission",
                 diagnostics=list(preflight.diagnostics),
             )
+        self._record_preflight_success()
 
         execution_config = self.live_execution_config()
         if not execution_config.allowed:
@@ -117,6 +132,7 @@ class JupiterLiveExecutionAdapter(ExecutionAdapter):
             )
             if jito_result.ok:
                 diagnostics.append("jito_bundle_submitted")
+                self._record_submission_success()
                 return LiveSubmissionResult(
                     ok=True,
                     provider="jito",
@@ -129,6 +145,7 @@ class JupiterLiveExecutionAdapter(ExecutionAdapter):
                 return await self._submit_via_rpc(transaction, diagnostics=diagnostics, jito_result=jito_result)
 
             diagnostics.append("jito_failed_no_fallback")
+            self._record_submission_failure()
             return LiveSubmissionResult(
                 ok=False,
                 provider="jito",
@@ -197,6 +214,7 @@ class JupiterLiveExecutionAdapter(ExecutionAdapter):
         jito_result: JitoSubmitResult | None = None,
     ) -> LiveSubmissionResult:
         if self._rpc_submitter is None:
+            self._record_rpc_failure()
             return LiveSubmissionResult(
                 ok=False,
                 provider="rpc",
@@ -208,10 +226,12 @@ class JupiterLiveExecutionAdapter(ExecutionAdapter):
         try:
             tx_signature = await self._rpc_submitter(transaction)
         except Exception as exc:
+            self._record_rpc_failure()
             if self._backup_rpc_submitter is not None:
                 try:
                     tx_signature = await self._backup_rpc_submitter(transaction)
                 except Exception as backup_exc:
+                    self._record_submission_failure()
                     return LiveSubmissionResult(
                         ok=False,
                         provider="rpc",
@@ -220,6 +240,7 @@ class JupiterLiveExecutionAdapter(ExecutionAdapter):
                         diagnostics=[*diagnostics, "rpc_primary_failed_backup_failed"],
                     )
 
+                self._record_submission_success()
                 return LiveSubmissionResult(
                     ok=True,
                     provider="rpc_backup",
@@ -228,6 +249,7 @@ class JupiterLiveExecutionAdapter(ExecutionAdapter):
                     diagnostics=[*diagnostics, "rpc_primary_failed_backup_used"],
                 )
 
+            self._record_submission_failure()
             return LiveSubmissionResult(
                 ok=False,
                 provider="rpc",
@@ -236,6 +258,8 @@ class JupiterLiveExecutionAdapter(ExecutionAdapter):
                 diagnostics=diagnostics,
             )
 
+        self._record_rpc_success()
+        self._record_submission_success()
         return LiveSubmissionResult(
             ok=True,
             provider="rpc",
@@ -243,3 +267,34 @@ class JupiterLiveExecutionAdapter(ExecutionAdapter):
             jito_result=jito_result,
             diagnostics=diagnostics,
         )
+
+    def _record_preflight_failure(self, diagnostics: tuple[str, ...]) -> None:
+        if self._circuit_breaker is None:
+            return
+        if any(reason.startswith("transaction_simulation_") for reason in diagnostics):
+            self._circuit_breaker.record_simulation_failure()
+
+    def _record_preflight_success(self) -> None:
+        if self._circuit_breaker is None:
+            return
+        self._circuit_breaker.record_simulation_success()
+
+    def _record_rpc_failure(self) -> None:
+        if self._circuit_breaker is None:
+            return
+        self._circuit_breaker.record_rpc_failure()
+
+    def _record_rpc_success(self) -> None:
+        if self._circuit_breaker is None:
+            return
+        self._circuit_breaker.record_rpc_success()
+
+    def _record_submission_failure(self) -> None:
+        if self._circuit_breaker is None:
+            return
+        self._circuit_breaker.record_submission_failure()
+
+    def _record_submission_success(self) -> None:
+        if self._circuit_breaker is None:
+            return
+        self._circuit_breaker.record_submission_success()

@@ -6,6 +6,7 @@ import httpx
 from src.core.config import load_settings
 from src.chain.jito import JitoBlockEngineClient
 from src.core.models import Side
+from src.execution.live_circuit_breaker import LiveCircuitBreaker
 from src.execution.jupiter_live import JupiterLiveExecutionAdapter
 from src.execution.live_preflight import TransactionSimulationResult
 
@@ -554,6 +555,33 @@ def test_live_adapter_invalid_priority_fee_config_fails_closed() -> None:
         assert result.ok is False
         assert result.provider == "config"
         assert "priority_fee_config_invalid" in result.diagnostics
+
+        await adapter.close()
+
+    asyncio.run(run())
+
+
+def test_live_adapter_tripped_circuit_breaker_blocks_submission() -> None:
+    async def run() -> None:
+        settings = load_settings().model_copy(
+            update={"execution": load_settings().execution.model_copy(update={"mode": "live"})}
+        )
+        breaker = LiveCircuitBreaker(rpc_failure_threshold=1)
+        breaker.record_health_check(True)
+        breaker.record_rpc_failure()
+        adapter = JupiterLiveExecutionAdapter(
+            settings=settings,
+            guardrail_env=_armed_env(settings),
+            wallet_balance_lookup=RecordingBalanceLookup(1.0),
+            transaction_simulator=RecordingSimulator(TransactionSimulationResult(ok=True)),
+            circuit_breaker=breaker,
+        )
+
+        result = await adapter.submit_serialized_swap("serialized-tx", amount_sol=0.01)
+
+        assert result.ok is False
+        assert result.provider == "circuit_breaker"
+        assert "rpc_failure_threshold_reached" in result.diagnostics
 
         await adapter.close()
 
