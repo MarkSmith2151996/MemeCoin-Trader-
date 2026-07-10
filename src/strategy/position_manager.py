@@ -104,18 +104,27 @@ class PositionManager:
         self._cache[mint] = updated
         await self._persist(updated)
 
-    async def close_position(self, mint: str) -> None:
+    async def close_position(self, mint: str, exit_price_sol: float | None = None) -> Position | None:
         position = await self._fetch_position(mint) if mint not in self._cache else self._cache[mint]
         if position is None:
-            return
+            return None
+
+        realized_pnl = 0.0
+        close_price = exit_price_sol
+        if exit_price_sol is not None and exit_price_sol > 0:
+            realized_pnl = round(position.token_amount * exit_price_sol - position.amount_sol, 9)
+
         closed = position.model_copy(
             update={
                 "status": PositionStatus.CLOSED,
                 "closed_at": datetime.now(UTC),
+                "realized_pnl_sol": round(position.realized_pnl_sol + realized_pnl, 9),
+                "close_price_sol": close_price,
             }
         )
         self._cache[mint] = closed
         await self._persist(closed)
+        return closed
 
     async def get_paper_positions(self) -> list[Position]:
         """Return all open positions with mode == 'paper'."""

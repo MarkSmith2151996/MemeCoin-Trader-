@@ -38,7 +38,8 @@ SCHEMA = (
       opened_at TEXT NOT NULL,
       closed_at TEXT,
       realized_pnl_sol REAL NOT NULL,
-      partial_exits_json TEXT NOT NULL
+      partial_exits_json TEXT NOT NULL,
+      close_price_sol REAL
     )
     """,
 )
@@ -50,6 +51,10 @@ async def init_db(path: str | Path) -> None:
     async with aiosqlite.connect(db_path) as db:
         for statement in SCHEMA:
             await db.execute(statement)
+        try:
+            await db.execute("ALTER TABLE positions ADD COLUMN close_price_sol REAL")
+        except aiosqlite.OperationalError:
+            pass
         await db.commit()
 
 
@@ -81,7 +86,7 @@ async def record_position(path: str | Path, position: Position) -> None:
     async with aiosqlite.connect(path) as db:
         await db.execute(
             """
-            INSERT OR REPLACE INTO positions VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            INSERT OR REPLACE INTO positions VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 position.id,
@@ -95,6 +100,7 @@ async def record_position(path: str | Path, position: Position) -> None:
                 position.closed_at.isoformat() if position.closed_at else None,
                 position.realized_pnl_sol,
                 position.model_dump_json(),
+                position.close_price_sol,
             ),
         )
         await db.commit()

@@ -17,6 +17,7 @@ from rich.console import Console
 
 from src.core.config import Settings, load_settings
 from src.core.database import init_db, record_trade
+from src.core.models import PositionStatus
 from src.execution.base import ExecutionAdapter
 from src.execution.live_buy import execute_guarded_live_buy
 from src.execution.live_circuit_breaker import LiveCircuitBreaker
@@ -32,6 +33,8 @@ from src.execution.helius_providers import (
 from src.execution.live_readiness import evaluate_micro_live_readiness
 from src.execution.jupiter_live import JupiterLiveExecutionAdapter
 from src.execution.paper import PaperExecutionAdapter
+from src.execution.paper_pnl import PaperPnLCalculator, PaperPnLSummary
+from src.execution.price_provider import UnavailablePriceProvider
 from src.monitoring.dashboard import resolve_db_path
 from src.monitoring.health import check_health
 from src.risk.rugcheck import RugCheckClient
@@ -2147,6 +2150,133 @@ async def _print_paper_state(manager: PositionManager) -> None:
                 f"price={pos.entry_price_sol:.8f}  "
                 f"opened={pos.opened_at.strftime('%H:%M:%S')}"
             )
+
+
+def _format_pnl_summary(summary: PaperPnLSummary) -> None:
+    summary_line = (
+        f"[bold]Paper PnL Summary[/bold]\n"
+        f"  Total paper positions: {summary.total_positions}\n"
+        f"  Open: {summary.open_positions}  |  Closed: {summary.closed_positions}\n"
+        f"  Total SOL deployed (open): {summary.total_sol_deployed:.6f}\n"
+        f"  Realized PnL: {_fmt_pnl(summary.realized_pnl_sol)}\n"
+    )
+
+    if summary.unrealized_incomplete:
+        summary_line += (
+            f"  Unrealized PnL: [yellow]mark_unavailable "
+            f"({summary.mark_unavailable_count} position(s) without mark)[/yellow]\n"
+        )
+    else:
+        summary_line += f"  Unrealized PnL: {_fmt_pnl(summary.unrealized_pnl_sol or 0.0)}\n"
+
+    summary_line += "\n[yellow]WARNING: Paper PnL is simulated. Not real profit or loss.[/yellow]"
+    console.print(summary_line)
+
+    if summary.positions:
+        console.print("\n--- Per-Position Detail ---")
+        for pos in sorted(summary.positions, key=lambda p: p.mint_address):
+            status_icon = "[green]OPEN[/green]" if pos.status == PositionStatus.OPEN else "[red]CLOSED[/red]"
+            pnl_str = _fmt_pnl(pos.realized_pnl_sol) if pos.status == PositionStatus.CLOSED else (
+                "[yellow]mark_unavailable[/yellow]" if pos.mark_unavailable else _fmt_pnl(pos.unrealized_pnl_sol or 0.0)
+            )
+            price_str = (
+                f"entry={pos.entry_price_sol:.10f}"
+                if pos.mark_price_sol is None
+                else f"entry={pos.entry_price_sol:.10f} mark={pos.mark_price_sol:.10f}"
+            )
+            console.print(
+                f"  mint={pos.mint_address[:16]}  {status_icon}  "
+                f"sol={pos.amount_sol:.4f}  tokens={pos.token_amount:.0f}  "
+                f"{price_str}  "
+                f"pnl={pnl_str}"
+            )
+
+
+def _fmt_pnl(value: float | None) -> str:
+    if value is None:
+        return "[yellow]N/A[/yellow]"
+    if value >= 0:
+        return f"[green]+{value:.6f} SOL[/green]"
+    return f"[red]{value:.6f} SOL[/red]"
+
+
+@app.command("paper-pnl")
+def paper_pnl(
+    db_path: str | None = typer.Option(None, help="Optional SQLite path override."),
+) -> None:
+    """Show paper PnL summary with per-position detail."""
+    settings = load_settings()
+    runtime_db_path = resolve_db_path(db_path)
+    asyncio.run(init_db(runtime_db_path))
+    manager = PositionManager(runtime_db_path, settings)
+    calculator = PaperPnLCalculator(manager, price_provider=UnavailablePriceProvider())
+    summary = asyncio.run(calculator.compute_summary())
+    _format_pnl_summary(summary)
+
+
+@app.command("paper-close")
+def paper_close(
+    mint: str = typer.Option("", "--mint", help="Mint address to close."),
+    price: float | None = typer.Option(None, "--price", help="Manual exit price in SOL."),
+    close_all: bool = typer.Option(False, "--all", help="Close all open paper positions."),
+    confirm: bool = typer.Option(False, "--confirm", help="Required confirmation for --all."),
+    db_path: str | None = typer.Option(None, help="Optional SQLite path override."),
+) -> None:
+    """Close a paper position by mint address or close all with --all --confirm."""
+    settings = load_settings()
+    runtime_db_path = resolve_db_path(db_path)
+    asyncio.run(init_db(runtime_db_path))
+    manager = PositionManager(runtime_db_path, settings)
+
+    if close_all:
+        if not confirm:
+            paper_positions = asyncio.run(manager.get_paper_positions())
+            live_positions = [p for p in asyncio.run(manager.get_all_open()) if p.mode == "live"]
+            console.print(f"Paper positions to close: {len(paper_positions)}")
+            console.print(f"Live positions (untouched): {len(live_positions)}")
+            console.print("\n[yellow]Use --confirm to close all paper positions. Live positions are never closed.[/yellow]")
+            return
+
+        closed_count = 0
+        paper_positions = asyncio.run(manager.get_paper_positions())
+        for pos in paper_positions:
+            result = asyncio.run(manager.close_position(pos.mint_address, exit_price_sol=price))
+            if result is not None:
+                closed_count += 1
+        remaining = asyncio.run(manager.get_all_open())
+        live_count = sum(1 for p in remaining if p.mode == "live")
+        console.print(f"Closed {closed_count} paper position(s) with PnL. {live_count} live position(s) untouched.")
+        return
+
+    if not mint:
+        console.print("[red]Provide --mint <address> or --all --confirm[/red]")
+        raise typer.Exit(code=1)
+
+    position = asyncio.run(manager.get_position(mint))
+    if position is None:
+        console.print(f"[red]Position not found for mint: {mint}[/red]")
+        raise typer.Exit(code=1)
+
+    if position.mode != "paper":
+        console.print("[red]Refusing to close a live position via paper-close.[/red]")
+        raise typer.Exit(code=1)
+
+    resolved_price = price
+    if resolved_price is None:
+        resolved_price = position.close_price_sol
+    if resolved_price is None or resolved_price <= 0:
+        calculator = PaperPnLCalculator(manager, price_provider=UnavailablePriceProvider())
+        summary = asyncio.run(calculator.compute_summary())
+        matching = [p for p in summary.positions if p.mint_address == mint]
+        if matching and not matching[0].mark_unavailable:
+            resolved_price = matching[0].mark_price_sol
+    if resolved_price is None or resolved_price <= 0:
+        console.print("[red]No exit price available. Provide --price or ensure a mark price is accessible.[/red]")
+        raise typer.Exit(code=1)
+
+    closed = asyncio.run(manager.close_position(mint, exit_price_sol=resolved_price))
+    pnl_str = _fmt_pnl(closed.realized_pnl_sol if closed else 0.0)
+    console.print(f"Closed paper position {mint[:16]} at price {resolved_price:.10f}. Realized PnL: {pnl_str}")
 
 
 if __name__ == "__main__":

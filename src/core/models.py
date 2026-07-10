@@ -169,6 +169,7 @@ class Position(BaseModel):
     opened_at: datetime = Field(default_factory=utc_now)
     closed_at: datetime | None = None
     realized_pnl_sol: float = 0.0
+    close_price_sol: float | None = None
     partial_exits: list[PartialExit] = Field(default_factory=list)
 
     @property
