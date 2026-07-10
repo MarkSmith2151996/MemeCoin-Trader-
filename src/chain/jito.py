@@ -13,6 +13,8 @@ from typing import Any, Protocol
 
 import httpx
 
+from src.execution.redaction import sanitize_provider_error
+
 
 DEFAULT_JITO_ENDPOINT = "https://mainnet.block-engine.jito.wtf/api/v1/bundles"
 
@@ -115,7 +117,7 @@ class JitoBlockEngineClient:
         except httpx.TimeoutException:
             return self._failure("request timed out", request)
         except Exception as exc:
-            return self._failure(f"provider exception: {exc}", request)
+            return self._failure(f"provider exception: {sanitize_provider_error(exc)}", request)
 
         status_code = getattr(response, "status_code", None)
         if status_code != 200:

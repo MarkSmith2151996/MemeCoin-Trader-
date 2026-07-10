@@ -98,8 +98,8 @@ def test_env_readiness_with_fake_env_no_leak(monkeypatch) -> None:
         "LIVE_CONFIRMATION_PHRASE": "I_UNDERSTAND",
         "LIVE_KILL_SWITCH": "false",
         "MAX_LIVE_TRADE_SOL": "0.005",
-        "MAX_DAILY_LIVE_TRADES": "1",
-        "MAX_DAILY_LOSS_SOL": "0.02",
+        "MAX_LIVE_DAILY_TRADES": "1",
+        "MAX_LIVE_DAILY_LOSS_SOL": "0.02",
         "PRIMARY_RPC_URL": "https://primary.example.com/rpc",
         "BACKUP_RPC_URL": "https://backup.example.com/rpc",
     }

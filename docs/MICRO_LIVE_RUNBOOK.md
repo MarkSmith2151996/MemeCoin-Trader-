@@ -18,8 +18,8 @@ Set these in `.env` (never commit `.env`):
 | `LIVE_CONFIRMATION_PHRASE=I_UNDERSTAND_THIS_CAN_LOSE_REAL_SOL` | Confirms operator understands risk | Required by guardrails |
 | `LIVE_KILL_SWITCH=false` | Disables the kill switch | Required by guardrails |
 | `MAX_LIVE_TRADE_SOL=0.005` | Per-trade SOL cap (tiny) | Guardrails validation |
-| `MAX_DAILY_LIVE_TRADES=1` | Daily trade count cap | Guardrails validation |
-| `MAX_DAILY_LOSS_SOL=0.02` | Daily loss limit | Guardrails validation |
+| `MAX_LIVE_DAILY_TRADES=1` | Daily trade count cap | Guardrails validation |
+| `MAX_LIVE_DAILY_LOSS_SOL=0.02` | Daily loss limit | Guardrails validation |
 | `PRIMARY_RPC_URL` | Primary RPC endpoint (defaults to Helius) | Optional override |
 | `BACKUP_RPC_URL` | Backup RPC endpoint | Optional override |
 

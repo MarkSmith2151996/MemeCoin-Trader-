@@ -1,4 +1,5 @@
 import asyncio
+from datetime import date
 from pathlib import Path
 
 from typer.testing import CliRunner
@@ -9,6 +10,7 @@ from src.core.database import init_db
 from src.core.models import CheckResult, RiskAssessment, Signal, SignalSource, SignalType, TokenInfo, Trade
 from src.execution.base import ExecutionAdapter
 from src.execution.live_circuit_breaker import LiveCircuitBreaker
+from src.execution.live_daily_caps import DailyLiveState
 from src.execution.live_exit import execute_guarded_live_exit
 from src.execution.live_preflight import TransactionSimulationResult
 from src.execution.jupiter_live import JupiterLiveExecutionAdapter
@@ -17,6 +19,10 @@ from src.strategy.position_manager import PositionManager
 
 
 runner = CliRunner()
+
+
+async def _available_daily_state() -> DailyLiveState:
+    return DailyLiveState(day=date.today(), submitted_trade_count=0, realized_loss_sol=0.0)
 
 
 class SmokePaperExecutionAdapter(ExecutionAdapter):
@@ -159,6 +165,7 @@ def test_live_exit_cannot_open_new_position(tmp_path: Path) -> None:
             wallet_balance_lookup=lambda: _async_return(1.0),
             transaction_simulator=lambda _tx: _async_return(TransactionSimulationResult(ok=True)),
             circuit_breaker=LiveCircuitBreaker(),
+            daily_live_state_lookup=_available_daily_state,
         )
         breaker = LiveCircuitBreaker()
         breaker.record_health_check(True)
@@ -196,6 +203,7 @@ def test_live_exit_failures_in_readiness_block_exit(tmp_path: Path) -> None:
             wallet_balance_lookup=lambda: _async_return(1.0),
             transaction_simulator=lambda _tx: _async_return(TransactionSimulationResult(ok=True)),
             circuit_breaker=breaker,
+            daily_live_state_lookup=_available_daily_state,
         )
 
         result = await execute_guarded_live_exit(
@@ -242,6 +250,7 @@ def test_fully_fake_ready_live_exit_can_close_existing_position(tmp_path: Path) 
             wallet_balance_lookup=lambda: _async_return(1.0),
             transaction_simulator=lambda _tx: _async_return(TransactionSimulationResult(ok=True)),
             circuit_breaker=breaker,
+            daily_live_state_lookup=_available_daily_state,
         )
 
         result = await execute_guarded_live_exit(

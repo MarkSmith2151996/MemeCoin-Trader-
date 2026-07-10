@@ -1,4 +1,5 @@
 import asyncio
+from datetime import date
 from pathlib import Path
 
 from typer.testing import CliRunner
@@ -10,6 +11,7 @@ from src.core.models import CheckResult, RiskAssessment, Signal, SignalSource, S
 from src.execution.base import ExecutionAdapter
 from src.execution.live_buy import execute_guarded_live_buy
 from src.execution.live_circuit_breaker import LiveCircuitBreaker
+from src.execution.live_daily_caps import DailyLiveState
 from src.execution.live_preflight import TransactionSimulationResult
 from src.execution.jupiter_live import JupiterLiveExecutionAdapter
 from src.strategy.decision_engine import DecisionEngine
@@ -17,6 +19,10 @@ from src.strategy.position_manager import PositionManager
 
 
 runner = CliRunner()
+
+
+async def _available_daily_state() -> DailyLiveState:
+    return DailyLiveState(day=date.today(), submitted_trade_count=0, realized_loss_sol=0.0)
 
 
 class SmokePaperExecutionAdapter(ExecutionAdapter):
@@ -163,6 +169,7 @@ def test_oversized_trade_is_blocked(tmp_path: Path) -> None:
             wallet_balance_lookup=lambda: _async_return(1.0),
             transaction_simulator=lambda _tx: _async_return(TransactionSimulationResult(ok=True)),
             circuit_breaker=breaker,
+            daily_live_state_lookup=_available_daily_state,
         )
 
         result = await execute_guarded_live_buy(
@@ -208,6 +215,7 @@ def test_paper_position_does_not_block_live_buy(tmp_path: Path) -> None:
             wallet_balance_lookup=lambda: _async_return(1.0),
             transaction_simulator=lambda _tx: _async_return(TransactionSimulationResult(ok=True)),
             circuit_breaker=breaker,
+            daily_live_state_lookup=_available_daily_state,
         )
 
         result = await execute_guarded_live_buy(
@@ -256,6 +264,7 @@ def test_live_position_blocks_live_buy(tmp_path: Path) -> None:
             wallet_balance_lookup=lambda: _async_return(1.0),
             transaction_simulator=lambda _tx: _async_return(TransactionSimulationResult(ok=True)),
             circuit_breaker=breaker,
+            daily_live_state_lookup=_available_daily_state,
         )
 
         result = await execute_guarded_live_buy(
@@ -292,6 +301,7 @@ def test_fully_fake_ready_live_buy_can_open_position(tmp_path: Path) -> None:
             wallet_balance_lookup=lambda: _async_return(1.0),
             transaction_simulator=lambda _tx: _async_return(TransactionSimulationResult(ok=True)),
             circuit_breaker=breaker,
+            daily_live_state_lookup=_available_daily_state,
         )
 
         result = await execute_guarded_live_buy(

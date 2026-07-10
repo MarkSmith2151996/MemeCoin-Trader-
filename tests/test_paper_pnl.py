@@ -26,6 +26,13 @@ from src.strategy.position_manager import PositionManager
 runner = CliRunner()
 
 
+def test_paper_pnl_rejects_invalid_marks_value(tmp_path: Path) -> None:
+    for command in ("paper-pnl", "paper-report"):
+        result = runner.invoke(cli_module.app, [command, "--marks", "cached", "--db-path", str(tmp_path / f"{command}.db")])
+
+        assert result.exit_code != 0
+
+
 def _paper_position(manager: PositionManager, mint: str, amount_sol: float = 1.0, price_sol: float = 0.00001) -> None:
     trade = Trade(
         mint_address=mint,

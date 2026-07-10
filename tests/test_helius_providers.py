@@ -72,6 +72,23 @@ def test_simulator_unreachable_readiness_check() -> None:
     assert "helius_rpc_unreachable" in (result.error or "")
 
 
+def test_simulator_error_sanitizes_urls_and_api_keys() -> None:
+    fake = FakeHttpClient(raise_on_post=True)
+    fake._raise_on_post = False
+
+    async def post_with_secret(*args: object, **kwargs: object) -> httpx.Response:
+        raise RuntimeError("https://user:password@rpc.example/?api-key=secret-token")
+
+    fake.post = post_with_secret  # type: ignore[method-assign]
+    sim = HeliusTransactionSimulator(rpc_url="https://example.com", http_client=fake)  # type: ignore[arg-type]
+    result = asyncio.run(sim("readiness-check"))
+
+    assert result.ok is False
+    assert "rpc.example" in (result.error or "")
+    assert "password" not in (result.error or "")
+    assert "secret-token" not in (result.error or "")
+
+
 def test_simulator_malformed_response() -> None:
     fake = FakeHttpClient(status_code=500, json_body={"error": "internal"})
     sim = HeliusTransactionSimulator(rpc_url="https://example.com", http_client=fake)  # type: ignore[arg-type]

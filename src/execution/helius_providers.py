@@ -25,6 +25,7 @@ from src.execution.live_preflight import (
     TransactionSimulationResult,
 )
 from src.execution.position_reconciliation import SupportsWalletHoldingsLookup
+from src.execution.redaction import sanitize_provider_error
 
 
 def _resolve_helius_rpc_url() -> str:
@@ -110,7 +111,7 @@ class HeliusTransactionSimulator:
                 await self._rpc_call("getLatestBlockhash")
                 return TransactionSimulationResult(ok=True)
             except Exception as exc:
-                return TransactionSimulationResult(ok=False, error=f"helius_rpc_unreachable: {exc}")
+                return TransactionSimulationResult(ok=False, error=f"helius_rpc_unreachable: {sanitize_provider_error(exc)}")
 
         try:
             raw_tx = transaction if isinstance(transaction, bytes) else transaction.encode()
@@ -119,12 +120,12 @@ class HeliusTransactionSimulator:
                 if result.get("err"):
                     return TransactionSimulationResult(
                         ok=False,
-                        error=f"simulation_failed: {result['err']}",
+                        error=f"simulation_failed: {sanitize_provider_error(result['err'])}",
                     )
                 return TransactionSimulationResult(ok=True)
             return TransactionSimulationResult(ok=False, error="unexpected_simulation_response")
         except Exception as exc:
-            return TransactionSimulationResult(ok=False, error=f"simulation_error: {exc}")
+            return TransactionSimulationResult(ok=False, error=f"simulation_error: {sanitize_provider_error(exc)}")
 
     async def close(self) -> None:
         await self._client.aclose()

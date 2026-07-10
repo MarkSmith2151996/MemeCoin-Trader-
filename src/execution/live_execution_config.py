@@ -5,9 +5,9 @@ from __future__ import annotations
 from dataclasses import dataclass
 import os
 from typing import Mapping
-from urllib.parse import urlparse
 
 from src.core.config import Settings
+from src.execution.redaction import rpc_label
 
 
 @dataclass(frozen=True, slots=True)
@@ -78,8 +78,8 @@ def evaluate_live_execution_config(
             diagnostics=tuple(diagnostics),
             priority_fee_lamports=priority_fee_lamports,
             jito_tip_lamports=jito_tip_lamports,
-            primary_rpc_label=_rpc_label(primary_rpc_url),
-            backup_rpc_label=_rpc_label(backup_rpc_url),
+            primary_rpc_label=rpc_label(primary_rpc_url),
+            backup_rpc_label=rpc_label(backup_rpc_url),
         )
 
     return LiveExecutionConfigDecision(
@@ -87,8 +87,8 @@ def evaluate_live_execution_config(
         diagnostics=("live_execution_config_valid",),
         priority_fee_lamports=priority_fee_lamports,
         jito_tip_lamports=jito_tip_lamports,
-        primary_rpc_label=_rpc_label(primary_rpc_url),
-        backup_rpc_label=_rpc_label(backup_rpc_url),
+        primary_rpc_label=rpc_label(primary_rpc_url),
+        backup_rpc_label=rpc_label(backup_rpc_url),
     )
 
 
@@ -108,12 +108,3 @@ def _env_str(env: Mapping[str, str], name: str, default: str | None) -> str | No
         return default
     stripped = raw_value.strip()
     return stripped or None
-
-
-def _rpc_label(url: str | None) -> str | None:
-    if not url:
-        return None
-    parsed = urlparse(url)
-    if parsed.netloc:
-        return parsed.netloc
-    return "configured"

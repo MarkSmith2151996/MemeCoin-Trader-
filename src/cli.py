@@ -2157,10 +2157,10 @@ def _preflight_explainer(
             missing_gates.append("LIVE_KILL_SWITCH=false — disable kill switch for live")
         if any(i.name == "MAX_LIVE_TRADE_SOL" and not i.present for i in env.items):
             missing_gates.append("MAX_LIVE_TRADE_SOL — tiny per-trade cap (e.g. 0.005)")
-        if any(i.name == "MAX_DAILY_LIVE_TRADES" and not i.present for i in env.items):
-            missing_gates.append("MAX_DAILY_LIVE_TRADES — daily count cap (e.g. 1)")
-        if any(i.name == "MAX_DAILY_LOSS_SOL" and not i.present for i in env.items):
-            missing_gates.append("MAX_DAILY_LOSS_SOL — daily loss limit (e.g. 0.02)")
+        if any(i.name == "MAX_LIVE_DAILY_TRADES" and not i.present for i in env.items):
+            missing_gates.append("MAX_LIVE_DAILY_TRADES — daily count cap (e.g. 1)")
+        if any(i.name == "MAX_LIVE_DAILY_LOSS_SOL" and not i.present for i in env.items):
+            missing_gates.append("MAX_LIVE_DAILY_LOSS_SOL — daily loss limit (e.g. 0.02)")
         if any(i.name == "PRIMARY_RPC_URL" and not i.present for i in env.items):
             missing_gates.append("PRIMARY_RPC_URL — execution RPC endpoint")
         if any(i.name == "BACKUP_RPC_URL" and not i.present for i in env.items):
@@ -2597,6 +2597,8 @@ def paper_pnl(
     asyncio.run(init_db(runtime_db_path))
     manager = PositionManager(runtime_db_path, settings)
 
+    if marks not in {"live", "unavailable"}:
+        raise typer.BadParameter("must be 'unavailable' or 'live'", param_hint="--marks")
     if marks == "live":
         provider = DexScreenerPriceProvider()
     else:
@@ -2802,6 +2804,8 @@ def paper_report(
     asyncio.run(init_db(runtime_db_path))
     manager = PositionManager(runtime_db_path, settings)
 
+    if marks not in {"live", "unavailable"}:
+        raise typer.BadParameter("must be 'unavailable' or 'live'", param_hint="--marks")
     if marks == "live":
         provider = DexScreenerPriceProvider()
     else:

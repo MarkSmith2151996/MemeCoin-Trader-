@@ -1,5 +1,6 @@
 import asyncio
 import base64
+from datetime import date
 
 import httpx
 
@@ -7,6 +8,7 @@ from src.core.config import load_settings
 from src.chain.jito import JitoBlockEngineClient
 from src.core.models import Side
 from src.execution.live_circuit_breaker import LiveCircuitBreaker
+from src.execution.live_daily_caps import DailyLiveState
 from src.execution.jupiter_live import JupiterLiveExecutionAdapter
 from src.execution.live_preflight import TransactionSimulationResult
 
@@ -68,6 +70,10 @@ class RecordingSimulator:
         if isinstance(self.result, Exception):
             raise self.result
         return self.result
+
+
+async def _available_daily_state() -> DailyLiveState:
+    return DailyLiveState(day=date.today(), submitted_trade_count=0, realized_loss_sol=0.0)
 
 
 def _armed_env(settings) -> dict[str, str]:
@@ -240,6 +246,7 @@ def test_live_adapter_calls_jito_when_explicitly_enabled() -> None:
             guardrail_env=_armed_env(settings),
             wallet_balance_lookup=RecordingBalanceLookup(1.0),
             transaction_simulator=RecordingSimulator(TransactionSimulationResult(ok=True)),
+            daily_live_state_lookup=_available_daily_state,
         )
 
         result = await adapter.submit_serialized_swap("serialized-tx", amount_sol=0.01)
@@ -270,6 +277,7 @@ def test_live_adapter_handles_successful_jito_response() -> None:
             guardrail_env=_armed_env(settings),
             wallet_balance_lookup=RecordingBalanceLookup(1.0),
             transaction_simulator=RecordingSimulator(TransactionSimulationResult(ok=True)),
+            daily_live_state_lookup=_available_daily_state,
         )
 
         result = await adapter.submit_serialized_swap(b"serialized-tx", amount_sol=0.01)
@@ -302,6 +310,7 @@ def test_live_adapter_falls_back_to_rpc_when_jito_fails_and_fallback_enabled() -
             guardrail_env=_armed_env(settings),
             wallet_balance_lookup=RecordingBalanceLookup(1.0),
             transaction_simulator=RecordingSimulator(TransactionSimulationResult(ok=True)),
+            daily_live_state_lookup=_available_daily_state,
         )
 
         result = await adapter.submit_serialized_swap("serialized-tx", amount_sol=0.01)
@@ -335,6 +344,7 @@ def test_live_adapter_fails_safely_when_jito_fails_and_fallback_disabled() -> No
             guardrail_env=_armed_env(settings),
             wallet_balance_lookup=RecordingBalanceLookup(1.0),
             transaction_simulator=RecordingSimulator(TransactionSimulationResult(ok=True)),
+            daily_live_state_lookup=_available_daily_state,
         )
 
         result = await adapter.submit_serialized_swap("serialized-tx", amount_sol=0.01)
@@ -464,6 +474,7 @@ def test_live_adapter_preflight_success_passes_without_network_or_wallet_side_ef
             guardrail_env=_armed_env(settings),
             wallet_balance_lookup=balance_lookup,
             transaction_simulator=simulator,
+            daily_live_state_lookup=_available_daily_state,
         )
 
         result = await adapter.submit_serialized_swap("serialized-tx", amount_sol=0.01)
@@ -473,6 +484,32 @@ def test_live_adapter_preflight_success_passes_without_network_or_wallet_side_ef
         assert balance_lookup.calls == 1
         assert simulator.calls == ["serialized-tx"]
         assert rpc_submitter.calls == ["serialized-tx"]
+
+        await adapter.close()
+
+    asyncio.run(run())
+
+
+def test_live_adapter_blocks_before_rpc_when_daily_state_is_unavailable() -> None:
+    async def run() -> None:
+        settings = load_settings().model_copy(
+            update={"execution": load_settings().execution.model_copy(update={"mode": "live"})}
+        )
+        rpc_submitter = RecordingRpcSubmitter()
+        adapter = JupiterLiveExecutionAdapter(
+            rpc_submitter=rpc_submitter,
+            settings=settings,
+            guardrail_env=_armed_env(settings),
+            wallet_balance_lookup=RecordingBalanceLookup(1.0),
+            transaction_simulator=RecordingSimulator(TransactionSimulationResult(ok=True)),
+        )
+
+        result = await adapter.submit_serialized_swap("serialized-tx", amount_sol=0.01)
+
+        assert result.ok is False
+        assert result.provider == "daily_caps"
+        assert result.diagnostics == ["daily_live_state_unavailable"]
+        assert rpc_submitter.calls == []
 
         await adapter.close()
 
@@ -519,6 +556,7 @@ def test_live_adapter_primary_rpc_failure_can_use_backup_rpc() -> None:
             guardrail_env=_armed_env(settings),
             wallet_balance_lookup=RecordingBalanceLookup(1.0),
             transaction_simulator=RecordingSimulator(TransactionSimulationResult(ok=True)),
+            daily_live_state_lookup=_available_daily_state,
         )
 
         result = await adapter.submit_serialized_swap("serialized-tx", amount_sol=0.01)
@@ -529,6 +567,32 @@ def test_live_adapter_primary_rpc_failure_can_use_backup_rpc() -> None:
         assert result.diagnostics == ["jito_disabled", "rpc_primary_failed_backup_used"]
         assert primary_submitter.calls == ["serialized-tx"]
         assert backup_submitter.calls == ["serialized-tx"]
+
+        await adapter.close()
+
+    asyncio.run(run())
+
+
+def test_live_adapter_sanitizes_rpc_exception_urls() -> None:
+    async def run() -> None:
+        settings = load_settings().model_copy(
+            update={"execution": load_settings().execution.model_copy(update={"mode": "live"})}
+        )
+        adapter = JupiterLiveExecutionAdapter(
+            rpc_submitter=RecordingRpcSubmitter(RuntimeError("https://user:password@rpc.example/?api-key=secret-token")),
+            settings=settings,
+            guardrail_env=_armed_env(settings),
+            wallet_balance_lookup=RecordingBalanceLookup(1.0),
+            transaction_simulator=RecordingSimulator(TransactionSimulationResult(ok=True)),
+            daily_live_state_lookup=_available_daily_state,
+        )
+
+        result = await adapter.submit_serialized_swap("serialized-tx", amount_sol=0.01)
+
+        assert result.ok is False
+        assert "rpc.example" in (result.error or "")
+        assert "password" not in (result.error or "")
+        assert "secret-token" not in (result.error or "")
 
         await adapter.close()
 

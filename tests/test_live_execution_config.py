@@ -54,3 +54,14 @@ def test_show_config_redacts_rpc_urls(monkeypatch) -> None:
     assert "backup.example" in result.stdout
     assert "api-key=secret" not in result.stdout
     assert "token=secret" not in result.stdout
+
+
+def test_rpc_labels_never_include_basic_auth() -> None:
+    decision = evaluate_live_execution_config(
+        _live_settings(),
+        env={"PRIMARY_RPC_URL": "https://user:password@primary.example/rpc?api-key=secret"},
+    )
+
+    assert decision.primary_rpc_label == "primary.example"
+    assert "user" not in str(decision)
+    assert "password" not in str(decision)

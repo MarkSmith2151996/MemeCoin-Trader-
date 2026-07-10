@@ -91,8 +91,8 @@ LIVE_TRADING_ENABLED=true
 LIVE_CONFIRMATION_PHRASE=I_UNDERSTAND_THIS_CAN_LOSE_REAL_SOL
 LIVE_KILL_SWITCH=false
 MAX_LIVE_TRADE_SOL=0.005
-MAX_DAILY_LIVE_TRADES=1
-MAX_DAILY_LOSS_SOL=0.02
+MAX_LIVE_DAILY_TRADES=1
+MAX_LIVE_DAILY_LOSS_SOL=0.02
 PRIMARY_RPC_URL=https://mainnet.helius-rpc.com/?api-key=your_key
 BACKUP_RPC_URL=https://mainnet.helius-rpc.com/?api-key=your_key
 ```
@@ -137,8 +137,8 @@ sed -i '/^LIVE_TRADING_ENABLED=/d' .env
 sed -i '/^LIVE_CONFIRMATION_PHRASE=/d' .env
 sed -i '/^LIVE_KILL_SWITCH=/d' .env
 sed -i '/^MAX_LIVE_TRADE_SOL=/d' .env
-sed -i '/^MAX_DAILY_LIVE_TRADES=/d' .env
-sed -i '/^MAX_DAILY_LOSS_SOL=/d' .env
+sed -i '/^MAX_LIVE_DAILY_TRADES=/d' .env
+sed -i '/^MAX_LIVE_DAILY_LOSS_SOL=/d' .env
 
 # Verify back to safe state
 python3 -m src.cli live-readiness   # should show NOT READY

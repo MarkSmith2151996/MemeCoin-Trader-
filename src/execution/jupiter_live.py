@@ -8,13 +8,14 @@ without requiring wallets, real RPC calls, or signed transactions.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Protocol
+from typing import Awaitable, Protocol
 
 from src.chain.jito import JitoBlockEngineClient, JitoSubmitResult
 from src.core.config import Settings, load_settings
 from src.core.models import Side, SwapQuote, Trade
 from src.execution.base import ExecutionAdapter
 from src.execution.live_circuit_breaker import LiveCircuitBreaker
+from src.execution.live_daily_caps import DailyLiveCapDecision, DailyLiveState, evaluate_daily_live_caps
 from src.execution.live_execution_config import LiveExecutionConfigDecision, evaluate_live_execution_config
 from src.execution.live_guardrails import LiveGuardrailDecision, evaluate_live_guardrails
 from src.execution.live_preflight import (
@@ -23,10 +24,15 @@ from src.execution.live_preflight import (
     SupportsWalletBalanceLookup,
     evaluate_live_preflight,
 )
+from src.execution.redaction import sanitize_provider_error
 
 
 class SupportsRpcSubmit(Protocol):
     async def __call__(self, transaction: str | bytes) -> str: ...
+
+
+class SupportsDailyLiveStateLookup(Protocol):
+    def __call__(self) -> Awaitable[DailyLiveState | None]: ...
 
 
 @dataclass(slots=True)
@@ -55,6 +61,7 @@ class JupiterLiveExecutionAdapter(ExecutionAdapter):
         wallet_balance_lookup: SupportsWalletBalanceLookup | None = None,
         transaction_simulator: SupportsTransactionSimulation | None = None,
         circuit_breaker: LiveCircuitBreaker | None = None,
+        daily_live_state_lookup: SupportsDailyLiveStateLookup | None = None,
     ) -> None:
         self._jito_enabled = jito_enabled
         self._jito_fallback_to_rpc = jito_fallback_to_rpc
@@ -68,6 +75,7 @@ class JupiterLiveExecutionAdapter(ExecutionAdapter):
         self._wallet_balance_lookup = wallet_balance_lookup
         self._transaction_simulator = transaction_simulator
         self._circuit_breaker = circuit_breaker
+        self._daily_live_state_lookup = daily_live_state_lookup
 
         if self._jito_tip_lamports is None:
             self._jito_tip_lamports = self._settings.execution.jito_tip_lamports
@@ -119,6 +127,15 @@ class JupiterLiveExecutionAdapter(ExecutionAdapter):
                 provider="config",
                 error="live execution config invalid",
                 diagnostics=list(execution_config.diagnostics),
+            )
+
+        daily_caps = await self._daily_live_caps(guardrails.max_daily_trades, guardrails.max_daily_loss_sol)
+        if not daily_caps.allowed:
+            return LiveSubmissionResult(
+                ok=False,
+                provider="daily_caps",
+                error="daily live caps blocked submission",
+                diagnostics=list(daily_caps.diagnostics),
             )
 
         diagnostics: list[str] = []
@@ -236,7 +253,10 @@ class JupiterLiveExecutionAdapter(ExecutionAdapter):
                         ok=False,
                         provider="rpc",
                         jito_result=jito_result,
-                        error=f"rpc submission failed: {exc}; backup failed: {backup_exc}",
+                        error=(
+                            "rpc submission failed: "
+                            f"{sanitize_provider_error(exc)}; backup failed: {sanitize_provider_error(backup_exc)}"
+                        ),
                         diagnostics=[*diagnostics, "rpc_primary_failed_backup_failed"],
                     )
 
@@ -254,7 +274,7 @@ class JupiterLiveExecutionAdapter(ExecutionAdapter):
                 ok=False,
                 provider="rpc",
                 jito_result=jito_result,
-                error=f"rpc submission failed: {exc}",
+                error=f"rpc submission failed: {sanitize_provider_error(exc)}",
                 diagnostics=diagnostics,
             )
 
@@ -266,6 +286,27 @@ class JupiterLiveExecutionAdapter(ExecutionAdapter):
             tx_signature=tx_signature,
             jito_result=jito_result,
             diagnostics=diagnostics,
+        )
+
+    async def _daily_live_caps(
+        self,
+        max_daily_trades: int | None,
+        max_daily_loss_sol: float | None,
+    ) -> DailyLiveCapDecision:
+        if self._daily_live_state_lookup is None:
+            return evaluate_daily_live_caps(
+                None,
+                max_daily_trades=max_daily_trades,
+                max_daily_loss_sol=max_daily_loss_sol,
+            )
+        try:
+            state = await self._daily_live_state_lookup()
+        except Exception:
+            state = None
+        return evaluate_daily_live_caps(
+            state,
+            max_daily_trades=max_daily_trades,
+            max_daily_loss_sol=max_daily_loss_sol,
         )
 
     def _record_preflight_failure(self, diagnostics: tuple[str, ...]) -> None:
