@@ -178,6 +178,37 @@ class Position(BaseModel):
         return max(1.0 - sold_pct, 0.0)
 
 
+class SoakRunRecord(BaseModel):
+    """Persisted summary of a single paper-soak run."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    id: str = Field(default_factory=lambda: str(uuid4()))
+    started_at: str = Field(default_factory=lambda: datetime.now(UTC).isoformat())
+    completed_at: str | None = None
+    max_signals: int = 0
+    timeout_seconds: float = 0.0
+    execution_mode: str = "paper"
+    risk_profile: str = "discovery"
+    signals_collected: int = 0
+    signals_accepted: int = 0
+    signals_rejected: int = 0
+    trades_persisted: int = 0
+    open_positions: int = 0
+    source_failures_json: str = "{}"
+    rejection_reasons_json: str = "{}"
+    capacity_blocked: int = 0
+    unknown_data_blocks: int = 0
+    unexpected_failures: int = 0
+    termination_reason: str = ""
+    elapsed_seconds: float = 0.0
+    health_ok: bool = True
+    health_message: str = ""
+    guardrail_diagnostics_json: str = "[]"
+    circuit_breaker_diagnostics_json: str = "[]"
+    readiness_json: str = "[]"
+
+
 class SwapQuote(BaseModel):
     """Execution quote for a potential swap."""
 

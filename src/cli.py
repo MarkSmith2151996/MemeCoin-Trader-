@@ -18,8 +18,8 @@ import typer
 from rich.console import Console
 
 from src.core.config import Settings, load_settings
-from src.core.database import init_db, record_trade
-from src.core.models import PositionStatus
+from src.core.database import get_recent_soak_runs, init_db, record_soak_run, record_trade
+from src.core.models import PositionStatus, SoakRunRecord
 from src.execution.base import ExecutionAdapter
 from src.execution.live_buy import execute_guarded_live_buy
 from src.execution.live_circuit_breaker import LiveCircuitBreaker
@@ -1752,6 +1752,14 @@ class PaperSoakAudit:
         return lines
 
 
+def _count_unexpected_failures(cycle: PaperCycleSummary) -> int:
+    count = 0
+    for reason, c in (cycle.summary_rejection_reasons or {}).items():
+        if "execution" in reason or "adapter" in reason or "unknown_or_other" in reason:
+            count += c
+    return count
+
+
 async def run_paper_soak(
     max_signals: int = 20,
     timeout_seconds: float = 60.0,
@@ -1786,7 +1794,7 @@ async def run_paper_soak(
         for check in readiness.checks
     ]
 
-    return PaperSoakAudit(
+    audit = PaperSoakAudit(
         cycle=cycle,
         health_ok=health_status.ok,
         health_message=health_status.message,
@@ -1794,6 +1802,52 @@ async def run_paper_soak(
         circuit_breaker_diagnostics=circuit_breaker_diagnostics,
         readiness_checks=readiness_checks,
     )
+
+    runtime_db_path = resolve_db_path(db_path)
+    await init_db(runtime_db_path)
+
+    import json
+
+    capacity_reasons: dict[str, int] = {}
+    unknown_reasons: dict[str, int] = {}
+    risk_reasons: dict[str, int] = {}
+    for reason, count in (cycle.rejection_reasons or {}).items():
+        if "_unknown" in reason:
+            unknown_reasons[reason] = count
+        elif "max_" in reason:
+            capacity_reasons[reason] = count
+        else:
+            risk_reasons[reason] = count
+
+    capacity_total = sum(capacity_reasons.values())
+    unknown_total = sum(unknown_reasons.values())
+
+    soak_record = SoakRunRecord(
+        max_signals=cycle.max_signals,
+        timeout_seconds=cycle.timeout_seconds,
+        execution_mode=cycle.execution_mode,
+        risk_profile=cycle.risk_profile,
+        signals_collected=cycle.signals_collected,
+        signals_accepted=cycle.signals_accepted,
+        signals_rejected=cycle.signals_rejected,
+        trades_persisted=cycle.trades_persisted,
+        open_positions=cycle.open_positions,
+        source_failures_json=json.dumps(cycle.source_failures),
+        rejection_reasons_json=json.dumps(risk_reasons),
+        capacity_blocked=capacity_total,
+        unknown_data_blocks=unknown_total,
+        unexpected_failures=_count_unexpected_failures(cycle),
+        termination_reason=cycle.termination_reason,
+        elapsed_seconds=cycle.elapsed_seconds,
+        health_ok=health_status.ok,
+        health_message=health_status.message,
+        guardrail_diagnostics_json=json.dumps(list(guardrail_diagnostics)),
+        circuit_breaker_diagnostics_json=json.dumps(list(circuit_breaker_diagnostics)),
+        readiness_json=json.dumps(list(readiness_checks)),
+    )
+    await record_soak_run(runtime_db_path, soak_record)
+
+    return audit
 
 
 @app.command()
@@ -2201,6 +2255,33 @@ def _format_pnl_summary(summary: PaperPnLSummary) -> None:
             )
 
 
+def _display_soak_diagnostics(db_path: str | Path) -> None:
+    import json
+
+    try:
+        runs = asyncio.run(get_recent_soak_runs(db_path, limit=3))
+    except Exception:
+        console.print("  [yellow](run 'paper-soak --max-signals 50' for current signal rejection stats)[/yellow]")
+        return
+
+    if not runs:
+        console.print("  [yellow](run 'paper-soak --max-signals 50' for current signal rejection stats)[/yellow]")
+        return
+
+    for run in runs:
+        started = run.started_at[:19] if run.started_at else "unknown"
+        source_fails = json.loads(run.source_failures_json) if run.source_failures_json else {}
+        source_fail_summary = ", ".join(f"{s}={c}" for s, c in source_fails.items()) if source_fails else "none"
+
+        console.print(f"  Run at {started} ({run.risk_profile}, {run.execution_mode})")
+        console.print(f"    Signals: {run.signals_collected} collected, {run.signals_accepted} accepted, {run.signals_rejected} rejected")
+        console.print(f"    Trades entered: {run.trades_persisted}  |  Termination: {run.termination_reason} ({run.elapsed_seconds:.1f}s)")
+        console.print(f"    Risk rejections: {sum(json.loads(run.rejection_reasons_json or '{}').values())}")
+        console.print(f"    Capacity blocks: {run.capacity_blocked}  |  Unknown-data blocks: {run.unknown_data_blocks}")
+        console.print(f"    Unexpected failures: {run.unexpected_failures}  |  Source failures: {source_fail_summary}")
+        console.print("")
+
+
 def _fmt_pnl(value: float | None) -> str:
     if value is None:
         return "[yellow]N/A[/yellow]"
@@ -2470,7 +2551,7 @@ def paper_report(
     console.print("")
 
     console.print("[bold]Paper-Soak Diagnostics[/bold]")
-    console.print("  [yellow](run 'paper-soak --max-signals 50' for current signal rejection stats)[/yellow]")
+    _display_soak_diagnostics(runtime_db_path)
     console.print("")
 
     console.print("[bold]Live Readiness (diagnostic only — does not affect paper mode)[/bold]")

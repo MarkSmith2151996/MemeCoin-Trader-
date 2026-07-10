@@ -6,7 +6,7 @@ from pathlib import Path
 
 import aiosqlite
 
-from src.core.models import Position, Trade
+from src.core.models import Position, SoakRunRecord, Trade
 
 
 SCHEMA = (
@@ -40,6 +40,34 @@ SCHEMA = (
       realized_pnl_sol REAL NOT NULL,
       partial_exits_json TEXT NOT NULL,
       close_price_sol REAL
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS paper_soak_runs (
+      id TEXT PRIMARY KEY,
+      started_at TEXT NOT NULL,
+      completed_at TEXT,
+      max_signals INTEGER NOT NULL,
+      timeout_seconds REAL NOT NULL,
+      execution_mode TEXT NOT NULL,
+      risk_profile TEXT NOT NULL,
+      signals_collected INTEGER NOT NULL,
+      signals_accepted INTEGER NOT NULL,
+      signals_rejected INTEGER NOT NULL,
+      trades_persisted INTEGER NOT NULL,
+      open_positions INTEGER NOT NULL,
+      source_failures_json TEXT NOT NULL,
+      rejection_reasons_json TEXT NOT NULL,
+      capacity_blocked INTEGER NOT NULL,
+      unknown_data_blocks INTEGER NOT NULL,
+      unexpected_failures INTEGER NOT NULL,
+      termination_reason TEXT NOT NULL,
+      elapsed_seconds REAL NOT NULL,
+      health_ok INTEGER NOT NULL,
+      health_message TEXT NOT NULL,
+      guardrail_diagnostics_json TEXT NOT NULL,
+      circuit_breaker_diagnostics_json TEXT NOT NULL,
+      readiness_json TEXT NOT NULL
     )
     """,
 )
@@ -104,3 +132,66 @@ async def record_position(path: str | Path, position: Position) -> None:
             ),
         )
         await db.commit()
+
+
+async def record_soak_run(path: str | Path, record: SoakRunRecord) -> None:
+    async with aiosqlite.connect(path) as db:
+        await db.execute(
+            """
+            INSERT OR REPLACE INTO paper_soak_runs VALUES (
+              ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+            )
+            """,
+            (
+                record.id,
+                record.started_at,
+                record.completed_at,
+                record.max_signals,
+                record.timeout_seconds,
+                record.execution_mode,
+                record.risk_profile,
+                record.signals_collected,
+                record.signals_accepted,
+                record.signals_rejected,
+                record.trades_persisted,
+                record.open_positions,
+                record.source_failures_json,
+                record.rejection_reasons_json,
+                record.capacity_blocked,
+                record.unknown_data_blocks,
+                record.unexpected_failures,
+                record.termination_reason,
+                record.elapsed_seconds,
+                1 if record.health_ok else 0,
+                record.health_message,
+                record.guardrail_diagnostics_json,
+                record.circuit_breaker_diagnostics_json,
+                record.readiness_json,
+            ),
+        )
+        await db.commit()
+
+
+async def get_recent_soak_runs(path: str | Path, limit: int = 5) -> list[SoakRunRecord]:
+    async with aiosqlite.connect(path) as db:
+        cursor = await db.execute(
+            "SELECT * FROM paper_soak_runs ORDER BY started_at DESC LIMIT ?",
+            (limit,),
+        )
+        rows = await cursor.fetchall()
+    columns = [
+        "id", "started_at", "completed_at", "max_signals", "timeout_seconds",
+        "execution_mode", "risk_profile", "signals_collected", "signals_accepted",
+        "signals_rejected", "trades_persisted", "open_positions",
+        "source_failures_json", "rejection_reasons_json", "capacity_blocked",
+        "unknown_data_blocks", "unexpected_failures", "termination_reason",
+        "elapsed_seconds", "health_ok", "health_message",
+        "guardrail_diagnostics_json", "circuit_breaker_diagnostics_json",
+        "readiness_json",
+    ]
+    results: list[SoakRunRecord] = []
+    for row in rows:
+        row_dict = dict(zip(columns, row))
+        row_dict["health_ok"] = bool(row_dict["health_ok"])
+        results.append(SoakRunRecord(**row_dict))
+    return results

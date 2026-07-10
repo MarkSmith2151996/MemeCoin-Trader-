@@ -8,12 +8,14 @@ from __future__ import annotations
 import asyncio
 from pathlib import Path
 
+import aiosqlite
+
 from typer.testing import CliRunner
 
 import src.cli as cli_module
 from src.core.config import load_settings
-from src.core.database import init_db
-from src.core.models import Position, PositionStatus, Signal, SignalSource, SignalType, Trade
+from src.core.database import get_recent_soak_runs, init_db, record_soak_run
+from src.core.models import Position, PositionStatus, Signal, SignalSource, SignalType, SoakRunRecord, Trade
 from src.execution.paper_pnl import PaperPnLCalculator
 from src.execution.price_provider import FakePriceProvider, UnavailablePriceProvider
 from src.strategy.position_manager import PositionManager
@@ -712,3 +714,130 @@ def test_paper_report_default_no_network(tmp_path: Path) -> None:
     assert result.exit_code == 0
     assert "Marks: unavailable" in result.stdout or "Marks:" in result.stdout
     assert "mark_unavailable" in result.stdout
+
+
+# --- MT-124: paper-soak diagnostics persistence ---
+
+def test_soak_run_db_table_created(tmp_path: Path) -> None:
+    db = tmp_path / "soak_schema.db"
+    asyncio.run(init_db(db))
+    async def check():
+        async with aiosqlite.connect(db) as conn:
+            cursor = await conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='table' AND name='paper_soak_runs'"
+            )
+            row = await cursor.fetchone()
+            assert row is not None, "paper_soak_runs table not created"
+    asyncio.run(check())
+
+
+def test_soak_run_persist_and_read(tmp_path: Path) -> None:
+    db = tmp_path / "soak_rw.db"
+    asyncio.run(init_db(db))
+
+    record = SoakRunRecord(
+        max_signals=20,
+        timeout_seconds=30.0,
+        execution_mode="paper",
+        risk_profile="discovery",
+        signals_collected=15,
+        signals_accepted=3,
+        signals_rejected=12,
+        trades_persisted=2,
+        open_positions=2,
+        source_failures_json='{"pump_fun": 1}',
+        rejection_reasons_json='{"honeypot_check": 5}',
+        capacity_blocked=3,
+        unknown_data_blocks=1,
+        unexpected_failures=0,
+        termination_reason="max_signals",
+        elapsed_seconds=12.5,
+        health_ok=True,
+        health_message="ok",
+        guardrail_diagnostics_json='["paper_mode_unaffected"]',
+        circuit_breaker_diagnostics_json='["paper_mode_unaffected"]',
+        readiness_json='[]',
+    )
+    asyncio.run(record_soak_run(db, record))
+
+    runs = asyncio.run(get_recent_soak_runs(db, limit=5))
+    assert len(runs) == 1
+    loaded = runs[0]
+    assert loaded.signals_collected == 15
+    assert loaded.signals_accepted == 3
+    assert loaded.trades_persisted == 2
+    assert loaded.capacity_blocked == 3
+    assert loaded.unknown_data_blocks == 1
+    assert loaded.unexpected_failures == 0
+    assert loaded.termination_reason == "max_signals"
+    assert loaded.health_ok is True
+
+
+def test_soak_run_multi_run_ordering(tmp_path: Path) -> None:
+    import uuid
+
+    db = tmp_path / "soak_order.db"
+    asyncio.run(init_db(db))
+
+    for i in range(3):
+        record = SoakRunRecord(
+            id=str(uuid.uuid4()),
+            max_signals=10,
+            timeout_seconds=10.0,
+            signals_collected=i * 10,
+            signals_accepted=i,
+            trades_persisted=i,
+            source_failures_json="{}",
+            rejection_reasons_json="{}",
+            termination_reason="max_signals",
+            elapsed_seconds=float(i),
+        )
+        asyncio.run(record_soak_run(db, record))
+
+    runs = asyncio.run(get_recent_soak_runs(db, limit=2))
+    assert len(runs) == 2
+    assert runs[0].signals_collected >= runs[1].signals_collected
+
+
+def test_paper_report_shows_soak_diagnostics(tmp_path: Path) -> None:
+    db = tmp_path / "report_soak.db"
+    asyncio.run(init_db(db))
+
+    record = SoakRunRecord(
+        max_signals=50,
+        timeout_seconds=60.0,
+        signals_collected=30,
+        signals_accepted=5,
+        signals_rejected=25,
+        trades_persisted=3,
+        open_positions=3,
+        source_failures_json='{"pump_fun": 2}',
+        rejection_reasons_json='{"honeypot_check": 10}',
+        capacity_blocked=5,
+        unknown_data_blocks=2,
+        unexpected_failures=0,
+        termination_reason="max_signals",
+        elapsed_seconds=45.0,
+        health_ok=True,
+        health_message="ok",
+        guardrail_diagnostics_json='["paper_mode_unaffected"]',
+        circuit_breaker_diagnostics_json='["paper_mode_unaffected"]',
+        readiness_json='[]',
+    )
+    asyncio.run(record_soak_run(db, record))
+
+    result = runner.invoke(cli_module.app, ["paper-report", "--db-path", str(db)])
+    assert result.exit_code == 0
+    assert "Signals: 30 collected" in result.stdout
+    assert "Trades entered: 3" in result.stdout
+    assert "Capacity blocks: 5" in result.stdout
+    assert "Source failures: pump_fun=2" in result.stdout
+
+
+def test_paper_report_no_soak_data_shows_hint(tmp_path: Path) -> None:
+    db = tmp_path / "no_soak_data.db"
+    asyncio.run(init_db(db))
+
+    result = runner.invoke(cli_module.app, ["paper-report", "--db-path", str(db)])
+    assert result.exit_code == 0
+    assert "run 'paper-soak" in result.stdout
