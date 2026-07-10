@@ -6,8 +6,8 @@ from typer.testing import CliRunner
 
 import src.cli as cli_module
 from src.core.config import RiskConfig
-from src.core.database import get_recent_paper_decisions, init_db, record_position
-from src.core.models import CheckResult, Position, RiskAssessment, Signal, SignalSource as SignalSourceEnum, SignalType, TokenInfo
+from src.core.database import get_recent_paper_decisions, init_db, record_paper_decision, record_position
+from src.core.models import CheckResult, PaperDecisionRecord, Position, RiskAssessment, Signal, SignalSource as SignalSourceEnum, SignalType, TokenInfo
 from src.monitoring.dashboard import load_open_positions, load_recent_trades
 from src.risk.rugcheck import RugCheckResult
 from src.risk.scorer import DiscoveryRiskScorer, HolderLookupResult
@@ -1749,3 +1749,123 @@ def test_paper_soak_capacity_audit_details(tmp_path: Path) -> None:
         assert "persisted_open_positions=1" in lines
 
     asyncio.run(run())
+
+
+def _seed_decision(db_path: Path, outcome: str, reason: str, source: str = "whale_tracker", mode: str = "unknown") -> None:
+    async def run() -> None:
+        await record_paper_decision(
+            db_path,
+            PaperDecisionRecord(
+                mint_address="fake-mint",
+                source=source,
+                candidate_mode=mode,
+                action_outcome=outcome,
+                decision=outcome,
+                primary_reason=reason,
+            ),
+        )
+    asyncio.run(run())
+
+
+def test_paper_decisions_empty_db_shows_no_data_warning(tmp_path: Path) -> None:
+    db = tmp_path / "decisions-empty.db"
+    result = runner.invoke(cli_module.app, ["paper-decisions", "--db-path", str(db)])
+    assert result.exit_code == 0
+    assert "No paper decision telemetry found" in result.stdout
+    assert "Run `paper-soak` to generate" in result.stdout
+
+
+def test_paper_decisions_summary_counts(tmp_path: Path) -> None:
+    db = tmp_path / "decisions-counts.db"
+    asyncio.run(init_db(db))
+    _seed_decision(db, "rejected", "top10_holder_check_failed")
+    _seed_decision(db, "rejected", "top10_holder_check_failed")
+    _seed_decision(db, "rejected", "creator_holding_check_unknown")
+    _seed_decision(db, "traded", "traded", source="onchain", mode="launch")
+    _seed_decision(db, "capacity_blocked", "max_open_positions_reached", source="composite", mode="migration")
+
+    result = runner.invoke(cli_module.app, ["paper-decisions", "--db-path", str(db)])
+    assert result.exit_code == 0
+    assert "Summary (5 decisions)" in result.stdout
+    assert "By outcome:" in result.stdout
+    assert "rejected: 3" in result.stdout
+    assert "traded: 1" in result.stdout
+    assert "capacity_blocked: 1" in result.stdout
+    assert "By rejection reason:" in result.stdout
+    assert "top10_holder_check_failed: 2" in result.stdout
+    assert "creator_holding_check_unknown: 1" in result.stdout
+    assert "By signal source:" in result.stdout
+    assert "whale_tracker: 3" in result.stdout
+    assert "onchain: 1" in result.stdout
+    assert "composite: 1" in result.stdout
+    assert "By candidate mode:" in result.stdout
+    assert "unknown: 3" in result.stdout
+    assert "launch: 1" in result.stdout
+    assert "migration: 1" in result.stdout
+    assert "Accepted candidates (1)" in result.stdout
+    assert "Recent rejected candidates (4)" in result.stdout
+
+
+def test_paper_decisions_outcome_filter(tmp_path: Path) -> None:
+    db = tmp_path / "decisions-filter.db"
+    asyncio.run(init_db(db))
+    _seed_decision(db, "traded", "traded")
+    _seed_decision(db, "rejected", "top10_holder_check_failed")
+    _seed_decision(db, "rejected", "creator_holding_check_unknown")
+    _seed_decision(db, "capacity_blocked", "max_open_positions_reached")
+
+    result = runner.invoke(cli_module.app, ["paper-decisions", "--outcome", "rejected", "--db-path", str(db)])
+    assert result.exit_code == 0
+    assert "Summary (2 decisions)" in result.stdout
+    assert "rejected: 2" in result.stdout
+    assert "Accepted candidates" not in result.stdout
+
+
+def test_paper_decisions_mode_filter(tmp_path: Path) -> None:
+    db = tmp_path / "decisions-mode-filter.db"
+    asyncio.run(init_db(db))
+    _seed_decision(db, "rejected", "honeypot_check_failed", mode="launch")
+    _seed_decision(db, "rejected", "top10_holder_check_failed", mode="unknown")
+
+    result = runner.invoke(cli_module.app, ["paper-decisions", "--mode", "launch", "--db-path", str(db)])
+    assert result.exit_code == 0
+    assert "Summary (1 decisions)" in result.stdout
+    assert "honeypot_check_failed" in result.stdout
+
+
+def test_paper_decisions_source_filter(tmp_path: Path) -> None:
+    db = tmp_path / "decisions-source-filter.db"
+    asyncio.run(init_db(db))
+    _seed_decision(db, "rejected", "honeypot_check_failed", source="pump_fun")
+    _seed_decision(db, "rejected", "top10_holder_check_failed", source="whale_tracker")
+
+    result = runner.invoke(cli_module.app, ["paper-decisions", "--source", "pump_fun", "--db-path", str(db)])
+    assert result.exit_code == 0
+    assert "Summary (1 decisions)" in result.stdout
+    assert "pump_fun: 1" in result.stdout
+
+
+def test_paper_decisions_limit(tmp_path: Path) -> None:
+    db = tmp_path / "decisions-limit.db"
+    asyncio.run(init_db(db))
+    for _ in range(5):
+        _seed_decision(db, "rejected", "top10_holder_check_failed")
+    _seed_decision(db, "traded", "traded")
+
+    result = runner.invoke(cli_module.app, ["paper-decisions", "--limit", "3", "--db-path", str(db)])
+    assert result.exit_code == 0
+    assert "Summary (3 decisions)" in result.stdout
+
+
+def test_paper_decisions_no_secrets_printed(tmp_path: Path) -> None:
+    db = tmp_path / "decisions-secrets.db"
+    asyncio.run(init_db(db))
+    _seed_decision(db, "rejected", "top10_holder_check_failed")
+    _seed_decision(db, "traded", "traded")
+
+    result = runner.invoke(cli_module.app, ["paper-decisions", "--db-path", str(db)])
+    assert result.exit_code == 0
+    output = result.stdout.lower()
+    assert "private_key" not in output
+    assert "api-key=" not in output
+    assert "rpc_url=" not in output

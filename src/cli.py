@@ -2820,5 +2820,96 @@ def paper_report(
     console.print("[yellow]WARNING: Paper results are simulated. Not real profit or loss.[/yellow]")
 
 
+@app.command("paper-decisions")
+def paper_decisions(
+    limit: int = typer.Option(50, "--limit", "-n", help="Max recent decisions to retrieve."),
+    since_hours: int | None = typer.Option(None, "--since-hours", help="Only decisions newer than N hours."),
+    outcome: str | None = typer.Option(None, "--outcome", "-o", help="Filter by outcome (e.g. accepted, risk_rejected, capacity_blocked, unknown_data, skipped)."),
+    mode: str | None = typer.Option(None, "--mode", "-m", help="Filter by candidate mode (launch, migration, unknown)."),
+    source: str | None = typer.Option(None, "--source", "-s", help="Filter by signal source (pump_fun, onchain, whale, twitter, composite)."),
+    db_path: str | None = typer.Option(None, help="Optional SQLite path override."),
+) -> None:
+    """Review recent paper decision telemetry — outcomes, rejections, sources.
+
+    Paper results are simulated. Not real trading advice.
+    """
+    runtime_db_path = resolve_db_path(db_path)
+    asyncio.run(init_db(runtime_db_path))
+    decisions = asyncio.run(get_recent_paper_decisions(runtime_db_path, limit=limit))
+
+    if since_hours is not None:
+        cutoff = datetime.now(UTC) - timedelta(hours=since_hours)
+        cutoff_str = cutoff.isoformat()
+        decisions = [d for d in decisions if d.recorded_at >= cutoff_str]
+
+    if outcome:
+        decisions = [d for d in decisions if d.action_outcome == outcome]
+    if mode:
+        decisions = [d for d in decisions if d.candidate_mode == mode]
+    if source:
+        decisions = [d for d in decisions if d.source == source]
+
+    console.print("[bold]Paper Decision Telemetry[/bold]")
+    console.print(f"  Generated: {datetime.now(UTC).strftime('%Y-%m-%d %H:%M:%S')} UTC")
+    console.print(f"  Mode: paper (simulated)")
+    console.print("")
+
+    if not decisions:
+        console.print("  [yellow]No paper decision telemetry found.[/yellow]")
+        console.print("  [yellow]Run `paper-soak` to generate candidate decisions.[/yellow]")
+        console.print("")
+        console.print("[yellow]WARNING: Paper results are simulated. Not real profit or loss.[/yellow]")
+        return
+
+    total = len(decisions)
+
+    outcome_counts = Counter(d.action_outcome for d in decisions)
+    reason_counts = Counter(d.primary_reason for d in decisions)
+    source_counts = Counter(d.source for d in decisions)
+    mode_counts = Counter(d.candidate_mode for d in decisions)
+
+    console.print(f"[bold]Summary ({total} decisions)[/bold]")
+
+    console.print("  [bold]By outcome:[/bold]")
+    for oc, count in outcome_counts.most_common():
+        console.print(f"    {oc}: {count}")
+
+    console.print("  [bold]By rejection reason:[/bold]")
+    for rc, count in reason_counts.most_common(10):
+        console.print(f"    {rc}: {count}")
+
+    console.print("  [bold]By signal source:[/bold]")
+    for sc, count in source_counts.most_common():
+        console.print(f"    {sc}: {count}")
+
+    console.print("  [bold]By candidate mode:[/bold]")
+    for mc, count in mode_counts.most_common():
+        console.print(f"    {mc}: {count}")
+
+    console.print("")
+
+    accepted = [d for d in decisions if d.action_outcome in ("accepted", "traded")]
+    if accepted:
+        console.print(f"[bold]Accepted candidates ({len(accepted)})[/bold]")
+        for d in accepted[:5]:
+            label = d.symbol or d.name or d.mint_address[:16] if d.mint_address else "unknown"
+            console.print(f"  {label}  source={d.source}  mode={d.candidate_mode}  score={d.attention_score}")
+        if len(accepted) > 5:
+            console.print(f"  ... and {len(accepted) - 5} more")
+        console.print("")
+
+    rejected = [d for d in decisions if d.action_outcome not in ("accepted", "traded")]
+    if rejected:
+        console.print(f"[bold]Recent rejected candidates ({len(rejected)})[/bold]")
+        for d in rejected[:5]:
+            label = d.symbol or d.name or d.mint_address[:16] if d.mint_address else "unknown"
+            console.print(f"  {label}  reason={d.primary_reason}  source={d.source}  mode={d.candidate_mode}")
+        if len(rejected) > 5:
+            console.print(f"  ... and {len(rejected) - 5} more")
+
+    console.print("")
+    console.print("[yellow]WARNING: Paper results are simulated. Not real profit or loss.[/yellow]")
+
+
 if __name__ == "__main__":
     app()
