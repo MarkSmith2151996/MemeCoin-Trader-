@@ -80,8 +80,10 @@ async def evaluate_micro_live_readiness(
     checks.append(ReadinessCheck("execution_config", execution_config.allowed, execution_config.diagnostics))
 
     preflight_env: tuple[str, ...] = ()
-    if wallet_balance_lookup is None:
-        preflight_env = ("HELIUS_API_KEY", "TRADING_WALLET_PRIVATE_KEY")
+    if wallet_balance_lookup is None and transaction_simulator is None:
+        preflight_env = ("HELIUS_API_KEY", "TRADING_WALLET_PUBLIC_KEY")
+    elif wallet_balance_lookup is None:
+        preflight_env = ("TRADING_WALLET_PUBLIC_KEY", "HELIUS_API_KEY")
     elif transaction_simulator is None:
         preflight_env = ("HELIUS_API_KEY",)
     preflight = await evaluate_live_preflight(
@@ -106,7 +108,7 @@ async def evaluate_micro_live_readiness(
             diagnostics=("wallet_holdings_lookup_unavailable",),
             mismatches=(),
         )
-        recon_env = ("HELIUS_API_KEY", "TRADING_WALLET_PRIVATE_KEY")
+        recon_env = ("HELIUS_API_KEY", "TRADING_WALLET_PUBLIC_KEY")
     else:
         reconciliation = await reconcile_positions(position_manager, wallet_holdings_lookup)
         recon_env = ()

@@ -218,7 +218,7 @@ def test_preflight_and_recon_unavailable_include_env_hints() -> None:
         assert not preflight.ok
         assert "wallet_balance_lookup_unavailable" in preflight.diagnostics
         assert "HELIUS_API_KEY" in preflight.recommended_env
-        assert "TRADING_WALLET_PRIVATE_KEY" in preflight.recommended_env
+        assert "TRADING_WALLET_PUBLIC_KEY" in preflight.recommended_env
 
         recon = checks["position_reconciliation"]
         assert not recon.ok
@@ -291,7 +291,7 @@ def test_position_recon_diagnostics_split_by_missing_provider(tmp_path: Path) ->
         report2 = await evaluate_micro_live_readiness(settings, position_manager=manager, wallet_holdings_lookup=None)
         recon2 = {c.name: c for c in report2.checks}["position_reconciliation"]
         assert recon2.diagnostics == ("wallet_holdings_lookup_unavailable",)
-        assert "HELIUS_API_KEY" in recon2.recommended_env
+        assert "TRADING_WALLET_PUBLIC_KEY" in recon2.recommended_env
 
     asyncio.run(run())
 
