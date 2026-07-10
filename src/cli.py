@@ -18,6 +18,7 @@ from rich.console import Console
 from src.core.config import Settings, load_settings
 from src.core.database import init_db, record_trade
 from src.execution.base import ExecutionAdapter
+from src.execution.live_execution_config import evaluate_live_execution_config
 from src.execution.live_guardrails import evaluate_live_guardrails
 from src.execution.paper import PaperExecutionAdapter
 from src.monitoring.dashboard import resolve_db_path
@@ -1660,7 +1661,13 @@ def show_config() -> None:
     live_guardrails = config_dump.get("live_guardrails")
     if isinstance(live_guardrails, dict) and "confirmation_phrase" in live_guardrails:
         live_guardrails["confirmation_phrase"] = "<redacted>"
+    execution = config_dump.get("execution")
+    if isinstance(execution, dict):
+        for key in ("primary_rpc_url", "backup_rpc_url"):
+            if execution.get(key):
+                execution[key] = "<redacted>"
     config_dump["live_guardrails_diagnostics"] = evaluate_live_guardrails(settings).as_dict()
+    config_dump["live_execution_config_diagnostics"] = evaluate_live_execution_config(settings).as_dict()
     console.print(config_dump)
 
 

@@ -74,6 +74,7 @@ def _armed_env(settings) -> dict[str, str]:
         "LIVE_TRADING_ENABLED": "true",
         "LIVE_CONFIRMATION_PHRASE": settings.live_guardrails.confirmation_phrase,
         "LIVE_KILL_SWITCH": "false",
+        "PRIMARY_RPC_URL": "https://primary.example",
         "MAX_LIVE_TRADE_SOL": "0.01",
         "MAX_LIVE_DAILY_TRADES": "3",
         "MAX_LIVE_DAILY_LOSS_SOL": "0.05",
@@ -496,6 +497,63 @@ def test_live_adapter_preflight_diagnostics_do_not_echo_transaction() -> None:
 
         assert result.ok is False
         assert "serialized-tx" not in str(result.diagnostics)
+
+        await adapter.close()
+
+    asyncio.run(run())
+
+
+def test_live_adapter_primary_rpc_failure_can_use_backup_rpc() -> None:
+    async def run() -> None:
+        settings = load_settings().model_copy(
+            update={
+                "execution": load_settings().execution.model_copy(
+                    update={"mode": "live", "primary_rpc_url": "https://primary.example", "backup_rpc_url": "https://backup.example"}
+                )
+            }
+        )
+        primary_submitter = RecordingRpcSubmitter(RuntimeError("primary boom"))
+        backup_submitter = RecordingRpcSubmitter("backup-signature")
+        adapter = JupiterLiveExecutionAdapter(
+            rpc_submitter=primary_submitter,
+            backup_rpc_submitter=backup_submitter,
+            settings=settings,
+            guardrail_env=_armed_env(settings),
+            wallet_balance_lookup=RecordingBalanceLookup(1.0),
+            transaction_simulator=RecordingSimulator(TransactionSimulationResult(ok=True)),
+        )
+
+        result = await adapter.submit_serialized_swap("serialized-tx", amount_sol=0.01)
+
+        assert result.ok is True
+        assert result.provider == "rpc_backup"
+        assert result.tx_signature == "backup-signature"
+        assert result.diagnostics == ["jito_disabled", "rpc_primary_failed_backup_used"]
+        assert primary_submitter.calls == ["serialized-tx"]
+        assert backup_submitter.calls == ["serialized-tx"]
+
+        await adapter.close()
+
+    asyncio.run(run())
+
+
+def test_live_adapter_invalid_priority_fee_config_fails_closed() -> None:
+    async def run() -> None:
+        settings = load_settings().model_copy(
+            update={"execution": load_settings().execution.model_copy(update={"mode": "live"})}
+        )
+        adapter = JupiterLiveExecutionAdapter(
+            settings=settings,
+            guardrail_env={**_armed_env(settings), "PRIORITY_FEE_LAMPORTS": "not-a-number", "PRIMARY_RPC_URL": "https://primary.example"},
+            wallet_balance_lookup=RecordingBalanceLookup(1.0),
+            transaction_simulator=RecordingSimulator(TransactionSimulationResult(ok=True)),
+        )
+
+        result = await adapter.submit_serialized_swap("serialized-tx", amount_sol=0.01)
+
+        assert result.ok is False
+        assert result.provider == "config"
+        assert "priority_fee_config_invalid" in result.diagnostics
 
         await adapter.close()
 

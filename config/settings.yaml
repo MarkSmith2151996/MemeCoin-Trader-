@@ -33,7 +33,13 @@ exits:
 execution:
   mode: paper
   rpc_provider: helius
+  primary_rpc_url: null
+  backup_rpc_url: null
   priority_fee_lamports: 10000
+  min_priority_fee_lamports: 0
+  max_priority_fee_lamports: 100000
+  jito_tip_lamports: 0
+  max_jito_tip_lamports: 100000
   tx_retry_count: 3
   tx_confirm_timeout_s: 30
 

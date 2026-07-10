@@ -54,7 +54,13 @@ class ExecutionConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
     mode: str = "paper"
     rpc_provider: str = "helius"
+    primary_rpc_url: str | None = None
+    backup_rpc_url: str | None = None
     priority_fee_lamports: int = 10_000
+    min_priority_fee_lamports: int = 0
+    max_priority_fee_lamports: int = 100_000
+    jito_tip_lamports: int = 0
+    max_jito_tip_lamports: int = 100_000
     tx_retry_count: int = 3
     tx_confirm_timeout_s: int = 30
 

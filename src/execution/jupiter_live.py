@@ -14,6 +14,7 @@ from src.chain.jito import JitoBlockEngineClient, JitoSubmitResult
 from src.core.config import Settings, load_settings
 from src.core.models import Side, SwapQuote, Trade
 from src.execution.base import ExecutionAdapter
+from src.execution.live_execution_config import LiveExecutionConfigDecision, evaluate_live_execution_config
 from src.execution.live_guardrails import LiveGuardrailDecision, evaluate_live_guardrails
 from src.execution.live_preflight import (
     LivePreflightDecision,
@@ -47,6 +48,7 @@ class JupiterLiveExecutionAdapter(ExecutionAdapter):
         jito_validator_tip_account: str | None = None,
         jito_client: JitoBlockEngineClient | None = None,
         rpc_submitter: SupportsRpcSubmit | None = None,
+        backup_rpc_submitter: SupportsRpcSubmit | None = None,
         settings: Settings | None = None,
         guardrail_env: dict[str, str] | None = None,
         wallet_balance_lookup: SupportsWalletBalanceLookup | None = None,
@@ -58,10 +60,14 @@ class JupiterLiveExecutionAdapter(ExecutionAdapter):
         self._jito_validator_tip_account = jito_validator_tip_account
         self._jito_client = jito_client or JitoBlockEngineClient()
         self._rpc_submitter = rpc_submitter
+        self._backup_rpc_submitter = backup_rpc_submitter
         self._settings = settings or load_settings()
         self._guardrail_env = guardrail_env
         self._wallet_balance_lookup = wallet_balance_lookup
         self._transaction_simulator = transaction_simulator
+
+        if self._jito_tip_lamports is None:
+            self._jito_tip_lamports = self._settings.execution.jito_tip_lamports
 
     @property
     def mode(self) -> str:
@@ -89,6 +95,15 @@ class JupiterLiveExecutionAdapter(ExecutionAdapter):
                 provider="preflight",
                 error="live preflight blocked submission",
                 diagnostics=list(preflight.diagnostics),
+            )
+
+        execution_config = self.live_execution_config()
+        if not execution_config.allowed:
+            return LiveSubmissionResult(
+                ok=False,
+                provider="config",
+                error="live execution config invalid",
+                diagnostics=list(execution_config.diagnostics),
             )
 
         diagnostics: list[str] = []
@@ -157,6 +172,9 @@ class JupiterLiveExecutionAdapter(ExecutionAdapter):
             env=self._guardrail_env,
         )
 
+    def live_execution_config(self) -> LiveExecutionConfigDecision:
+        return evaluate_live_execution_config(self._settings, env=self._guardrail_env)
+
     async def live_preflight(
         self,
         *,
@@ -190,6 +208,26 @@ class JupiterLiveExecutionAdapter(ExecutionAdapter):
         try:
             tx_signature = await self._rpc_submitter(transaction)
         except Exception as exc:
+            if self._backup_rpc_submitter is not None:
+                try:
+                    tx_signature = await self._backup_rpc_submitter(transaction)
+                except Exception as backup_exc:
+                    return LiveSubmissionResult(
+                        ok=False,
+                        provider="rpc",
+                        jito_result=jito_result,
+                        error=f"rpc submission failed: {exc}; backup failed: {backup_exc}",
+                        diagnostics=[*diagnostics, "rpc_primary_failed_backup_failed"],
+                    )
+
+                return LiveSubmissionResult(
+                    ok=True,
+                    provider="rpc_backup",
+                    tx_signature=tx_signature,
+                    jito_result=jito_result,
+                    diagnostics=[*diagnostics, "rpc_primary_failed_backup_used"],
+                )
+
             return LiveSubmissionResult(
                 ok=False,
                 provider="rpc",
