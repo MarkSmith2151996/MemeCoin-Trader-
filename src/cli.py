@@ -2069,18 +2069,13 @@ def env_readiness() -> None:
         console.print(line)
 
 
-@app.command("live-readiness")
-def live_readiness(
-    db_path: str | None = typer.Option(None, help="Optional SQLite path override."),
-) -> None:
-    settings = load_settings()
-    runtime_db_path = resolve_db_path(db_path)
+def _build_live_readiness_report(runtime_db_path: str | Path, settings: Settings):
     asyncio.run(init_db(runtime_db_path))
     manager = PositionManager(runtime_db_path, settings)
     simulator = try_create_transaction_simulator()
     balance = try_create_balance_lookup()
     holdings = try_create_holdings_lookup()
-    report = asyncio.run(
+    return asyncio.run(
         evaluate_micro_live_readiness(
             settings,
             position_manager=manager,
@@ -2090,6 +2085,15 @@ def live_readiness(
             circuit_breaker=LiveCircuitBreaker(),
         )
     )
+
+
+@app.command("live-readiness")
+def live_readiness(
+    db_path: str | None = typer.Option(None, help="Optional SQLite path override."),
+) -> None:
+    settings = load_settings()
+    runtime_db_path = resolve_db_path(db_path)
+    report = _build_live_readiness_report(runtime_db_path, settings)
     for line in report.lines():
         console.print(line)
 
@@ -2720,7 +2724,7 @@ def paper_report(
 
     console.print("[bold]Live Readiness (diagnostic only — does not affect paper mode)[/bold]")
     try:
-        report = asyncio.run(evaluate_micro_live_readiness(settings))
+        report = _build_live_readiness_report(runtime_db_path, settings)
         for line in report.lines():
             console.print(f"  {line}")
     except Exception:

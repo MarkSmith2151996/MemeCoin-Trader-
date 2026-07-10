@@ -1017,6 +1017,21 @@ def test_paper_report_default_no_network(tmp_path: Path) -> None:
     assert "mark_unavailable" in result.stdout
 
 
+def test_paper_report_readiness_matches_standalone_defaults(tmp_path: Path) -> None:
+    db = tmp_path / "report_readiness_match.db"
+    asyncio.run(init_db(db))
+
+    report_result = runner.invoke(cli_module.app, ["paper-report", "--db-path", str(db)])
+    live_result = runner.invoke(cli_module.app, ["live-readiness", "--db-path", str(db)])
+
+    assert report_result.exit_code == 0
+    assert live_result.exit_code == 0
+    assert "position_reconciliation=ok diagnostics=no_live_positions_to_reconcile" in live_result.stdout
+    assert "circuit_breaker=ok diagnostics=paper_mode_unaffected" in live_result.stdout
+    assert "position_reconciliation=ok diagnostics=no_live_positions_to_reconcile" in report_result.stdout
+    assert "circuit_breaker=ok diagnostics=paper_mode_unaffected" in report_result.stdout
+
+
 # --- MT-124: paper-soak diagnostics persistence ---
 
 def test_soak_run_db_table_created(tmp_path: Path) -> None:
