@@ -4,11 +4,13 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
+import math
 
 import httpx
 
 
 DEXSCREENER_TOKEN_URL = "https://api.dexscreener.com/latest/dex/tokens/{mint_address}"
+WRAPPED_SOL_MINT = "So11111111111111111111111111111111111111112"
 
 
 @dataclass
@@ -98,12 +100,20 @@ class DexScreenerPriceProvider(PriceProvider):
         if not isinstance(pairs, list) or not pairs:
             return PriceResult(None, "no_pairs")
 
-        solana_pairs = [p for p in pairs if isinstance(p, dict) and p.get("chainId") == "solana"]
+        solana_pairs = [pair for pair in pairs if isinstance(pair, dict) and pair.get("chainId") == "solana"]
         if not solana_pairs:
             return PriceResult(None, "no_solana_pairs")
 
+        sol_pairs = [
+            pair
+            for pair in solana_pairs
+            if _is_requested_mint_sol_pair(pair, mint_address)
+        ]
+        if not sol_pairs:
+            return PriceResult(None, "no_requested_mint_sol_pair")
+
         best_pair = max(
-            solana_pairs,
+            sol_pairs,
             key=lambda p: _safe_float(p.get("liquidity"), "usd", 0),
         )
 
@@ -115,8 +125,8 @@ class DexScreenerPriceProvider(PriceProvider):
         except (TypeError, ValueError):
             return PriceResult(None, "malformed_price")
 
-        if price <= 0:
-            return PriceResult(None, "zero_price")
+        if not math.isfinite(price) or price <= 0:
+            return PriceResult(None, "invalid_price")
 
         return PriceResult(price, "live_dexscreener")
 
@@ -127,7 +137,20 @@ def _safe_float(data: object, key: str, default: float = 0.0) -> float:
     try:
         value = data.get(key)
         if value is not None:
-            return float(value)
+            parsed = float(value)
+            return parsed if math.isfinite(parsed) else default
     except (TypeError, ValueError):
         pass
     return default
+
+
+def _is_requested_mint_sol_pair(pair: dict[str, object], mint_address: str) -> bool:
+    """Accept only requested-mint / canonical wrapped-SOL base-oriented pairs."""
+    base_token = pair.get("baseToken")
+    quote_token = pair.get("quoteToken")
+    if not isinstance(base_token, dict) or not isinstance(quote_token, dict):
+        return False
+    return (
+        base_token.get("address") == mint_address
+        and quote_token.get("address") == WRAPPED_SOL_MINT
+    )

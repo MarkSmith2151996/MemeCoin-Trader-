@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
+import math
 
 from src.core.models import PaperFillQuality, Position, PositionStatus
 from src.execution.price_provider import PriceProvider, UnavailablePriceProvider
@@ -81,7 +82,7 @@ class PaperPnLCalculator:
                 mint_address=pos.mint_address,
                 entry_price_sol=pos.entry_price_sol,
                 amount_sol=pos.amount_sol,
-                token_amount=pos.token_amount,
+                token_amount=pos.remaining_token_amount,
                 status=pos.status,
                 fill_quality=pos.fill_quality,
                 close_price_sol=pos.close_price_sol,
@@ -106,22 +107,25 @@ class PaperPnLCalculator:
                 pnl_pos.mark_reason = "price_unavailable"
 
             if pos.fill_quality == PaperFillQuality.LEGACY_UNKNOWN:
-                pnl_pos.mark_price_sol = mark if mark is not None and mark > 0 else None
+                pnl_pos.mark_price_sol = mark if _is_valid_price(mark) else None
                 pnl_pos.mark_unavailable = True
                 pnl_pos.mark_reason = "legacy_low_confidence"
                 pnl_pos.pnl_confidence = "low_confidence"
                 any_mark_unavailable = True
                 mark_unavailable_count += 1
             elif pos.fill_quality == PaperFillQuality.UNPRICED:
-                pnl_pos.mark_price_sol = mark if mark is not None and mark > 0 else None
+                pnl_pos.mark_price_sol = mark if _is_valid_price(mark) else None
                 pnl_pos.mark_unavailable = True
                 pnl_pos.mark_reason = "unpriced_entry"
                 pnl_pos.pnl_confidence = "unavailable"
                 any_mark_unavailable = True
                 mark_unavailable_count += 1
-            elif mark is not None and mark > 0 and pos.token_amount > 0:
+            elif _is_valid_price(mark) and pos.remaining_token_amount > 0:
                 pnl_pos.mark_price_sol = mark
-                pnl_pos.unrealized_pnl_sol = round(pos.token_amount * mark - pos.amount_sol, 9)
+                pnl_pos.unrealized_pnl_sol = round(
+                    pos.remaining_token_amount * mark - pos.amount_sol * pos.remaining_sell_pct,
+                    9,
+                )
                 pnl_pos.unrealized_pnl_pct = (
                     round(((mark - pos.entry_price_sol) / pos.entry_price_sol) * 100, 2)
                     if pos.entry_price_sol > 0
@@ -189,3 +193,7 @@ def _classify_report_confidence(summary: PaperPnLSummary) -> str:
     if summary.usable_mark_count > 0:
         return "partial"
     return "low_confidence"
+
+
+def _is_valid_price(price: float | None) -> bool:
+    return price is not None and math.isfinite(price) and price > 0

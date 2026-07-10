@@ -1,4 +1,5 @@
 import asyncio
+import math
 
 from src.core.models import Side
 from src.execution.paper import PaperExecutionAdapter
@@ -46,3 +47,15 @@ def test_paper_adapter_falls_back_to_static_lookup_when_provider_misses() -> Non
 
     assert trade.price_sol == 0.25
     assert trade.token_amount == 4.0
+
+
+def test_paper_adapter_rejects_nonfinite_prices() -> None:
+    async def run() -> list[tuple[float | None, float | None]]:
+        results = []
+        for price in (math.nan, math.inf, -math.inf):
+            adapter = PaperExecutionAdapter(price_provider=FakePriceProvider({"mint": price}))
+            trade = await adapter.execute_swap("mint", Side.BUY, 1.0)
+            results.append((trade.price_sol, trade.token_amount))
+        return results
+
+    assert asyncio.run(run()) == [(None, 0.0), (None, 0.0), (None, 0.0)]

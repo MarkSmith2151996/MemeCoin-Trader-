@@ -66,7 +66,7 @@ class PaperExecutionAdapter(ExecutionAdapter):
                 provider=self.mode,
                 expires_at=datetime.now(UTC) + timedelta(seconds=30),
             )
-        if price <= 0 or math.isnan(price):
+        if not _is_valid_price(price):
             return SwapQuote(
                 mint_address=mint_address,
                 side=side,
@@ -96,12 +96,12 @@ class PaperExecutionAdapter(ExecutionAdapter):
         provider_price: float | None = None
         if self._price_provider is not None:
             provider_price = await self._price_provider.get_current_price(mint_address)
-        if provider_price is not None and provider_price > 0:
+        if _is_valid_price(provider_price):
             return provider_price
         static = self._price_lookup.get(mint_address)
-        if static is not None and static > 0:
+        if _is_valid_price(static):
             return static
-        return provider_price or static
+        return None
 
     async def close(self) -> None:
         self._closed = True
@@ -109,3 +109,7 @@ class PaperExecutionAdapter(ExecutionAdapter):
     def _ensure_open(self) -> None:
         if self._closed:
             raise RuntimeError("paper execution adapter is closed")
+
+
+def _is_valid_price(price: float | None) -> bool:
+    return price is not None and math.isfinite(price) and price > 0

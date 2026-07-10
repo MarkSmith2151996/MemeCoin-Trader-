@@ -312,7 +312,10 @@ def test_fully_fake_ready_live_buy_can_open_position(tmp_path: Path) -> None:
         assert result.diagnostics == ("live_buy_submitted",)
         assert result.provider == "rpc"
         assert submitter.calls and str(submitter.calls[0]).startswith("buy:buy-mint:")
-        assert await manager.get_position("buy-mint") is not None
+        position = await manager.get_position("buy-mint", mode="live")
+        assert position is not None
+        assert position.entry_price_sol == 0.0
+        assert position.token_amount == 0.0
 
     asyncio.run(run())
 

@@ -187,6 +187,10 @@ class Position(BaseModel):
         sold_pct = sum(exit.sell_pct for exit in self.partial_exits if exit.executed)
         return max(1.0 - sold_pct, 0.0)
 
+    @property
+    def remaining_token_amount(self) -> float:
+        return self.token_amount * self.remaining_sell_pct
+
 
 class SoakRunRecord(BaseModel):
     """Persisted summary of a single paper-soak run."""

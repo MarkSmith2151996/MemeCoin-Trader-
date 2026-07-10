@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import math
 import sqlite3
 from collections import Counter
 from dataclasses import dataclass, field
@@ -2579,17 +2580,17 @@ def _resolve_close_price(
 
     Source is 'manual', 'live_mark', or 'unavailable'.
     """
-    if manual_price is not None and manual_price > 0:
+    if _is_valid_price(manual_price):
         return manual_price, "manual"
     if use_mark:
         provider = DexScreenerPriceProvider()
         try:
             mark = asyncio.run(provider.get_current_price(mint_address))
-            if mark is not None and mark > 0:
+            if _is_valid_price(mark):
                 return mark, "live_mark"
         except Exception:
             pass
-    if position is not None and position.close_price_sol is not None and position.close_price_sol > 0:
+    if position is not None and _is_valid_price(position.close_price_sol):
         return position.close_price_sol, "manual"
     return None, "unavailable"
 
@@ -2603,8 +2604,12 @@ def _print_paper_close_preview_position(
     pnl = None
     confidence = _fill_quality_confidence(pos.fill_quality)
     quality_label = pos.fill_quality.value
-    if exit_price is not None and exit_price > 0 and pos.token_amount > 0:
-        pnl = round(pos.token_amount * exit_price - pos.amount_sol, 9)
+    if _is_valid_price(exit_price) and pos.remaining_token_amount > 0:
+        pnl = round(
+            pos.remaining_token_amount * exit_price
+            - pos.amount_sol * pos.remaining_sell_pct,
+            9,
+        )
 
     if pos.fill_quality == PaperFillQuality.UNPRICED:
         pnl = None
@@ -2620,7 +2625,7 @@ def _print_paper_close_preview_position(
         f"Exit={price_str}  "
         f"Est.PnL={pnl_str}  quality={quality_label} confidence={confidence}"
     )
-    return pnl or 0.0
+    return pnl if pnl is not None else 0.0
 
 
 @app.command("paper-close")
@@ -2665,19 +2670,25 @@ def paper_close(
             return
 
         closed_count = 0
+        skipped_count = 0
         price_provider = DexScreenerPriceProvider() if use_mark else None
         for pos in paper_positions:
             exit_price = price
             if exit_price is None and use_mark and price_provider is not None:
                 result = asyncio.run(price_provider.get_current_price(pos.mint_address))
-                if result is not None and result > 0:
+                if _is_valid_price(result):
                     exit_price = result
+            if not _is_valid_price(exit_price):
+                skipped_count += 1
+                continue
             result = asyncio.run(manager.close_position(pos.mint_address, exit_price_sol=exit_price, mode="paper"))
             if result is not None:
                 closed_count += 1
         remaining = asyncio.run(manager.get_all_open())
         live_count = sum(1 for p in remaining if p.mode == "live")
         console.print(f"Closed {closed_count} paper position(s) with PnL. {live_count} live position(s) untouched.")
+        if skipped_count:
+            console.print(f"Skipped {skipped_count} paper position(s): no valid exit price available.")
         console.print("[yellow]Paper close is simulated. Not real profit or loss.[/yellow]")
         return
 
@@ -2710,7 +2721,7 @@ def paper_close(
         console.print("\n[yellow]Preview only — no position closed. Paper close is simulated.[/yellow]")
         return
 
-    if exit_price is None or exit_price <= 0:
+    if not _is_valid_price(exit_price):
         src_help = "Provide --price for manual, or --use-mark for a live DexScreener price."
         console.print(f"[red]No exit price available (source: {source}). {src_help}[/red]")
         raise typer.Exit(code=1)
@@ -2722,6 +2733,10 @@ def paper_close(
         f"Realized PnL: {pnl_str}"
     )
     console.print("[yellow]Paper close is simulated. Not real profit or loss.[/yellow]")
+
+
+def _is_valid_price(price: float | None) -> bool:
+    return price is not None and math.isfinite(price) and price > 0
 
 
 def _count_paper_trades(db_path: str | Path) -> int:

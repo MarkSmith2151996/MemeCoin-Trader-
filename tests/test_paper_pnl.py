@@ -6,6 +6,7 @@ All tests use CLI invocation with temporary DBs — no real trades or wallet acc
 from __future__ import annotations
 
 import asyncio
+import math
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
@@ -16,7 +17,7 @@ from typer.testing import CliRunner
 import src.cli as cli_module
 from src.core.config import load_settings
 from src.core.database import get_recent_soak_runs, init_db, record_soak_run
-from src.core.models import PaperFillQuality, Position, PositionStatus, Signal, SignalSource, SignalType, SoakRunRecord, Trade
+from src.core.models import PartialExit, PaperFillQuality, Position, PositionStatus, Signal, SignalSource, SignalType, SoakRunRecord, Trade
 from src.execution.paper_pnl import PaperPnLCalculator
 from src.execution.price_provider import FakePriceProvider, PriceResult, UnavailablePriceProvider
 from src.strategy.position_manager import PositionManager
@@ -525,6 +526,49 @@ def test_paper_pnl_shows_unrealized_pnl_with_marks(tmp_path: Path) -> None:
     assert pos_detail.mark_unavailable is False
 
 
+def test_paper_pnl_rejects_nonfinite_marks(tmp_path: Path) -> None:
+    for mark in (math.nan, math.inf, -math.inf):
+        db = tmp_path / f"nonfinite_{str(mark).replace('-', '_')}.db"
+        asyncio.run(init_db(db))
+        manager = PositionManager(db, load_settings())
+        mint = f"Nonfinite{str(mark).replace('-', 'N')}"
+        _paper_position(manager, mint, amount_sol=1.0, price_sol=0.00001)
+
+        summary = asyncio.run(PaperPnLCalculator(manager, FakePriceProvider({mint: mark})).compute_summary())
+
+        assert summary.unrealized_pnl_sol is None
+        assert summary.mark_unavailable_count == 1
+        assert summary.positions[0].mark_price_sol is None
+
+
+def test_partial_exit_then_final_close_uses_remaining_tokens_and_basis(tmp_path: Path) -> None:
+    db = tmp_path / "partial_then_close.db"
+    asyncio.run(init_db(db))
+    manager = PositionManager(db, load_settings())
+    mint = "PartialClose111111111111111111111111111111111"
+    _paper_position(manager, mint, amount_sol=1.0, price_sol=0.01)
+
+    asyncio.run(
+        manager.record_partial_exit(
+            mint,
+            PartialExit(multiple=2.0, sell_pct=0.25, executed=True),
+            realized_pnl_sol=0.25,
+            mode="paper",
+        )
+    )
+    partial = asyncio.run(manager.get_position(mint, mode="paper"))
+    assert partial is not None
+    assert partial.remaining_sell_pct == 0.75
+    assert partial.remaining_token_amount == 75.0
+
+    closed = asyncio.run(manager.close_position(mint, exit_price_sol=0.03, mode="paper"))
+
+    assert closed is not None
+    assert closed.realized_pnl_sol == 1.75
+    summary = asyncio.run(PaperPnLCalculator(manager, UnavailablePriceProvider()).compute_summary())
+    assert summary.realized_pnl_sol == 1.75
+
+
 # Requirement 3: closed paper positions with exit prices produce realized PnL
 def test_paper_pnl_shows_realized_pnl_for_closed(tmp_path: Path) -> None:
     db = tmp_path / "realized.db"
@@ -587,13 +631,33 @@ def test_paper_close_all_with_confirm_closes_paper(tmp_path: Path) -> None:
     _paper_position(manager, "PaperA1111111111111111111111111111111111111")
     _paper_position(manager, "PaperB1111111111111111111111111111111111111")
 
-    result = runner.invoke(cli_module.app, ["paper-close", "--all", "--confirm", "--db-path", str(db)])
+    result = runner.invoke(
+        cli_module.app,
+        ["paper-close", "--all", "--price", "0.00002", "--confirm", "--db-path", str(db)],
+    )
     assert result.exit_code == 0
     assert "Closed 2 paper position(s)" in result.stdout
     assert "simulated" in result.stdout.lower()
 
     positions = asyncio.run(manager.get_all_open())
     assert len(positions) == 0
+
+
+def test_paper_close_all_skips_positions_without_a_valid_price(tmp_path: Path) -> None:
+    db = tmp_path / "close_all_missing_price.db"
+    asyncio.run(init_db(db))
+    manager = PositionManager(db, load_settings())
+    _paper_position(manager, "NoPriceBulk111111111111111111111111111111111")
+
+    result = runner.invoke(
+        cli_module.app,
+        ["paper-close", "--all", "--confirm", "--db-path", str(db)],
+    )
+
+    assert result.exit_code == 0
+    assert "Closed 0 paper position(s) with PnL" in result.stdout
+    assert "Skipped 1 paper position(s): no valid exit price available" in result.stdout
+    assert len(asyncio.run(manager.get_all_open(mode="paper"))) == 1
 
 
 # Requirement 6: close commands never touch mode=="live" positions
@@ -621,7 +685,10 @@ def test_paper_close_all_only_closes_paper_same_mint_as_live(tmp_path: Path) -> 
     _paper_position(manager, mint)
     _live_position(manager, mint)
 
-    result = runner.invoke(cli_module.app, ["paper-close", "--all", "--confirm", "--db-path", str(db)])
+    result = runner.invoke(
+        cli_module.app,
+        ["paper-close", "--all", "--price", "0.00002", "--confirm", "--db-path", str(db)],
+    )
 
     assert result.exit_code == 0
     assert "Closed 1 paper position(s)" in result.stdout

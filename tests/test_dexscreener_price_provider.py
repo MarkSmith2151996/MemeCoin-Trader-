@@ -91,6 +91,42 @@ def test_provider_returns_sol_price_from_dexscreener() -> None:
     asyncio.run(run())
 
 
+def test_provider_rejects_usdc_inverted_and_wrong_mint_pairs() -> None:
+    requested_mint = "TokenMint1111111111111111111111111111111111"
+    usdc_pair = dict(
+        SOL_PAIR,
+        liquidity={"usd": 1_000_000},
+        quoteToken={"address": "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v", "symbol": "USDC"},
+    )
+    inverted_pair = dict(
+        SOL_PAIR,
+        baseToken=SOL_PAIR["quoteToken"],
+        quoteToken=SOL_PAIR["baseToken"],
+    )
+    wrong_mint_pair = dict(
+        SOL_PAIR,
+        baseToken={"address": "OtherMint111111111111111111111111111111111"},
+    )
+    transport = _fake_transport(pairs=[usdc_pair, inverted_pair, wrong_mint_pair])
+    provider = DexScreenerPriceProvider(http_client=httpx.AsyncClient(transport=transport))
+
+    result = asyncio.run(provider.get_price_with_diagnostic(requested_mint))
+
+    assert result.price_sol is None
+    assert result.reason == "no_requested_mint_sol_pair"
+
+
+def test_provider_rejects_nonfinite_native_price() -> None:
+    for raw_price in ("NaN", "inf", "-inf", "0", "-0.1"):
+        pair = dict(SOL_PAIR, priceNative=raw_price)
+        provider = DexScreenerPriceProvider(http_client=httpx.AsyncClient(transport=_fake_transport(pairs=[pair])))
+
+        result = asyncio.run(provider.get_price_with_diagnostic("TokenMint1111111111111111111111111111111111"))
+
+        assert result.price_sol is None
+        assert result.reason == "invalid_price"
+
+
 # Test 2: provider returns unavailable on no pairs
 def test_provider_unavailable_on_no_pairs() -> None:
     transport = _fake_transport(pairs=None)

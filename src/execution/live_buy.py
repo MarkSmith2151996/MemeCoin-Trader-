@@ -83,8 +83,9 @@ async def execute_guarded_live_buy(
         mint_address=mint_address,
         side=Side.BUY,
         amount_sol=amount_sol,
-        token_amount=amount_sol,
-        price_sol=1.0,
+        # Submission alone does not provide a fill price or token quantity.
+        token_amount=None,
+        price_sol=None,
         tx_signature=submission.tx_signature,
         mode="live",
         status="submitted",

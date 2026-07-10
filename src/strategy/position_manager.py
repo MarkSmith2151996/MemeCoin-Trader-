@@ -31,10 +31,12 @@ class PositionManager:
 
     async def open_position(self, trade: Trade, signal: Signal) -> Position:
         known_price = trade.price_sol if trade.price_sol is not None else self._signal_price(signal)
-        if known_price is not None and (known_price <= 0 or math.isnan(known_price)):
-            raise ValueError(f"Invalid entry price for paper position: {known_price}")
-        entry_price = known_price if known_price is not None and known_price > 0 else 0.0
+        if known_price is not None and not _is_valid_price(known_price):
+            raise ValueError(f"Invalid entry price for position: {known_price}")
+        entry_price = known_price if _is_valid_price(known_price) else 0.0
         token_amount = trade.token_amount
+        if token_amount is not None and not _is_valid_quantity(token_amount):
+            raise ValueError(f"Invalid token amount for position: {token_amount}")
         if token_amount is None:
             token_amount = trade.amount_sol / entry_price if entry_price > 0 else 0.0
         fill_quality = (
@@ -150,8 +152,15 @@ class PositionManager:
 
         realized_pnl = 0.0
         close_price = exit_price_sol
-        if exit_price_sol is not None and exit_price_sol > 0:
-            realized_pnl = round(position.token_amount * exit_price_sol - position.amount_sol, 9)
+        if exit_price_sol is not None and not _is_valid_price(exit_price_sol):
+            raise ValueError(f"Invalid exit price for position: {exit_price_sol}")
+        if _is_valid_price(exit_price_sol):
+            remaining_fraction = position.remaining_sell_pct
+            realized_pnl = round(
+                position.remaining_token_amount * exit_price_sol
+                - position.amount_sol * remaining_fraction,
+                9,
+            )
 
         closed = position.model_copy(
             update={
@@ -234,6 +243,14 @@ class PositionManager:
         if signal is None:
             return None
         raw_price = signal.payload.get("price_sol")
-        if isinstance(raw_price, (int, float)) and raw_price > 0:
+        if isinstance(raw_price, (int, float)) and _is_valid_price(float(raw_price)):
             return float(raw_price)
         return None
+
+
+def _is_valid_price(value: float | None) -> bool:
+    return value is not None and math.isfinite(value) and value > 0
+
+
+def _is_valid_quantity(value: float) -> bool:
+    return math.isfinite(value) and value >= 0
