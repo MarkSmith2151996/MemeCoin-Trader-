@@ -23,6 +23,7 @@ from src.execution.live_circuit_breaker import LiveCircuitBreaker
 from src.execution.live_execution_config import evaluate_live_execution_config
 from src.execution.live_exit import execute_guarded_live_exit
 from src.execution.live_guardrails import evaluate_live_guardrails
+from src.execution.env_readiness import evaluate_env_readiness
 from src.execution.live_readiness import evaluate_micro_live_readiness
 from src.execution.jupiter_live import JupiterLiveExecutionAdapter
 from src.execution.paper import PaperExecutionAdapter
@@ -1825,6 +1826,13 @@ def paper_soak(
         )
     )
     for line in audit.lines():
+        console.print(line)
+
+
+@app.command("env-readiness")
+def env_readiness() -> None:
+    report = evaluate_env_readiness()
+    for line in report.lines():
         console.print(line)
 
 
