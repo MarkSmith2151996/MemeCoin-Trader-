@@ -45,8 +45,9 @@ Every item must pass before proceeding to live testing:
    - No stale data warnings
    - No unexpected failures
 
-5. **Wallet preparation**
-   - Hot wallet funded only with disposable SOL (e.g. ≤0.1 SOL)
+5. **Wallet preparation** (see [WALLET_SETUP.md](WALLET_SETUP.md) for full guide)
+   - Create a fresh disposable hot wallet (do not reuse personal wallet)
+   - Fund wallet only with disposable SOL (e.g. ≤0.1 SOL)
    - No unrelated funds in the hot wallet
    - `TRADING_WALLET_PUBLIC_KEY` confirmed correct
    - `TRADING_WALLET_PRIVATE_KEY` only added **immediately before** the live smoke command
@@ -72,7 +73,8 @@ python3 -m src.cli paper-soak --max-signals 50 --timeout-seconds 180 --mode disc
 
 ### 2. Add private key
 
-Add `TRADING_WALLET_PRIVATE_KEY` to `.env` only now.
+Add `TRADING_WALLET_PRIVATE_KEY` to `.env` only now
+(see [WALLET_SETUP.md](WALLET_SETUP.md) for env progression guidance).
 
 ```bash
 echo "TRADING_WALLET_PRIVATE_KEY=your_private_key_here" >> .env
