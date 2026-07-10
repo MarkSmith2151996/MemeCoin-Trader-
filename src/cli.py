@@ -20,8 +20,10 @@ from src.core.database import init_db, record_trade
 from src.execution.base import ExecutionAdapter
 from src.execution.live_circuit_breaker import LiveCircuitBreaker
 from src.execution.live_execution_config import evaluate_live_execution_config
+from src.execution.live_exit import execute_guarded_live_exit
 from src.execution.live_guardrails import evaluate_live_guardrails
 from src.execution.live_readiness import evaluate_micro_live_readiness
+from src.execution.jupiter_live import JupiterLiveExecutionAdapter
 from src.execution.paper import PaperExecutionAdapter
 from src.monitoring.dashboard import resolve_db_path
 from src.monitoring.health import check_health
@@ -1717,6 +1719,30 @@ def live_readiness() -> None:
     )
     for line in report.lines():
         console.print(line)
+
+
+@app.command("live-exit")
+def live_exit(
+    mint: str = typer.Option(..., "--mint", help="Mint address of the existing position to exit."),
+    db_path: str | None = typer.Option(None, help="Optional SQLite path override."),
+) -> None:
+    settings = load_settings()
+    manager = PositionManager(resolve_db_path(db_path), settings)
+    adapter = JupiterLiveExecutionAdapter(settings=settings, circuit_breaker=LiveCircuitBreaker())
+    result = asyncio.run(
+        execute_guarded_live_exit(
+            settings=settings,
+            mint_address=mint,
+            position_manager=manager,
+            adapter=adapter,
+            exit_transaction_builder=None,
+            wallet_holdings_lookup=None,
+            wallet_balance_lookup=None,
+            transaction_simulator=None,
+            circuit_breaker=LiveCircuitBreaker(),
+        )
+    )
+    console.print({"ok": result.ok, "diagnostics": list(result.diagnostics), "provider": result.provider, "tx_signature": result.tx_signature})
 
 
 if __name__ == "__main__":
