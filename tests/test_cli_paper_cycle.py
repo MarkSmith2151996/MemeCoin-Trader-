@@ -1869,3 +1869,67 @@ def test_paper_decisions_no_secrets_printed(tmp_path: Path) -> None:
     assert "private_key" not in output
     assert "api-key=" not in output
     assert "rpc_url=" not in output
+
+
+def test_paper_decisions_export_md_creates_file(tmp_path: Path) -> None:
+    db = tmp_path / "decisions-export-md.db"
+    export_path = tmp_path / "export.md"
+    asyncio.run(init_db(db))
+    _seed_decision(db, "rejected", "top10_holder_check_failed")
+    _seed_decision(db, "traded", "traded")
+
+    result = runner.invoke(cli_module.app, ["paper-decisions", "--db-path", str(db), "--export-md", str(export_path)])
+    assert result.exit_code == 0
+    assert export_path.exists()
+    content = export_path.read_text()
+    assert "# Paper Decision Telemetry" in content
+    assert "Summary (2 decisions)" in content
+    assert "top10_holder_check_failed" in content
+    assert "WARNING: Paper results are simulated" in content
+    assert "private_key" not in content.lower()
+
+
+def test_paper_decisions_export_json_creates_file(tmp_path: Path) -> None:
+    db = tmp_path / "decisions-export-json.db"
+    export_path = tmp_path / "export.json"
+    asyncio.run(init_db(db))
+    _seed_decision(db, "rejected", "top10_holder_check_failed")
+    _seed_decision(db, "traded", "traded")
+
+    result = runner.invoke(cli_module.app, ["paper-decisions", "--db-path", str(db), "--export-json", str(export_path)])
+    assert result.exit_code == 0
+    assert export_path.exists()
+    import json
+    data = json.loads(export_path.read_text())
+    assert data["total_decisions"] == 2
+    assert data["mode"] == "paper"
+    assert "top10_holder_check_failed" in str(data["summary"]["by_reason"])
+    assert len(data["rejected_candidates"]) == 1
+    assert len(data["accepted_candidates"]) == 1
+    assert "private_key" not in json.dumps(data).lower()
+
+
+def test_paper_decisions_export_empty_db(tmp_path: Path) -> None:
+    db = tmp_path / "decisions-empty-export.db"
+    export_path = tmp_path / "empty.md"
+    asyncio.run(init_db(db))
+
+    result = runner.invoke(cli_module.app, ["paper-decisions", "--db-path", str(db), "--export-md", str(export_path)])
+    assert result.exit_code == 0
+    assert export_path.exists()
+    content = export_path.read_text()
+    assert "No paper decision telemetry found" in content
+
+
+def test_paper_decisions_export_does_not_mutate_db(tmp_path: Path) -> None:
+    db = tmp_path / "decisions-no-mutate.db"
+    export_path = tmp_path / "no-mutate.md"
+    asyncio.run(init_db(db))
+    _seed_decision(db, "rejected", "top10_holder_check_failed")
+
+    result = runner.invoke(cli_module.app, ["paper-decisions", "--db-path", str(db), "--export-md", str(export_path)])
+    assert result.exit_code == 0
+    assert export_path.exists()
+    decisions = asyncio.run(get_recent_paper_decisions(db, limit=10))
+    assert len(decisions) == 1
+    assert decisions[0].action_outcome == "rejected"

@@ -2827,6 +2827,8 @@ def paper_decisions(
     outcome: str | None = typer.Option(None, "--outcome", "-o", help="Filter by outcome (e.g. accepted, risk_rejected, capacity_blocked, unknown_data, skipped)."),
     mode: str | None = typer.Option(None, "--mode", "-m", help="Filter by candidate mode (launch, migration, unknown)."),
     source: str | None = typer.Option(None, "--source", "-s", help="Filter by signal source (pump_fun, onchain, whale, twitter, composite)."),
+    export_md: str | None = typer.Option(None, "--export-md", help="Export to markdown file path."),
+    export_json: str | None = typer.Option(None, "--export-json", help="Export to JSON file path."),
     db_path: str | None = typer.Option(None, help="Optional SQLite path override."),
 ) -> None:
     """Review recent paper decision telemetry — outcomes, rejections, sources.
@@ -2849,66 +2851,181 @@ def paper_decisions(
     if source:
         decisions = [d for d in decisions if d.source == source]
 
-    console.print("[bold]Paper Decision Telemetry[/bold]")
-    console.print(f"  Generated: {datetime.now(UTC).strftime('%Y-%m-%d %H:%M:%S')} UTC")
-    console.print(f"  Mode: paper (simulated)")
-    console.print("")
-
-    if not decisions:
-        console.print("  [yellow]No paper decision telemetry found.[/yellow]")
-        console.print("  [yellow]Run `paper-soak` to generate candidate decisions.[/yellow]")
-        console.print("")
-        console.print("[yellow]WARNING: Paper results are simulated. Not real profit or loss.[/yellow]")
-        return
-
-    total = len(decisions)
+    now_str = datetime.now(UTC).strftime('%Y-%m-%d %H:%M:%S') + " UTC"
 
     outcome_counts = Counter(d.action_outcome for d in decisions)
     reason_counts = Counter(d.primary_reason for d in decisions)
     source_counts = Counter(d.source for d in decisions)
     mode_counts = Counter(d.candidate_mode for d in decisions)
-
-    console.print(f"[bold]Summary ({total} decisions)[/bold]")
-
-    console.print("  [bold]By outcome:[/bold]")
-    for oc, count in outcome_counts.most_common():
-        console.print(f"    {oc}: {count}")
-
-    console.print("  [bold]By rejection reason:[/bold]")
-    for rc, count in reason_counts.most_common(10):
-        console.print(f"    {rc}: {count}")
-
-    console.print("  [bold]By signal source:[/bold]")
-    for sc, count in source_counts.most_common():
-        console.print(f"    {sc}: {count}")
-
-    console.print("  [bold]By candidate mode:[/bold]")
-    for mc, count in mode_counts.most_common():
-        console.print(f"    {mc}: {count}")
-
-    console.print("")
-
     accepted = [d for d in decisions if d.action_outcome in ("accepted", "traded")]
-    if accepted:
-        console.print(f"[bold]Accepted candidates ({len(accepted)})[/bold]")
-        for d in accepted[:5]:
-            label = d.symbol or d.name or d.mint_address[:16] if d.mint_address else "unknown"
-            console.print(f"  {label}  source={d.source}  mode={d.candidate_mode}  score={d.attention_score}")
-        if len(accepted) > 5:
-            console.print(f"  ... and {len(accepted) - 5} more")
+    rejected = [d for d in decisions if d.action_outcome not in ("accepted", "traded")]
+
+    # Build candidate rows for export
+    candidate_rows = []
+    for d in decisions:
+        label = d.symbol or d.name or (d.mint_address[:16] if d.mint_address else "unknown")
+        candidate_rows.append({
+            "label": label,
+            "mint": d.mint_address,
+            "source": d.source,
+            "mode": d.candidate_mode,
+            "outcome": d.action_outcome,
+            "reason": d.primary_reason,
+            "score": d.attention_score or 0,
+            "risk_score": d.risk_score,
+            "recorded_at": d.recorded_at,
+        })
+
+    # Export to markdown
+    if export_md:
+        export_path = Path(export_md)
+        lines = [
+            "# Paper Decision Telemetry",
+            f"Generated: {now_str}",
+            "Mode: paper (simulated)",
+            "",
+            "**This is safe simulated paper telemetry. Not trading advice.**",
+            "",
+        ]
+        if not decisions:
+            lines.append("No paper decision telemetry found. Run `paper-soak` to generate candidate decisions.")
+        else:
+            lines.append(f"## Summary ({len(decisions)} decisions)")
+            lines.append("")
+            lines.append("### By outcome")
+            for oc, count in outcome_counts.most_common():
+                lines.append(f"- {oc}: {count}")
+            lines.append("")
+            lines.append("### By rejection reason (top 10)")
+            for rc, count in reason_counts.most_common(10):
+                lines.append(f"- {rc}: {count}")
+            lines.append("")
+            lines.append("### By signal source")
+            for sc, count in source_counts.most_common():
+                lines.append(f"- {sc}: {count}")
+            lines.append("")
+            lines.append("### By candidate mode")
+            for mc, count in mode_counts.most_common():
+                lines.append(f"- {mc}: {count}")
+            lines.append("")
+
+            if accepted:
+                lines.append(f"## Accepted candidates ({len(accepted)})")
+                lines.append("")
+                lines.append("| Label | Source | Mode | Score | Recorded At |")
+                lines.append("|-------|--------|------|-------|-------------|")
+                for d in accepted:
+                    label = d.symbol or d.name or (d.mint_address[:16] if d.mint_address else "unknown")
+                    lines.append(f"| {label} | {d.source} | {d.candidate_mode} | {d.attention_score or 0} | {d.recorded_at} |")
+                lines.append("")
+
+            if rejected:
+                lines.append(f"## Rejected candidates ({len(rejected)})")
+                lines.append("")
+                lines.append("| Label | Reason | Source | Mode | Risk Score | Recorded At |")
+                lines.append("|-------|--------|--------|------|------------|-------------|")
+                for d in rejected:
+                    label = d.symbol or d.name or (d.mint_address[:16] if d.mint_address else "unknown")
+                    rs = f"{d.risk_score}" if d.risk_score is not None else "N/A"
+                    lines.append(f"| {label} | {d.primary_reason} | {d.source} | {d.candidate_mode} | {rs} | {d.recorded_at} |")
+                lines.append("")
+
+        lines.append("---")
+        lines.append("*WARNING: Paper results are simulated. Not real profit or loss.*")
+        export_path.write_text("\n".join(lines) + "\n")
+        console.print(f"[green]Exported markdown to {export_path}[/green]")
+
+    # Export to JSON
+    if export_json:
+        export_path = Path(export_json)
+        payload = {
+            "generated_at": now_str,
+            "mode": "paper",
+            "total_decisions": len(decisions),
+            "summary": {
+                "by_outcome": dict(outcome_counts.most_common()),
+                "by_reason": dict(reason_counts.most_common(10)),
+                "by_source": dict(source_counts.most_common()),
+                "by_mode": dict(mode_counts.most_common()),
+            },
+            "accepted_candidates": [
+                {
+                    "label": d.symbol or d.name or (d.mint_address[:16] if d.mint_address else "unknown"),
+                    "source": d.source,
+                    "mode": d.candidate_mode,
+                    "outcome": d.action_outcome,
+                    "reason": d.primary_reason,
+                    "score": d.attention_score or 0,
+                    "risk_score": d.risk_score,
+                    "recorded_at": d.recorded_at,
+                }
+                for d in accepted
+            ],
+            "rejected_candidates": [
+                {
+                    "label": d.symbol or d.name or (d.mint_address[:16] if d.mint_address else "unknown"),
+                    "source": d.source,
+                    "mode": d.candidate_mode,
+                    "outcome": d.action_outcome,
+                    "reason": d.primary_reason,
+                    "score": d.attention_score or 0,
+                    "risk_score": d.risk_score,
+                    "recorded_at": d.recorded_at,
+                }
+                for d in rejected
+            ],
+        }
+        export_path.write_text(json.dumps(payload, indent=2, default=str) + "\n")
+        console.print(f"[green]Exported JSON to {export_path}[/green]")
+
+    # Console output (skip if only exporting)
+    if not export_md and not export_json:
+        console.print("[bold]Paper Decision Telemetry[/bold]")
+        console.print(f"  Generated: {now_str}")
+        console.print(f"  Mode: paper (simulated)")
         console.print("")
 
-    rejected = [d for d in decisions if d.action_outcome not in ("accepted", "traded")]
-    if rejected:
-        console.print(f"[bold]Recent rejected candidates ({len(rejected)})[/bold]")
-        for d in rejected[:5]:
-            label = d.symbol or d.name or d.mint_address[:16] if d.mint_address else "unknown"
-            console.print(f"  {label}  reason={d.primary_reason}  source={d.source}  mode={d.candidate_mode}")
-        if len(rejected) > 5:
-            console.print(f"  ... and {len(rejected) - 5} more")
+        if not decisions:
+            console.print("  [yellow]No paper decision telemetry found.[/yellow]")
+            console.print("  [yellow]Run `paper-soak` to generate candidate decisions.[/yellow]")
+            console.print("")
+            console.print("[yellow]WARNING: Paper results are simulated. Not real profit or loss.[/yellow]")
+            return
 
-    console.print("")
-    console.print("[yellow]WARNING: Paper results are simulated. Not real profit or loss.[/yellow]")
+        console.print(f"[bold]Summary ({len(decisions)} decisions)[/bold]")
+        console.print("  [bold]By outcome:[/bold]")
+        for oc, count in outcome_counts.most_common():
+            console.print(f"    {oc}: {count}")
+        console.print("  [bold]By rejection reason:[/bold]")
+        for rc, count in reason_counts.most_common(10):
+            console.print(f"    {rc}: {count}")
+        console.print("  [bold]By signal source:[/bold]")
+        for sc, count in source_counts.most_common():
+            console.print(f"    {sc}: {count}")
+        console.print("  [bold]By candidate mode:[/bold]")
+        for mc, count in mode_counts.most_common():
+            console.print(f"    {mc}: {count}")
+        console.print("")
+
+        if accepted:
+            console.print(f"[bold]Accepted candidates ({len(accepted)})[/bold]")
+            for d in accepted[:5]:
+                label = d.symbol or d.name or d.mint_address[:16] if d.mint_address else "unknown"
+                console.print(f"  {label}  source={d.source}  mode={d.candidate_mode}  score={d.attention_score}")
+            if len(accepted) > 5:
+                console.print(f"  ... and {len(accepted) - 5} more")
+            console.print("")
+
+        if rejected:
+            console.print(f"[bold]Recent rejected candidates ({len(rejected)})[/bold]")
+            for d in rejected[:5]:
+                label = d.symbol or d.name or d.mint_address[:16] if d.mint_address else "unknown"
+                console.print(f"  {label}  reason={d.primary_reason}  source={d.source}  mode={d.candidate_mode}")
+            if len(rejected) > 5:
+                console.print(f"  ... and {len(rejected) - 5} more")
+
+        console.print("")
+        console.print("[yellow]WARNING: Paper results are simulated. Not real profit or loss.[/yellow]")
 
 
 if __name__ == "__main__":
