@@ -100,7 +100,7 @@ def test_dexscreener_failure_triggers_jupiter_fallback() -> None:
     assert client.calls == [dexscreener_url, jupiter_url]
 
 
-def test_jupiter_fallback_can_derive_liquidity_from_valid_quote() -> None:
+def test_jupiter_quote_output_is_not_treated_as_pool_liquidity() -> None:
     mint = "mint-route"
     dexscreener_url = f"https://dex.example/{mint}"
     jupiter_url = (
@@ -121,9 +121,9 @@ def test_jupiter_fallback_can_derive_liquidity_from_valid_quote() -> None:
 
     result = asyncio.run(probe.get_pool_info(mint))
 
-    assert result["pool_liquidity_sol"] == 2.5
-    assert result["source"] == "jupiter_fallback"
-    assert result["jupiter_status"] == "ok"
+    assert result["pool_liquidity_sol"] is None
+    assert result["source"] == "none"
+    assert result["jupiter_status"] == "explicit_liquidity_unavailable"
 
 
 def test_both_sources_failing_returns_unknown() -> None:
@@ -167,7 +167,7 @@ class StubLiquidityProbe:
         }
 
 
-def test_discovery_risk_scorer_uses_fallback_liquidity_value() -> None:
+def test_discovery_risk_scorer_uses_explicit_fallback_liquidity_value() -> None:
     signal = Signal(
         source=SignalSource.PUMP_FUN,
         type=SignalType.NEW_POOL,

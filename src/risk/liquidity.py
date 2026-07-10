@@ -125,10 +125,13 @@ class LiquidityProbe:
         if explicit_liquidity is not None:
             return {"pool_liquidity_sol": explicit_liquidity, "pool_liquidity_usd": None, "source": "jupiter_fallback", "status": "ok"}
 
-        out_amount = _coerce_float(payload.get("outAmount"))
-        if out_amount is None or out_amount <= 0:
-            return {"pool_liquidity_sol": None, "pool_liquidity_usd": None, "source": "jupiter_fallback", "status": "no_out_amount"}
-        return {"pool_liquidity_sol": round(out_amount / 1_000_000_000, 9), "pool_liquidity_usd": None, "source": "jupiter_fallback", "status": "ok"}
+        # A quote's output amount is execution pricing, not total pool liquidity.
+        return {
+            "pool_liquidity_sol": None,
+            "pool_liquidity_usd": None,
+            "source": "jupiter_fallback",
+            "status": "explicit_liquidity_unavailable",
+        }
 
     async def _get_json(self, url: str) -> object | None:
         client = self._client

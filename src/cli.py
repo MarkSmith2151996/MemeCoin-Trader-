@@ -203,16 +203,17 @@ class PaperCycleSummary:
             return []
 
         lines = ["Top discovery candidates:"]
-        lines.append("  # | symbol | mint | source | mode | attn | outcome | reason | theme | meta")
+        lines.append("  # | symbol | mint | source | mode | attn | approval | outcome | reason | theme | meta")
         for diagnostic in candidates[:8]:
             lines.append(
-                "  {rank} | {symbol} | {mint_short} | {source} | {mode} | {attn} | {outcome} | {reason} | {theme} | {meta}".format(
+                "  {rank} | {symbol} | {mint_short} | {source} | {mode} | {attn} | {approval} | {outcome} | {reason} | {theme} | {meta}".format(
                     rank=diagnostic.get("rank", "?"),
                     symbol=diagnostic.get("symbol", "unknown"),
                     mint_short=diagnostic.get("mint_short", "unknown"),
                     source=diagnostic.get("source", "unknown"),
                     mode=diagnostic.get("candidate_mode", "unknown"),
                     attn=_candidate_attention_display(diagnostic),
+                    approval=diagnostic.get("risk_approval_state", "strict_rejected"),
                     outcome=diagnostic.get("action_outcome", diagnostic.get("decision", "unknown")),
                     reason=_candidate_summary_reason(diagnostic),
                     theme=_candidate_summary_theme(diagnostic),
@@ -599,6 +600,7 @@ def _paper_decision_record(
         "unique_buyers_policy_state": diagnostic.get("unique_buyers_policy_state"),
         "authority_policy_state": diagnostic.get("authority_policy_state"),
         "honeypot_policy_state": diagnostic.get("honeypot_policy_state"),
+        "risk_approval_state": diagnostic.get("risk_approval_state"),
         "metadata_completeness_state": diagnostic.get("metadata_completeness_state"),
         "social_signal_state": diagnostic.get("social_signal_state"),
         "source_count": diagnostic.get("source_count"),
@@ -767,6 +769,15 @@ def _build_rejected_candidate_diagnostic(
         "honeypot_source": honeypot_diagnostics.get("honeypot_source", "unknown"),
         "honeypot_unknown_reason": honeypot_diagnostics.get("honeypot_unknown_reason"),
         "honeypot_policy_state": honeypot_policy.get("honeypot_policy_state", "unknown"),
+        "risk_approval_state": _risk_approval_state(
+            record,
+            holder_policy,
+            age_policy,
+            creator_policy,
+            unique_buyers_policy,
+            authority_policy,
+            honeypot_policy,
+        ),
         "honeypot_policy_reason": honeypot_policy.get("honeypot_policy_reason", "unknown"),
         "honeypot_policy_context_used": bool(honeypot_policy.get("honeypot_policy_context_used")),
         "holder_policy_state": holder_policy.get("holder_policy_state", "unknown"),
@@ -891,6 +902,15 @@ def _build_accepted_candidate_diagnostic(
         "unique_buyers_policy_state": unique_buyers_policy.get("unique_buyers_policy_state", "unknown"),
         "authority_policy_state": authority_policy.get("authority_policy_state", "unknown"),
         "honeypot_policy_state": honeypot_policy.get("honeypot_policy_state", "unknown"),
+        "risk_approval_state": _risk_approval_state(
+            record,
+            holder_policy,
+            age_policy,
+            creator_policy,
+            unique_buyers_policy,
+            authority_policy,
+            honeypot_policy,
+        ),
         "main_warnings": _main_warnings(
             holder_policy_state=holder_policy.get("holder_policy_state", "unknown"),
             age_policy_state=age_policy.get("age_policy_state", "unknown"),
@@ -946,6 +966,23 @@ def _main_warnings(
         if isinstance(reason, str) and reason:
             warnings.append(f"risk:{reason}")
     return tuple(dict.fromkeys(warnings))
+
+
+def _risk_approval_state(record: RejectionRecord | None, *policies: dict[str, object]) -> str:
+    if any(
+        value == "discovery_relaxed"
+        for policy in policies
+        for key, value in policy.items()
+        if key.endswith("_state")
+    ):
+        return "discovery_relaxed"
+    if record is not None and record.check_results and all(
+        entry.get("result") == "pass"
+        for entry in record.check_results.values()
+        if isinstance(entry, dict)
+    ):
+        return "strict_approved"
+    return "strict_rejected"
 
 
 def _compact_candidate_snapshot(diagnostic: dict[str, object]) -> dict[str, object]:

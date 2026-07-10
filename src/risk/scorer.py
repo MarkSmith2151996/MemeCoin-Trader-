@@ -1178,18 +1178,9 @@ def _apply_creator_policy_assessment(
 
     if launch_like and age_safe and holder_safe and liquidity_safe and authority_safe and honeypot_safe and missing_metadata:
         context_used = True
-        updated_reasons = [reason for reason in assessment.reasons if reason != "creator_holding_check unknown"]
-        updated_score = assessment.score + CHECK_WEIGHTS["creator_holding_check"]
-        updated_assessment = assessment.model_copy(
-            update={
-                "creator_holding_check": CheckResult.PASS,
-                "score": updated_score,
-                "reasons": updated_reasons,
-            }
-        )
-        return updated_assessment, {
-            "creator_policy_state": "unknown_warning",
-            "creator_policy_reason": "discovery-mode launch-stage token allowed past unknown creator holding because other hard safety checks were clean enough",
+        return assessment, {
+            "creator_policy_state": "discovery_relaxed",
+            "creator_policy_reason": "discovery ranking retained unknown creator holding; strict approval remains blocked",
             "creator_policy_context_used": context_used,
         }
 
@@ -1237,7 +1228,7 @@ def _apply_unique_buyers_policy_assessment(
     launch_like = stage_hint in {"new_pool", "pump"}
     age_safe = age_policy.get("age_policy_state") in {"age_pass", "immature_warning"}
     holder_safe = holder_policy.get("holder_policy_state") in {"pass", "fresh_launch_warning"}
-    creator_safe = creator_policy.get("creator_policy_state") in {"pass", "unknown_warning"}
+    creator_safe = creator_policy.get("creator_policy_state") == "pass"
     liquidity_safe = assessment.liquidity_check == CheckResult.PASS
     authority_safe = assessment.mint_authority_check != CheckResult.FAIL and assessment.freeze_authority_check != CheckResult.FAIL
     honeypot_safe = assessment.honeypot_check != CheckResult.FAIL
@@ -1245,18 +1236,9 @@ def _apply_unique_buyers_policy_assessment(
 
     if launch_like and age_safe and holder_safe and creator_safe and liquidity_safe and authority_safe and honeypot_safe and missing_metadata:
         context_used = True
-        updated_reasons = [reason for reason in assessment.reasons if reason != "unique_buyers_check unknown"]
-        updated_score = assessment.score + CHECK_WEIGHTS["unique_buyers_check"]
-        updated_assessment = assessment.model_copy(
-            update={
-                "unique_buyers_check": CheckResult.PASS,
-                "score": updated_score,
-                "reasons": updated_reasons,
-            }
-        )
-        return updated_assessment, {
-            "unique_buyers_policy_state": "unknown_warning",
-            "unique_buyers_policy_reason": "discovery-mode launch-stage token allowed past unknown unique buyer count because other hard safety checks were clean enough",
+        return assessment, {
+            "unique_buyers_policy_state": "discovery_relaxed",
+            "unique_buyers_policy_reason": "discovery ranking retained unknown buyer data; strict approval remains blocked",
             "unique_buyers_policy_context_used": context_used,
         }
 
@@ -1307,31 +1289,17 @@ def _apply_authority_policy_assessment(
     launch_like = stage_hint in {"new_pool", "pump"}
     age_safe = age_policy.get("age_policy_state") in {"age_pass", "immature_warning"}
     holder_safe = holder_policy.get("holder_policy_state") in {"pass", "fresh_launch_warning"}
-    creator_safe = creator_policy.get("creator_policy_state") in {"pass", "unknown_warning"}
-    buyer_safe = unique_buyers_policy.get("unique_buyers_policy_state") in {"pass", "unknown_warning"}
+    creator_safe = creator_policy.get("creator_policy_state") == "pass"
+    buyer_safe = unique_buyers_policy.get("unique_buyers_policy_state") == "pass"
     liquidity_safe = assessment.liquidity_check == CheckResult.PASS
     honeypot_safe = assessment.honeypot_check != CheckResult.FAIL
     missing_metadata = isinstance(authority_diagnostics.get("authority_unknown_reason"), str) and authority_diagnostics.get("authority_unknown_reason") != ""
 
     if launch_like and age_safe and holder_safe and creator_safe and buyer_safe and liquidity_safe and honeypot_safe and missing_metadata:
         context_used = True
-        updated_reasons = [reason for reason in assessment.reasons if reason not in {"mint_authority_check unknown", "freeze_authority_check unknown"}]
-        updated_score = assessment.score
-        if mint_check != CheckResult.PASS:
-            updated_score += CHECK_WEIGHTS["mint_authority_check"]
-        if freeze_check != CheckResult.PASS:
-            updated_score += CHECK_WEIGHTS["freeze_authority_check"]
-        updated_assessment = assessment.model_copy(
-            update={
-                "mint_authority_check": CheckResult.PASS,
-                "freeze_authority_check": CheckResult.PASS,
-                "score": updated_score,
-                "reasons": updated_reasons,
-            }
-        )
-        return updated_assessment, {
-            "authority_policy_state": "unknown_warning",
-            "authority_policy_reason": "discovery-mode launch-stage token allowed past unknown authority state because other hard safety checks were clean enough",
+        return assessment, {
+            "authority_policy_state": "discovery_relaxed",
+            "authority_policy_reason": "discovery ranking retained unknown authority state; strict approval remains blocked",
             "authority_policy_context_used": context_used,
         }
 
@@ -1381,26 +1349,17 @@ def _apply_honeypot_policy_assessment(
     launch_like = stage_hint in {"new_pool", "pump"}
     age_safe = age_policy.get("age_policy_state") in {"age_pass", "immature_warning"}
     holder_safe = holder_policy.get("holder_policy_state") in {"pass", "fresh_launch_warning"}
-    creator_safe = creator_policy.get("creator_policy_state") in {"pass", "unknown_warning"}
-    buyer_safe = unique_buyers_policy.get("unique_buyers_policy_state") in {"pass", "unknown_warning"}
-    authority_safe = authority_policy.get("authority_policy_state") in {"pass", "unknown_warning"}
+    creator_safe = creator_policy.get("creator_policy_state") == "pass"
+    buyer_safe = unique_buyers_policy.get("unique_buyers_policy_state") == "pass"
+    authority_safe = authority_policy.get("authority_policy_state") == "pass"
     liquidity_safe = assessment.liquidity_check == CheckResult.PASS
     missing_metadata = isinstance(honeypot_diagnostics.get("honeypot_unknown_reason"), str) and honeypot_diagnostics.get("honeypot_unknown_reason") != ""
 
     if launch_like and age_safe and holder_safe and creator_safe and buyer_safe and authority_safe and liquidity_safe and missing_metadata:
         context_used = True
-        updated_reasons = [reason for reason in assessment.reasons if reason != "honeypot_check unknown"]
-        updated_score = assessment.score + CHECK_WEIGHTS["honeypot_check"]
-        updated_assessment = assessment.model_copy(
-            update={
-                "honeypot_check": CheckResult.PASS,
-                "score": updated_score,
-                "reasons": updated_reasons,
-            }
-        )
-        return updated_assessment, {
-            "honeypot_policy_state": "unknown_warning",
-            "honeypot_policy_reason": "discovery-mode launch-stage token allowed past unknown honeypot state because other hard safety checks were clean enough",
+        return assessment, {
+            "honeypot_policy_state": "discovery_relaxed",
+            "honeypot_policy_reason": "discovery ranking retained unknown honeypot state; strict approval remains blocked",
             "honeypot_policy_context_used": context_used,
         }
 
@@ -1475,7 +1434,7 @@ def _build_attention_diagnostics(
     if creator_state == "pass":
         score += 10
         reasons.append("creator profile passed")
-    elif creator_state == "unknown_warning":
+    elif creator_state == "discovery_relaxed":
         score += 5
         reasons.append("creator metadata incomplete but watchable")
 
@@ -1483,7 +1442,7 @@ def _build_attention_diagnostics(
     if buyer_state == "pass":
         score += 10
         reasons.append("unique buyer profile passed")
-    elif buyer_state == "unknown_warning":
+    elif buyer_state == "discovery_relaxed":
         score += 5
         reasons.append("buyer metadata incomplete but watchable")
 
@@ -1491,7 +1450,7 @@ def _build_attention_diagnostics(
     if authority_state == "pass":
         score += 8
         reasons.append("authority profile passed")
-    elif authority_state == "unknown_warning":
+    elif authority_state == "discovery_relaxed":
         score += 4
         reasons.append("authority metadata incomplete but watchable")
 
@@ -1499,7 +1458,7 @@ def _build_attention_diagnostics(
     if honeypot_state == "pass":
         score += 12
         reasons.append("honeypot profile passed")
-    elif honeypot_state == "unknown_warning":
+    elif honeypot_state == "discovery_relaxed":
         score += 4
         reasons.append("honeypot metadata incomplete but watchable")
 

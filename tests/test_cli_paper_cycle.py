@@ -1197,7 +1197,7 @@ def test_paper_cycle_strict_mode_rejects_too_new_tokens_with_age_check_failed(tm
     asyncio.run(run())
 
 
-def test_paper_cycle_discovery_mode_relaxes_only_age_blocker(tmp_path: Path) -> None:
+def test_paper_cycle_discovery_mode_ranks_unknown_honeypot_without_strict_approval(tmp_path: Path) -> None:
     async def run() -> None:
         db_path = tmp_path / "discovery-age.db"
         source = FakeSignalSource(
@@ -1223,9 +1223,11 @@ def test_paper_cycle_discovery_mode_relaxes_only_age_blocker(tmp_path: Path) -> 
         assert summary.execution_mode == "paper"
         assert summary.risk_profile == "discovery"
         assert summary.signals_collected == 1
-        assert summary.signals_accepted == 1
-        assert summary.signals_rejected == 0
-        assert summary.rejection_reasons == {}
+        assert summary.signals_accepted == 0
+        assert summary.signals_rejected == 1
+        assert summary.rejection_reasons == {"honeypot_check_unknown": 1}
+        assert summary.rejected_candidate_diagnostics[0]["risk_approval_state"] == "discovery_relaxed"
+        assert "discovery_relaxed" in "\n".join(summary.safe_lines())
         assert summary.sources_polled == ["fake"]
         assert summary.holder_lookup_outcomes == {}
 
@@ -1319,7 +1321,7 @@ def test_paper_cycle_discovery_mode_keeps_holder_unknown_when_payload_lacks_hold
     asyncio.run(run())
 
 
-def test_paper_cycle_discovery_mode_uses_holder_lookup_to_move_past_unknown(tmp_path: Path) -> None:
+def test_paper_cycle_discovery_mode_keeps_unknown_honeypot_out_of_strict_approval(tmp_path: Path) -> None:
     async def run() -> None:
         db_path = tmp_path / "discovery-holder-lookup.db"
         source = FakeSignalSource(
@@ -1362,9 +1364,10 @@ def test_paper_cycle_discovery_mode_uses_holder_lookup_to_move_past_unknown(tmp_
         assert summary.execution_mode == "paper"
         assert summary.risk_profile == "discovery"
         assert summary.signals_collected == 1
-        assert summary.signals_accepted == 1
-        assert summary.signals_rejected == 0
-        assert summary.rejection_reasons == {}
+        assert summary.signals_accepted == 0
+        assert summary.signals_rejected == 1
+        assert summary.rejection_reasons == {"honeypot_check_unknown": 1}
+        assert summary.rejected_candidate_diagnostics[0]["risk_approval_state"] == "discovery_relaxed"
         assert summary.sources_polled == ["fake"]
         assert summary.holder_lookup_outcomes == {"holder_lookup_succeeded": 1}
 

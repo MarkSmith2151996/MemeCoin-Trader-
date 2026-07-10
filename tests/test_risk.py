@@ -952,7 +952,7 @@ def test_strict_mode_creator_unknown_stays_conservative() -> None:
     assert signal.payload["creator_policy"]["creator_policy_state"] == "unknown_conservative"
 
 
-def test_discovery_mode_creator_unknown_becomes_warning_when_other_checks_clean() -> None:
+def test_discovery_mode_creator_unknown_remains_unknown_and_is_labeled_relaxed() -> None:
     signal = Signal(
         source=SignalSource.PUMP_FUN,
         type=SignalType.NEW_POOL,
@@ -970,8 +970,8 @@ def test_discovery_mode_creator_unknown_becomes_warning_when_other_checks_clean(
 
     assessment = asyncio.run(scorer.assess_signal(signal))
 
-    assert assessment.creator_holding_check == CheckResult.PASS
-    assert signal.payload["creator_policy"]["creator_policy_state"] == "unknown_warning"
+    assert assessment.creator_holding_check == CheckResult.UNKNOWN
+    assert signal.payload["creator_policy"]["creator_policy_state"] == "discovery_relaxed"
 
 
 def test_known_creator_holding_above_threshold_still_fails_in_discovery() -> None:
@@ -1123,7 +1123,7 @@ def test_strict_mode_unique_buyers_unknown_stays_conservative() -> None:
     assert signal.payload["unique_buyers_policy"]["unique_buyers_policy_state"] == "unknown_conservative"
 
 
-def test_discovery_mode_unique_buyers_unknown_becomes_warning_when_other_checks_clean() -> None:
+def test_discovery_mode_unique_buyers_unknown_remains_unknown_and_is_labeled_relaxed() -> None:
     signal = Signal(
         source=SignalSource.PUMP_FUN,
         type=SignalType.NEW_POOL,
@@ -1141,8 +1141,8 @@ def test_discovery_mode_unique_buyers_unknown_becomes_warning_when_other_checks_
 
     assessment = asyncio.run(scorer.assess_signal(signal))
 
-    assert assessment.unique_buyers_check == CheckResult.PASS
-    assert signal.payload["unique_buyers_policy"]["unique_buyers_policy_state"] == "unknown_warning"
+    assert assessment.unique_buyers_check == CheckResult.UNKNOWN
+    assert signal.payload["unique_buyers_policy"]["unique_buyers_policy_state"] == "discovery_relaxed"
 
 
 def test_known_low_unique_buyers_still_fails_in_all_modes() -> None:
@@ -1299,7 +1299,7 @@ def test_strict_mode_authority_unknown_stays_conservative() -> None:
     assert signal.payload["authority_policy"]["authority_policy_state"] == "unknown_conservative"
 
 
-def test_discovery_mode_authority_unknown_becomes_warning_when_other_checks_clean() -> None:
+def test_discovery_mode_authority_unknown_remains_unknown_and_is_labeled_relaxed() -> None:
     signal = Signal(
         source=SignalSource.PUMP_FUN,
         type=SignalType.NEW_POOL,
@@ -1316,9 +1316,9 @@ def test_discovery_mode_authority_unknown_becomes_warning_when_other_checks_clea
 
     assessment = asyncio.run(scorer.assess_signal(signal))
 
-    assert assessment.mint_authority_check == CheckResult.PASS
-    assert assessment.freeze_authority_check == CheckResult.PASS
-    assert signal.payload["authority_policy"]["authority_policy_state"] == "unknown_warning"
+    assert assessment.mint_authority_check == CheckResult.UNKNOWN
+    assert assessment.freeze_authority_check == CheckResult.UNKNOWN
+    assert signal.payload["authority_policy"]["authority_policy_state"] == "discovery_relaxed"
 
 
 def test_known_active_mint_authority_still_fails_in_all_modes() -> None:
@@ -1548,7 +1548,7 @@ def test_strict_mode_honeypot_unknown_stays_conservative() -> None:
     assert signal.payload["honeypot_policy"]["honeypot_policy_state"] == "unknown_conservative"
 
 
-def test_discovery_mode_honeypot_unknown_becomes_warning_when_other_checks_clean() -> None:
+def test_discovery_mode_honeypot_unknown_remains_unknown_and_is_labeled_relaxed() -> None:
     signal = Signal(
         source=SignalSource.PUMP_FUN,
         type=SignalType.NEW_POOL,
@@ -1567,8 +1567,8 @@ def test_discovery_mode_honeypot_unknown_becomes_warning_when_other_checks_clean
 
     assessment = asyncio.run(scorer.assess_signal(signal))
 
-    assert assessment.honeypot_check == CheckResult.PASS
-    assert signal.payload["honeypot_policy"]["honeypot_policy_state"] == "unknown_warning"
+    assert assessment.honeypot_check == CheckResult.UNKNOWN
+    assert signal.payload["honeypot_policy"]["honeypot_policy_state"] == "discovery_relaxed"
 
 
 def test_known_honeypot_still_fails_in_all_modes() -> None:
