@@ -18,8 +18,10 @@ from rich.console import Console
 from src.core.config import Settings, load_settings
 from src.core.database import init_db, record_trade
 from src.execution.base import ExecutionAdapter
+from src.execution.live_circuit_breaker import LiveCircuitBreaker
 from src.execution.live_execution_config import evaluate_live_execution_config
 from src.execution.live_guardrails import evaluate_live_guardrails
+from src.execution.live_readiness import evaluate_micro_live_readiness
 from src.execution.paper import PaperExecutionAdapter
 from src.monitoring.dashboard import resolve_db_path
 from src.monitoring.health import check_health
@@ -1701,6 +1703,19 @@ def paper_cycle(
         raise RuntimeError(f"Shared diagnostic directory missing: {MT038_REPORT_PATH.parent}")
     write_rejection_diagnostic_report(summary, MT038_REPORT_PATH)
     for line in summary.safe_lines():
+        console.print(line)
+
+
+@app.command("live-readiness")
+def live_readiness() -> None:
+    settings = load_settings()
+    report = asyncio.run(
+        evaluate_micro_live_readiness(
+            settings,
+            circuit_breaker=LiveCircuitBreaker(),
+        )
+    )
+    for line in report.lines():
         console.print(line)
 
 
