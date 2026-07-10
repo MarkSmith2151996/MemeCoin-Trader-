@@ -472,3 +472,119 @@ def test_paper_close_no_secrets_in_preview(tmp_path: Path) -> None:
     output = result.stdout.lower()
     assert "private_key" not in output
     assert "api-key=" not in output
+
+
+# --- MT-122: paper-report daily trading report ---
+
+def test_paper_report_empty_db(tmp_path: Path) -> None:
+    db = tmp_path / "report_empty.db"
+    result = runner.invoke(cli_module.app, ["paper-report", "--db-path", str(db)])
+    assert result.exit_code == 0
+    assert "Paper Trading Report" in result.stdout
+    assert "simulated" in result.stdout.lower()
+    assert "Total paper trades entered: 0" in result.stdout
+    assert "Open paper positions: 0" in result.stdout
+    assert "Closed paper positions: 0" in result.stdout
+    assert "no closed trades yet" in result.stdout
+    assert "no open paper positions" in result.stdout
+
+
+def test_paper_report_with_open_positions_no_marks(tmp_path: Path) -> None:
+    db = tmp_path / "report_open.db"
+    asyncio.run(init_db(db))
+    settings = load_settings()
+    manager = PositionManager(db, settings)
+    _paper_position(manager, "ReportOpen1111111111111111111111111111111111", amount_sol=1.0, price_sol=0.00001)
+
+    result = runner.invoke(cli_module.app, ["paper-report", "--db-path", str(db)])
+    assert result.exit_code == 0
+    assert "Paper Trading Report" in result.stdout
+    assert "Open paper positions: 1" in result.stdout
+    assert "mark_unavailable" in result.stdout
+    assert "ReportOpen" in result.stdout
+
+
+def test_paper_report_with_fake_marks(tmp_path: Path) -> None:
+    db = tmp_path / "report_marks.db"
+    asyncio.run(init_db(db))
+    settings = load_settings()
+    manager = PositionManager(db, settings)
+    _paper_position(manager, "ReportMark1111111111111111111111111111111111", amount_sol=1.0, price_sol=0.00001)
+
+    result = runner.invoke(cli_module.app, ["paper-report", "--marks", "live", "--db-path", str(db)])
+    assert result.exit_code == 0
+    assert "Marks: live" in result.stdout or "Marks: [green]live" in result.stdout
+    assert "Paper Trading Report" in result.stdout
+
+
+def test_paper_report_with_realized_pnl(tmp_path: Path) -> None:
+    db = tmp_path / "report_realized.db"
+    asyncio.run(init_db(db))
+    settings = load_settings()
+    manager = PositionManager(db, settings)
+    _paper_position(manager, "ReportReal11111111111111111111111111111111111", amount_sol=1.0, price_sol=0.00001)
+    asyncio.run(manager.close_position("ReportReal11111111111111111111111111111111111", exit_price_sol=0.00002))
+
+    result = runner.invoke(cli_module.app, ["paper-report", "--db-path", str(db)])
+    assert result.exit_code == 0
+    assert "Closed paper positions: 1" in result.stdout
+    assert "Best closed trade" in result.stdout
+    assert "+1.000000" in result.stdout
+
+
+def test_paper_report_live_positions_untouched(tmp_path: Path) -> None:
+    db = tmp_path / "report_live.db"
+    asyncio.run(init_db(db))
+    settings = load_settings()
+    manager = PositionManager(db, settings)
+    _paper_position(manager, "PaperRep111111111111111111111111111111111111", amount_sol=1.0, price_sol=0.00001)
+
+    trade = Trade(
+        mint_address="LiveReportMint111111111111111111111111111111",
+        side="BUY", amount_sol=1.0, token_amount=100000.0,
+        price_sol=0.00001, mode="live", status="simulated",
+    )
+    asyncio.run(manager.open_position(trade, None))
+
+    result = runner.invoke(cli_module.app, ["paper-report", "--db-path", str(db)])
+    assert result.exit_code == 0
+    assert "Live positions (untouched): 1" in result.stdout
+    assert "Open paper positions: 1" in result.stdout
+    assert "total paper trades entered" in result.stdout.lower()
+
+
+def test_paper_report_no_private_key_required(tmp_path: Path) -> None:
+    import os
+    assert "TRADING_WALLET_PRIVATE_KEY" not in os.environ or os.environ["TRADING_WALLET_PRIVATE_KEY"] == ""
+    db = tmp_path / "report_no_key.db"
+    result = runner.invoke(cli_module.app, ["paper-report", "--db-path", str(db)])
+    assert result.exit_code == 0
+    assert "Paper Trading Report" in result.stdout
+
+
+def test_paper_report_no_secrets_printed(tmp_path: Path) -> None:
+    db = tmp_path / "report_secrets.db"
+    asyncio.run(init_db(db))
+    settings = load_settings()
+    manager = PositionManager(db, settings)
+    _paper_position(manager, "ReportSec11111111111111111111111111111111111", amount_sol=1.0, price_sol=0.00001)
+
+    result = runner.invoke(cli_module.app, ["paper-report", "--db-path", str(db)])
+    assert result.exit_code == 0
+    output = result.stdout.lower()
+    assert "private_key" not in output
+    assert "api-key=" not in output
+    assert "rpc_url=" not in output
+
+
+def test_paper_report_default_no_network(tmp_path: Path) -> None:
+    db = tmp_path / "report_no_net.db"
+    asyncio.run(init_db(db))
+    settings = load_settings()
+    manager = PositionManager(db, settings)
+    _paper_position(manager, "NoNetMint11111111111111111111111111111111111", amount_sol=1.0, price_sol=0.00001)
+
+    result = runner.invoke(cli_module.app, ["paper-report", "--db-path", str(db)])
+    assert result.exit_code == 0
+    assert "Marks: unavailable" in result.stdout or "Marks:" in result.stdout
+    assert "mark_unavailable" in result.stdout

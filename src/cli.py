@@ -12,6 +12,8 @@ from pathlib import Path
 from time import monotonic
 from typing import Any
 
+import aiosqlite
+
 import typer
 from rich.console import Console
 
@@ -2373,6 +2375,114 @@ def paper_close(
         f"Realized PnL: {pnl_str}"
     )
     console.print("[yellow]Paper close is simulated. Not real profit or loss.[/yellow]")
+
+
+def _count_paper_trades(db_path: str | Path) -> int:
+    """Count paper-mode trades in DB. Safe fallback to 0 on error."""
+    try:
+        conn = sqlite3.connect(str(db_path))
+        cursor = conn.execute("SELECT COUNT(*) FROM trades WHERE mode = ?", ("paper",))
+        row = cursor.fetchone()
+        conn.close()
+        return row[0] if row is not None else 0
+    except Exception:
+        return 0
+
+
+@app.command("paper-report")
+def paper_report(
+    marks: str = typer.Option("unavailable", "--marks", help="Mark price source: 'unavailable' (default, no network) or 'live' (DexScreener read-only)."),
+    db_path: str | None = typer.Option(None, help="Optional SQLite path override."),
+) -> None:
+    """Generate a daily paper trading report with PnL, positions, and diagnostics.
+
+    Paper results are simulated. Not real profit or loss.
+    """
+    settings = load_settings()
+    runtime_db_path = resolve_db_path(db_path)
+    asyncio.run(init_db(runtime_db_path))
+    manager = PositionManager(runtime_db_path, settings)
+
+    if marks == "live":
+        provider = DexScreenerPriceProvider()
+    else:
+        provider = UnavailablePriceProvider()
+
+    calculator = PaperPnLCalculator(manager, price_provider=provider)
+    pnl_summary = asyncio.run(calculator.compute_summary())
+
+    all_open = asyncio.run(manager.get_all_open())
+    paper_positions = [p for p in all_open if p.mode == "paper"]
+    live_positions = [p for p in all_open if p.mode == "live"]
+
+    total_trades = _count_paper_trades(runtime_db_path)
+
+    best_trade: float | None = None
+    worst_trade: float | None = None
+    for p in pnl_summary.positions:
+        if p.status == PositionStatus.CLOSED:
+            pnl_val = p.realized_pnl_sol
+            if best_trade is None or pnl_val > best_trade:
+                best_trade = pnl_val
+            if worst_trade is None or pnl_val < worst_trade:
+                worst_trade = pnl_val
+
+    marks_label = "[green]live[/green]" if pnl_summary.marks_mode == "live" else "[yellow]unavailable[/yellow]"
+
+    console.print("[bold]Paper Trading Report[/bold]")
+    console.print(f"  Generated: {datetime.now(UTC).strftime('%Y-%m-%d %H:%M:%S')} UTC")
+    console.print(f"  Mode: paper (simulated)")
+    console.print(f"  Marks: {marks_label}")
+    console.print("")
+
+    console.print("[bold]Trades & Positions[/bold]")
+    console.print(f"  Total paper trades entered: {total_trades}")
+    console.print(f"  Open paper positions: {pnl_summary.open_positions}")
+    console.print(f"  Closed paper positions: {pnl_summary.closed_positions}")
+    console.print(f"  Total SOL deployed (open): {pnl_summary.total_sol_deployed:.6f}")
+    console.print(f"  Realized PnL: {_fmt_pnl(pnl_summary.realized_pnl_sol)}")
+    if pnl_summary.unrealized_pnl_sol is not None:
+        console.print(f"  Unrealized PnL: {_fmt_pnl(pnl_summary.unrealized_pnl_sol)}")
+    else:
+        console.print(f"  Unrealized PnL: [yellow]mark_unavailable ({pnl_summary.mark_unavailable_count} position(s) without mark)[/yellow]")
+    console.print(f"  Live positions (untouched): {len(live_positions)}")
+    console.print("")
+
+    console.print("[bold]Best/Worst Closed Trades[/bold]")
+    if best_trade is not None:
+        console.print(f"  Best closed trade: {_fmt_pnl(best_trade)}")
+        console.print(f"  Worst closed trade: {_fmt_pnl(worst_trade)}")
+    else:
+        console.print("  [yellow](no closed trades yet)[/yellow]")
+    console.print("")
+
+    console.print("[bold]Recent Paper Positions[/bold]")
+    if paper_positions:
+        for pos in sorted(paper_positions, key=lambda p: p.opened_at, reverse=True)[:5]:
+            status_str = "[green]OPEN[/green]"
+            console.print(
+                f"  {pos.mint_address[:16]}  {status_str}  "
+                f"sol={pos.amount_sol:.4f}  tokens={pos.token_amount:.0f}  "
+                f"entry={pos.entry_price_sol:.10f}"
+            )
+    else:
+        console.print("  [yellow](no open paper positions)[/yellow]")
+    console.print("")
+
+    console.print("[bold]Paper-Soak Diagnostics[/bold]")
+    console.print("  [yellow](run 'paper-soak --max-signals 50' for current signal rejection stats)[/yellow]")
+    console.print("")
+
+    console.print("[bold]Live Readiness (diagnostic only — does not affect paper mode)[/bold]")
+    try:
+        report = asyncio.run(evaluate_micro_live_readiness(settings))
+        for line in report.lines():
+            console.print(f"  {line}")
+    except Exception:
+        console.print("  [yellow]unavailable[/yellow]")
+    console.print("")
+
+    console.print("[yellow]WARNING: Paper results are simulated. Not real profit or loss.[/yellow]")
 
 
 if __name__ == "__main__":
