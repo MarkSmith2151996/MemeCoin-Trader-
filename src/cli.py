@@ -1864,6 +1864,68 @@ def paper_soak(
         console.print(line)
 
 
+def _run_dry_report(
+    settings: Settings,
+    manager: PositionManager,
+) -> list[str]:
+    """Run a dry-run readiness report without executing any trade."""
+    simulator = try_create_transaction_simulator()
+    balance = try_create_balance_lookup()
+    holdings = try_create_holdings_lookup()
+
+    env = evaluate_env_readiness()
+
+    helius_key = "present" if any(i.present for i in env.items if i.name == "HELIUS_API_KEY") else "MISSING"
+    pub_key = "present" if any(i.present for i in env.items if i.name == "TRADING_WALLET_PUBLIC_KEY") else "MISSING"
+    priv_key = "present" if any(i.present for i in env.items if i.name == "TRADING_WALLET_PRIVATE_KEY") else "MISSING"
+
+    report = asyncio.run(
+        evaluate_micro_live_readiness(
+            settings,
+            position_manager=manager,
+            wallet_balance_lookup=balance,
+            transaction_simulator=simulator,
+            wallet_holdings_lookup=holdings,
+            circuit_breaker=LiveCircuitBreaker(),
+        )
+    )
+
+    lines = [
+        "═══ Live Dry-Run Report ═══",
+        f"Execution mode:           {settings.execution.mode}",
+        f"Live trading enabled:     {settings.execution.mode == 'live'}",
+        f"HELIUS_API_KEY:           {helius_key}",
+        f"TRADING_WALLET_PUBLIC_KEY:{pub_key}",
+        f"TRADING_WALLET_PRIVATE_KEY:{priv_key}",
+        f"Guardrail state:          {'READY' if report.checks[0].ok else 'BLOCKED'}",
+        f"  diagnostics:            {','.join(report.checks[0].diagnostics) if report.checks[0].diagnostics else 'none'}",
+        f"Preflight state:          {'READY' if report.checks[2].ok else 'BLOCKED'}",
+        f"  diagnostics:            {','.join(report.checks[2].diagnostics) if report.checks[2].diagnostics else 'none'}",
+        f"Position reconciliation:  {'READY' if report.checks[3].ok else 'BLOCKED'}",
+        f"  diagnostics:            {','.join(report.checks[3].diagnostics) if report.checks[3].diagnostics else 'none'}",
+    ]
+
+    all_ready = report.ready and settings.execution.mode == "live"
+    if all_ready:
+        lines.append("Verdict:                  COMMAND WOULD PROCEED")
+    else:
+        blockers: list[str] = []
+        if settings.execution.mode != "live":
+            blockers.append("execution_mode_not_live")
+        if any(not c.ok for c in report.checks):
+            for check in report.checks:
+                if not check.ok:
+                    for diag in check.diagnostics:
+                        if diag not in blockers:
+                            blockers.append(diag)
+        lines.append(f"Verdict:                  BLOCKED")
+        if blockers:
+            lines.append(f"  blocking reasons:       {','.join(blockers)}")
+
+    lines.append("═══════════════════════════")
+    return lines
+
+
 @app.command("env-readiness")
 def env_readiness() -> None:
     report = evaluate_env_readiness()
@@ -1898,9 +1960,14 @@ def live_readiness(
 def live_exit(
     mint: str = typer.Option(..., "--mint", help="Mint address of the existing position to exit."),
     db_path: str | None = typer.Option(None, help="Optional SQLite path override."),
+    dry_run: bool = typer.Option(False, "--dry-run", help="Dry-run mode: report readiness only, do not execute."),
 ) -> None:
     settings = load_settings()
     manager = PositionManager(resolve_db_path(db_path), settings)
+    if dry_run:
+        for line in _run_dry_report(settings, manager):
+            console.print(line)
+        return
     adapter = JupiterLiveExecutionAdapter(settings=settings, circuit_breaker=LiveCircuitBreaker())
     result = asyncio.run(
         execute_guarded_live_exit(
@@ -1923,9 +1990,14 @@ def live_buy(
     mint: str = typer.Option(..., "--mint", help="Mint address to buy."),
     amount_sol: float = typer.Option(..., "--amount-sol", min=0.000001, help="Requested SOL size."),
     db_path: str | None = typer.Option(None, help="Optional SQLite path override."),
+    dry_run: bool = typer.Option(False, "--dry-run", help="Dry-run mode: report readiness only, do not execute."),
 ) -> None:
     settings = load_settings()
     manager = PositionManager(resolve_db_path(db_path), settings)
+    if dry_run:
+        for line in _run_dry_report(settings, manager):
+            console.print(line)
+        return
     adapter = JupiterLiveExecutionAdapter(settings=settings, circuit_breaker=LiveCircuitBreaker())
     result = asyncio.run(
         execute_guarded_live_buy(
