@@ -125,7 +125,7 @@ class JupiterLiveExecutionAdapter(ExecutionAdapter):
 
         if self._jito_enabled:
             diagnostics.append("jito_attempted")
-            jito_result = await self._jito_client.submit_bundle(
+            jito_result = await self._jito_client._submit_bundle_for_guarded_adapter(
                 [transaction],
                 tip_lamports=self._jito_tip_lamports,
                 validator_tip_account=self._jito_validator_tip_account,

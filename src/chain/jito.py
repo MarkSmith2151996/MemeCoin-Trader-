@@ -88,6 +88,22 @@ class JitoBlockEngineClient:
         tip_lamports: int | None = None,
         validator_tip_account: str | None = None,
     ) -> JitoSubmitResult:
+        """Fail closed for direct callers; guarded adapters use the private transport path."""
+        request = self.build_bundle_request(
+            transactions,
+            tip_lamports=tip_lamports,
+            validator_tip_account=validator_tip_account,
+        )
+        return self._failure("direct_jito_submission_blocked", request)
+
+    async def _submit_bundle_for_guarded_adapter(
+        self,
+        transactions: list[str | bytes],
+        *,
+        tip_lamports: int | None = None,
+        validator_tip_account: str | None = None,
+    ) -> JitoSubmitResult:
+        """Transport-only path for JupiterLiveExecutionAdapter after safety checks."""
         request = self.build_bundle_request(
             transactions,
             tip_lamports=tip_lamports,

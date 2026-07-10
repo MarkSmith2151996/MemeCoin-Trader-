@@ -118,7 +118,7 @@ def test_successful_response_parsing() -> None:
         http_client = RecordingClient(FakeResponse(200, {"result": {"bundleId": "bundle-123"}}))
         client = JitoBlockEngineClient(endpoint="https://jito.example/api/v1/bundles", http_client=http_client)
 
-        result = await client.submit_bundle(["tx-1"], tip_lamports=10_000)
+        result = await client._submit_bundle_for_guarded_adapter(["tx-1"], tip_lamports=10_000)
 
         assert result.ok is True
         assert result.bundle_id == "bundle-123"
@@ -134,7 +134,7 @@ def test_non_200_response_degrades_gracefully() -> None:
     async def run() -> None:
         client = JitoBlockEngineClient(http_client=RecordingClient(FakeResponse(503, {"error": "busy"})))
 
-        result = await client.submit_bundle(["tx-1"])
+        result = await client._submit_bundle_for_guarded_adapter(["tx-1"])
 
         assert result.ok is False
         assert result.bundle_id is None
@@ -148,7 +148,7 @@ def test_timeout_and_provider_exception_degrade_gracefully() -> None:
     async def run_timeout() -> None:
         client = JitoBlockEngineClient(http_client=RecordingClient(httpx.TimeoutException("slow")))
 
-        result = await client.submit_bundle(["tx-1"])
+        result = await client._submit_bundle_for_guarded_adapter(["tx-1"])
 
         assert result.ok is False
         assert result.error == "request timed out"
@@ -156,7 +156,7 @@ def test_timeout_and_provider_exception_degrade_gracefully() -> None:
     async def run_provider_error() -> None:
         client = JitoBlockEngineClient(http_client=RecordingClient(RuntimeError("boom")))
 
-        result = await client.submit_bundle(["tx-1"])
+        result = await client._submit_bundle_for_guarded_adapter(["tx-1"])
 
         assert result.ok is False
         assert result.error == "provider exception: boom"
@@ -174,8 +174,8 @@ def test_malformed_response_degrades_gracefully() -> None:
             http_client=RecordingClient(FakeResponse(200, {"result": {"no_bundle": True}}))
         )
 
-        bad_json_result = await bad_json_client.submit_bundle(["tx-1"])
-        missing_bundle_result = await missing_bundle_client.submit_bundle(["tx-1"])
+        bad_json_result = await bad_json_client._submit_bundle_for_guarded_adapter(["tx-1"])
+        missing_bundle_result = await missing_bundle_client._submit_bundle_for_guarded_adapter(["tx-1"])
 
         assert bad_json_result.ok is False
         assert bad_json_result.error == "malformed json response"
@@ -185,20 +185,17 @@ def test_malformed_response_degrades_gracefully() -> None:
     asyncio.run(run())
 
 
-def test_no_wallet_or_private_key_required_and_no_real_network_calls() -> None:
+def test_direct_jito_submission_is_blocked_without_network_call() -> None:
     async def run() -> None:
         http_client = RecordingClient(FakeResponse(200, {"result": "bundle-456"}))
         client = JitoBlockEngineClient(http_client=http_client)
 
         result = await client.submit_bundle([b"unsigned-serialized-transaction"])
 
-        assert result.ok is True
-        assert len(http_client.calls) == 1
-        used_url, used_payload = http_client.calls[0]
-        assert used_url == client.endpoint
-        assert "private" not in str(used_payload).lower()
-        assert "secret" not in str(used_payload).lower()
-        assert used_payload["method"] == "sendBundle"
+        assert result.ok is False
+        assert result.error == "direct_jito_submission_blocked"
+        assert len(http_client.calls) == 0
+        assert "unsigned-serialized-transaction" not in str(result)
 
     asyncio.run(run())
 
