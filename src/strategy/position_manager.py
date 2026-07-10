@@ -117,6 +117,18 @@ class PositionManager:
         self._cache[mint] = closed
         await self._persist(closed)
 
+    async def get_paper_positions(self) -> list[Position]:
+        """Return all open positions with mode == 'paper'."""
+        all_open = await self.get_all_open()
+        return [p for p in all_open if p.mode == "paper"]
+
+    async def close_paper_positions(self) -> int:
+        """Close all open paper positions. Returns count closed. Never touches live positions."""
+        paper_positions = await self.get_paper_positions()
+        for position in paper_positions:
+            await self.close_position(position.mint_address)
+        return len(paper_positions)
+
     async def total_exposure_sol(self) -> float:
         positions = await self.get_all_open()
         return round(sum(position.amount_sol * position.remaining_sell_pct for position in positions), 6)

@@ -2100,5 +2100,54 @@ def live_buy(
             console.print(line)
 
 
+@app.command("paper-state")
+def paper_state(
+    cleanup: bool = typer.Option(False, "--cleanup", help="Close all open paper positions."),
+    confirm: bool = typer.Option(False, "--confirm", help="Required confirmation for cleanup."),
+    db_path: str | None = typer.Option(None, help="Optional SQLite path override."),
+) -> None:
+    """Inspect or clean up paper-mode positions. Read-only by default."""
+    settings = load_settings()
+    runtime_db_path = resolve_db_path(db_path)
+    asyncio.run(init_db(runtime_db_path))
+    manager = PositionManager(runtime_db_path, settings)
+
+    if cleanup:
+        if not confirm:
+            asyncio.run(_print_paper_state(manager))
+            console.print("\n[yellow]Use --confirm to close all paper positions. This does not affect live positions.[/yellow]")
+            return
+
+        count = asyncio.run(manager.close_paper_positions())
+        remaining = asyncio.run(manager.get_all_open())
+        live_count = sum(1 for p in remaining if p.mode == "live")
+        console.print(f"Closed {count} paper position(s). {live_count} live position(s) untouched.")
+        return
+
+    asyncio.run(_print_paper_state(manager))
+
+
+async def _print_paper_state(manager: PositionManager) -> None:
+    """Print paper positions table to console."""
+    all_open = await manager.get_all_open()
+    paper_positions = [p for p in all_open if p.mode == "paper"]
+    live_positions = [p for p in all_open if p.mode == "live"]
+
+    console.print(f"Open paper positions: {len(paper_positions)}")
+    console.print(f"Open live positions:  {len(live_positions)}")
+    console.print(f"Total open positions: {len(all_open)}")
+
+    if paper_positions:
+        console.print("\n--- Paper Positions ---")
+        for pos in sorted(paper_positions, key=lambda p: p.opened_at):
+            console.print(
+                f"  mint={pos.mint_address[:16]}  "
+                f"sol={pos.amount_sol:.4f}  "
+                f"tokens={pos.token_amount:.0f}  "
+                f"price={pos.entry_price_sol:.8f}  "
+                f"opened={pos.opened_at.strftime('%H:%M:%S')}"
+            )
+
+
 if __name__ == "__main__":
     app()
