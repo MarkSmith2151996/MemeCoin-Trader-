@@ -219,6 +219,30 @@ class SoakRunRecord(BaseModel):
     readiness_json: str = "[]"
 
 
+class PaperDecisionRecord(BaseModel):
+    """Persisted safe telemetry for one paper candidate decision."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    id: str = Field(default_factory=lambda: str(uuid4()))
+    recorded_at: str = Field(default_factory=lambda: datetime.now(UTC).isoformat())
+    cycle_id: str = ""
+    execution_mode: str = "paper"
+    risk_profile: str = "strict"
+    mint_address: str = ""
+    symbol: str | None = None
+    name: str | None = None
+    source: str = "unknown"
+    source_count: int = 1
+    candidate_mode: str = "unknown"
+    decision: str = "rejected"
+    action_outcome: str = "rejected"
+    primary_reason: str = "unknown"
+    attention_score: int = 0
+    risk_score: float | None = None
+    diagnostics_json: str = "{}"
+
+
 class SwapQuote(BaseModel):
     """Execution quote for a potential swap."""
 

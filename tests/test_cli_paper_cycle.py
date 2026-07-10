@@ -6,7 +6,7 @@ from typer.testing import CliRunner
 
 import src.cli as cli_module
 from src.core.config import RiskConfig
-from src.core.database import init_db, record_position
+from src.core.database import get_recent_paper_decisions, init_db, record_position
 from src.core.models import CheckResult, Position, RiskAssessment, Signal, SignalSource as SignalSourceEnum, SignalType, TokenInfo
 from src.monitoring.dashboard import load_open_positions, load_recent_trades
 from src.risk.rugcheck import RugCheckResult
@@ -200,12 +200,20 @@ def test_paper_cycle_persists_accepted_and_rejected_fake_signals(tmp_path: Path)
 
         trades = load_recent_trades(db_path, limit=5)
         positions = load_open_positions(db_path)
+        decisions = await get_recent_paper_decisions(db_path, limit=10)
 
         assert len(trades) == 1
         assert trades[0].mint_address == "accepted-mint"
         assert trades[0].mode == "paper"
         assert len(positions) == 1
         assert positions[0].mint_address == "accepted-mint"
+        assert len(decisions) == 2
+        assert {d.action_outcome for d in decisions} == {"traded", "rejected"}
+        accepted = next(d for d in decisions if d.action_outcome == "traded")
+        rejected = next(d for d in decisions if d.action_outcome == "rejected")
+        assert accepted.mint_address == "accepted-mint"
+        assert accepted.primary_reason == "traded"
+        assert rejected.primary_reason == "honeypot_check_failed"
 
     asyncio.run(run())
 
@@ -344,6 +352,7 @@ def test_paper_cycle_capacity_blockers_report_current_open_positions(tmp_path: P
         )
 
         safe_lines = blocked_summary.safe_lines()
+        decisions = await get_recent_paper_decisions(db_path, limit=10)
 
         assert first_summary.open_positions == 1
         assert blocked_summary.signals_accepted == 0
@@ -359,6 +368,34 @@ def test_paper_cycle_capacity_blockers_report_current_open_positions(tmp_path: P
         assert "persisted_open_positions=1" in safe_lines
         assert "configured_max_open_positions=1" in safe_lines
         assert "capacity_blocked_candidates=1" in safe_lines
+        blocked = next(d for d in decisions if d.mint_address == "capacity-blocked")
+        assert blocked.action_outcome == "capacity-blocked"
+        assert blocked.primary_reason == "max_open_positions_reached"
+
+    asyncio.run(run())
+
+
+def test_paper_cycle_persists_safe_skipped_reason(tmp_path: Path) -> None:
+    async def run() -> None:
+        db_path = tmp_path / "skipped-data.db"
+        source = FakeSignalSource([[build_signal("skipped-mint", passes=True, confidence=0.0)]])
+
+        summary = await cli_module.run_bounded_paper_cycle(
+            max_signals=1,
+            timeout_seconds=0.1,
+            db_path=db_path,
+            sources=[source],
+            poll_interval_s=0.0,
+        )
+        decisions = await get_recent_paper_decisions(db_path, limit=10)
+
+        assert summary.signals_rejected == 1
+        assert len(decisions) == 1
+        decision = decisions[0]
+        assert decision.action_outcome == "skipped"
+        assert decision.primary_reason == "position_size_zero"
+        assert "private_key" not in decision.diagnostics_json.lower()
+        assert "api_key" not in decision.diagnostics_json.lower()
 
     asyncio.run(run())
 

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import sqlite3
 from collections import Counter
@@ -11,6 +12,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from time import monotonic
 from typing import Any
+from uuid import uuid4
 
 import aiosqlite
 
@@ -18,8 +20,8 @@ import typer
 from rich.console import Console
 
 from src.core.config import Settings, load_settings
-from src.core.database import get_recent_soak_runs, init_db, record_soak_run, record_trade
-from src.core.models import PaperFillQuality, Position, PositionStatus, SoakRunRecord
+from src.core.database import get_recent_paper_decisions, get_recent_soak_runs, init_db, record_paper_decision, record_soak_run, record_trade
+from src.core.models import PaperDecisionRecord, PaperFillQuality, Position, PositionStatus, SoakRunRecord
 from src.execution.base import ExecutionAdapter
 from src.execution.live_buy import execute_guarded_live_buy
 from src.execution.live_circuit_breaker import LiveCircuitBreaker
@@ -398,6 +400,7 @@ async def run_bounded_paper_cycle(
     rejected_candidate_diagnostics: list[dict[str, object]] = []
     accepted_trades_by_id: dict[str, Any] = {}
     termination_reason = "timeout"
+    cycle_id = str(uuid4())
 
     await aggregator.start()
     try:
@@ -489,6 +492,14 @@ async def run_bounded_paper_cycle(
         accepted_candidate_diagnostics,
         rejected_candidate_diagnostics,
     )
+    await _persist_paper_decisions(
+        runtime_db_path,
+        cycle_id=cycle_id,
+        execution_mode=runtime_settings.execution.mode,
+        risk_profile=normalized_risk_profile,
+        accepted=accepted_candidate_diagnostics,
+        rejected=rejected_candidate_diagnostics,
+    )
     candidate_mode_counts = _candidate_mode_counts(accepted_candidate_diagnostics, rejected_candidate_diagnostics)
     if normalized_risk_profile == "discovery":
         for diagnostic in accepted_candidate_diagnostics:
@@ -544,6 +555,81 @@ async def run_bounded_paper_cycle(
         persisted_open_positions=persisted_open_positions,
         configured_max_open_positions=runtime_settings.position.max_open_positions,
         capacity_blocked_candidates=rejection_reasons.get("max_open_positions_reached", 0),
+    )
+
+
+async def _persist_paper_decisions(
+    runtime_db_path: Path,
+    *,
+    cycle_id: str,
+    execution_mode: str,
+    risk_profile: str,
+    accepted: list[dict[str, object]],
+    rejected: list[dict[str, object]],
+) -> None:
+    for diagnostic in [*accepted, *rejected]:
+        try:
+            await record_paper_decision(
+                runtime_db_path,
+                _paper_decision_record(
+                    diagnostic,
+                    cycle_id=cycle_id,
+                    execution_mode=execution_mode,
+                    risk_profile=risk_profile,
+                ),
+            )
+        except Exception as exc:  # pragma: no cover - defensive persistence fallback
+            logger.warning("Failed to persist paper decision telemetry for %s: %s", diagnostic.get("mint", "unknown"), exc)
+
+
+def _paper_decision_record(
+    diagnostic: dict[str, object],
+    *,
+    cycle_id: str,
+    execution_mode: str,
+    risk_profile: str,
+) -> PaperDecisionRecord:
+    diagnostics_payload = {
+        "rank": diagnostic.get("rank"),
+        "failed_check": diagnostic.get("failed_check"),
+        "rejection_reason": diagnostic.get("rejection_reason"),
+        "holder_policy_state": diagnostic.get("holder_policy_state"),
+        "creator_policy_state": diagnostic.get("creator_policy_state"),
+        "unique_buyers_policy_state": diagnostic.get("unique_buyers_policy_state"),
+        "authority_policy_state": diagnostic.get("authority_policy_state"),
+        "honeypot_policy_state": diagnostic.get("honeypot_policy_state"),
+        "metadata_completeness_state": diagnostic.get("metadata_completeness_state"),
+        "social_signal_state": diagnostic.get("social_signal_state"),
+        "source_count": diagnostic.get("source_count"),
+        "sources": list(diagnostic.get("sources", ())) if isinstance(diagnostic.get("sources"), (list, tuple)) else [],
+        "attention_reasons": list(diagnostic.get("attention_reasons", ())) if isinstance(diagnostic.get("attention_reasons"), (list, tuple)) else [],
+        "narrative_tags": list(diagnostic.get("narrative_tags", ())) if isinstance(diagnostic.get("narrative_tags"), (list, tuple)) else [],
+        "main_warnings": list(diagnostic.get("main_warnings", ())) if isinstance(diagnostic.get("main_warnings"), (list, tuple)) else [],
+    }
+    primary_reason = str(
+        diagnostic.get("rejection_reason")
+        or diagnostic.get("failed_check")
+        or diagnostic.get("action_outcome")
+        or diagnostic.get("decision")
+        or "unknown"
+    )
+    source_count = diagnostic.get("source_count")
+    return PaperDecisionRecord(
+        cycle_id=cycle_id,
+        execution_mode=execution_mode,
+        risk_profile=risk_profile,
+        mint_address=str(diagnostic.get("mint") or diagnostic.get("mint_address") or ""),
+        symbol=_stringish(diagnostic.get("symbol")) if isinstance(diagnostic.get("symbol"), str) else None,
+        name=_stringish(diagnostic.get("name")) if isinstance(diagnostic.get("name"), str) else None,
+        source=str(diagnostic.get("source") or "unknown"),
+        source_count=int(source_count) if isinstance(source_count, int) else 1,
+        candidate_mode=str(diagnostic.get("candidate_mode") or "unknown"),
+        decision=str(diagnostic.get("decision") or "unknown"),
+        action_outcome=str(diagnostic.get("action_outcome") or "unknown"),
+        primary_reason=primary_reason,
+        attention_score=int(diagnostic.get("attention_score") or 0) if isinstance(diagnostic.get("attention_score"), (int, float)) else 0,
+        risk_score=float(diagnostic.get("risk_score")) if isinstance(diagnostic.get("risk_score"), (int, float)) else None,
+        diagnostics_json=json.dumps(diagnostics_payload, sort_keys=True),
     )
 
 

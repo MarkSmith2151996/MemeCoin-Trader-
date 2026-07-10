@@ -49,6 +49,15 @@ async def reconcile_positions(
     *,
     material_balance_ratio: float = 0.05,
 ) -> PositionReconciliationReport:
+    local_positions = await position_manager.get_all_open()
+    live_positions = [p for p in local_positions if p.mode == "live"]
+    if not live_positions:
+        return PositionReconciliationReport(
+            ok=True,
+            diagnostics=("no_live_positions_to_reconcile",),
+            mismatches=(),
+        )
+
     if wallet_holdings_lookup is None:
         return PositionReconciliationReport(
             ok=False,
@@ -56,7 +65,6 @@ async def reconcile_positions(
             mismatches=(),
         )
 
-    local_positions = await position_manager.get_all_open()
     try:
         wallet_holdings = await wallet_holdings_lookup()
     except Exception:
@@ -70,14 +78,6 @@ async def reconcile_positions(
         return PositionReconciliationReport(
             ok=False,
             diagnostics=("wallet_holdings_unknown",),
-            mismatches=(),
-        )
-
-    live_positions = [p for p in local_positions if p.mode == "live"]
-    if not live_positions:
-        return PositionReconciliationReport(
-            ok=True,
-            diagnostics=("no_live_positions_to_reconcile",),
             mismatches=(),
         )
 

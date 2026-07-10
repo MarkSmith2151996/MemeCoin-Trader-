@@ -6,7 +6,7 @@ from pathlib import Path
 
 import aiosqlite
 
-from src.core.models import Position, SoakRunRecord, Trade
+from src.core.models import PaperDecisionRecord, Position, SoakRunRecord, Trade
 
 
 SCHEMA = (
@@ -40,6 +40,28 @@ SCHEMA = (
       realized_pnl_sol REAL NOT NULL,
       partial_exits_json TEXT NOT NULL,
       close_price_sol REAL
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS paper_decisions (
+      id TEXT PRIMARY KEY,
+      recorded_at TEXT NOT NULL,
+      cycle_id TEXT NOT NULL,
+      execution_mode TEXT NOT NULL,
+      risk_profile TEXT NOT NULL,
+      mint_address TEXT NOT NULL,
+      symbol TEXT,
+      name TEXT,
+      source TEXT NOT NULL,
+      source_count INTEGER NOT NULL,
+      candidate_mode TEXT NOT NULL,
+      decision TEXT NOT NULL,
+      action_outcome TEXT NOT NULL,
+      primary_reason TEXT NOT NULL,
+      attention_score INTEGER NOT NULL,
+      risk_score REAL,
+      diagnostics_json TEXT NOT NULL,
+      record_json TEXT NOT NULL
     )
     """,
     """
@@ -132,6 +154,46 @@ async def record_position(path: str | Path, position: Position) -> None:
             ),
         )
         await db.commit()
+
+
+async def record_paper_decision(path: str | Path, record: PaperDecisionRecord) -> None:
+    async with aiosqlite.connect(path) as db:
+        await db.execute(
+            """
+            INSERT OR REPLACE INTO paper_decisions VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                record.id,
+                record.recorded_at,
+                record.cycle_id,
+                record.execution_mode,
+                record.risk_profile,
+                record.mint_address,
+                record.symbol,
+                record.name,
+                record.source,
+                record.source_count,
+                record.candidate_mode,
+                record.decision,
+                record.action_outcome,
+                record.primary_reason,
+                record.attention_score,
+                record.risk_score,
+                record.diagnostics_json,
+                record.model_dump_json(),
+            ),
+        )
+        await db.commit()
+
+
+async def get_recent_paper_decisions(path: str | Path, limit: int = 50) -> list[PaperDecisionRecord]:
+    async with aiosqlite.connect(path) as db:
+        cursor = await db.execute(
+            "SELECT record_json FROM paper_decisions ORDER BY recorded_at DESC LIMIT ?",
+            (limit,),
+        )
+        rows = await cursor.fetchall()
+    return [PaperDecisionRecord.model_validate_json(row[0]) for row in rows]
 
 
 async def record_soak_run(path: str | Path, record: SoakRunRecord) -> None:

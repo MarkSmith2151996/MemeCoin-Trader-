@@ -1026,10 +1026,18 @@ def test_paper_report_readiness_matches_standalone_defaults(tmp_path: Path) -> N
 
     assert report_result.exit_code == 0
     assert live_result.exit_code == 0
-    assert "position_reconciliation=ok diagnostics=no_live_positions_to_reconcile" in live_result.stdout
-    assert "circuit_breaker=ok diagnostics=paper_mode_unaffected" in live_result.stdout
-    assert "position_reconciliation=ok diagnostics=no_live_positions_to_reconcile" in report_result.stdout
-    assert "circuit_breaker=ok diagnostics=paper_mode_unaffected" in report_result.stdout
+    live_lines = live_result.stdout.splitlines()
+    for prefix in (
+        "micro_live_ready=",
+        "guardrails=",
+        "execution_config=",
+        "preflight=",
+        "position_reconciliation=",
+        "circuit_breaker=",
+        "health=",
+    ):
+        matching = next(line for line in live_lines if line.startswith(prefix))
+        assert matching in report_result.stdout
 
 
 # --- MT-124: paper-soak diagnostics persistence ---
