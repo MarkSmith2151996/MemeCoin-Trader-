@@ -15,6 +15,7 @@ import aiosqlite
 
 from src.core.models import Signal
 from src.signals.base import SignalSource
+from src.signals.modes import classify_candidate_mode
 
 
 PROMOTIONAL_IDENTITY_TOKENS = {
@@ -48,6 +49,7 @@ class SignalAggregator:
         self._last_source_failures: dict[str, int] = {}
         self._last_raw_signal_count = 0
         self._last_composite_count = 0
+        self._last_candidate_mode_counts: dict[str, int] = {}
         self._last_social_credibility: dict[str, object] | None = None
 
     async def start(self) -> None:
@@ -66,6 +68,7 @@ class SignalAggregator:
             self._last_source_failures = {}
             self._last_raw_signal_count = 0
             self._last_composite_count = 0
+            self._last_candidate_mode_counts = {}
             self._last_social_credibility = None
             return []
 
@@ -92,6 +95,7 @@ class SignalAggregator:
             for signal in opportunities
             if isinstance(signal.payload.get("source_count"), int) and signal.payload["source_count"] > 1
         )
+        self._last_candidate_mode_counts = self._candidate_mode_counts(opportunities)
         self._last_social_credibility = self._aggregate_social_credibility(raw_signals)
         return list(opportunities)
 
@@ -105,6 +109,7 @@ class SignalAggregator:
             "source_failures": dict(sorted(self._last_source_failures.items())),
             "raw_signal_count": self._last_raw_signal_count,
             "composite_opportunities": self._last_composite_count,
+            "candidate_mode_counts": dict(sorted(self._last_candidate_mode_counts.items())),
             "ranked_opportunities": len(self._latest_opportunities),
         }
         if self._last_social_credibility is not None:
@@ -159,12 +164,12 @@ class SignalAggregator:
 
     def _decorate_cluster_signal(self, cluster: list[Signal]) -> Signal:
         signal = self._composite_signal(cluster) if len(cluster) > 1 else cluster[0]
-        context = self._pump_fun_identity_context(cluster)
-        if context is None:
-            return signal
-
         payload = dict(signal.payload) if isinstance(signal.payload, dict) else {}
-        payload["pump_fun_identity_context"] = context
+        context = self._pump_fun_identity_context(cluster)
+        if context is not None:
+            payload["pump_fun_identity_context"] = context
+
+        payload["candidate_mode"] = self._candidate_mode(signal, cluster, payload).value
         return signal.model_copy(update={"payload": payload})
 
     def _composite_signal(self, cluster: list[Signal]) -> Signal:
@@ -347,6 +352,38 @@ class SignalAggregator:
         if current is None:
             return candidate
         return candidate if tier_rank.get(candidate, -1) > tier_rank.get(current, -1) else current
+
+    def _candidate_mode_counts(self, signals: Iterable[Signal]) -> dict[str, int]:
+        counts: dict[str, int] = defaultdict(int)
+        for signal in signals:
+            payload = signal.payload if isinstance(signal.payload, dict) else {}
+            candidate_mode = payload.get("candidate_mode")
+            if isinstance(candidate_mode, str) and candidate_mode:
+                counts[candidate_mode] += 1
+        return dict(counts)
+
+    def _candidate_mode(
+        self,
+        signal: Signal,
+        cluster: list[Signal],
+        payload: dict[str, object],
+    ):
+        classification_payload = dict(payload)
+        if (
+            signal.source.value == "PUMP_FUN"
+            and len(cluster) == 1
+            and "source_context_hint" not in classification_payload
+        ):
+            # Single-source pump.fun opportunities are launch-style unless explicit migration markers say otherwise.
+            classification_payload["source_context_hint"] = "single-source-launch"
+
+        return classify_candidate_mode(
+            {
+                "source": signal.source.value,
+                "type": signal.type.value,
+                "payload": classification_payload,
+            }
+        )
 
     async def _log_signals(self, signals: list[Signal]) -> None:
         for signal in signals:

@@ -225,6 +225,7 @@ def test_pump_fun_promotional_identity_adds_ranking_context_without_rejecting_si
         assert context["weak_identity_name"] is True
         assert "partial_metadata" in context["reasons"]
         assert "weak_identity" in context["reasons"]
+        assert ranked[0].payload["candidate_mode"] == "launch"
         assert ranked[0].confidence == original.confidence
         assert ranked[0].weight == original.weight
 
@@ -244,7 +245,73 @@ def test_non_pump_fun_signal_does_not_receive_pump_fun_identity_context() -> Non
         ranked = await aggregator.poll_all()
 
         assert len(ranked) == 1
+        assert ranked[0].payload["candidate_mode"] == "unknown"
         assert "pump_fun_identity_context" not in ranked[0].payload
+
+    asyncio.run(run())
+
+
+def test_pump_fun_migration_candidate_carries_migration_mode() -> None:
+    async def run() -> None:
+        signal = build_signal(
+            mint="mint-migration",
+            source=SignalSourceEnum.PUMP_FUN,
+            confidence=0.7,
+            observed_at=BASE_TIME,
+        ).model_copy(update={"type": SignalType.GRADUATION})
+        signal.payload.update({"txType": "migrate", "pool": "raydium", "symbol": "GRAD"})
+        aggregator = SignalAggregator([FakeSource("pump_fun", [signal])])
+
+        ranked = await aggregator.poll_all()
+
+        assert len(ranked) == 1
+        assert ranked[0].payload["candidate_mode"] == "migration"
+
+    asyncio.run(run())
+
+
+def test_single_source_pump_fun_create_style_signal_carries_launch_mode() -> None:
+    async def run() -> None:
+        signal = build_signal(
+            mint="mint-launch-mode",
+            source=SignalSourceEnum.PUMP_FUN,
+            confidence=0.7,
+            observed_at=BASE_TIME,
+        )
+        signal.payload.update({"txType": "create", "pool": "pump", "symbol": "LAUNCH"})
+        aggregator = SignalAggregator([FakeSource("pump_fun", [signal])])
+
+        ranked = await aggregator.poll_all()
+
+        assert len(ranked) == 1
+        assert ranked[0].payload["candidate_mode"] == "launch"
+
+    asyncio.run(run())
+
+
+def test_composite_opportunity_preserves_mode_deterministically() -> None:
+    async def run() -> None:
+        pump_fun_signal = build_signal(
+            mint="mint-composite-mode",
+            source=SignalSourceEnum.PUMP_FUN,
+            confidence=0.6,
+            observed_at=BASE_TIME,
+        )
+        pump_fun_signal.payload.update({"txType": "create", "pool": "pump", "symbol": "LAUNCH"})
+        onchain_signal = build_signal(
+            mint="mint-composite-mode",
+            source=SignalSourceEnum.ONCHAIN,
+            confidence=0.5,
+            observed_at=BASE_TIME + timedelta(seconds=5),
+        )
+        aggregator = SignalAggregator([FakeSource("pump_fun", [pump_fun_signal]), FakeSource("onchain", [onchain_signal])])
+
+        ranked = await aggregator.poll_all()
+        diagnostics = aggregator.diagnostics()
+
+        assert len(ranked) == 1
+        assert ranked[0].payload["candidate_mode"] == "launch"
+        assert diagnostics["candidate_mode_counts"] == {"launch": 1}
 
     asyncio.run(run())
 
