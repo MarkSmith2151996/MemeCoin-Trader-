@@ -1516,15 +1516,17 @@ def test_paper_soak_audit_includes_all_diagnostic_sections(tmp_path: Path) -> No
         assert "Candidates rejected:" in joined
         assert "Paper trades entered:" in joined
         assert "Skipped trades:" in joined
-        assert "Blocked trades (capacity):" in joined
         assert "Guardrail diagnostics:" in joined
         assert "Circuit breaker (paper):" in joined
         assert "Health status:" in joined
         assert "Live readiness:" in joined
         assert "does not affect paper mode" in joined
         assert "Source failures:" in joined
-        assert "Risk rejection breakdown:" in joined
-        assert "Stale data warnings:" in joined
+        assert "Risk rejections:" in joined
+        assert "honeypot_check_failed: 1" in joined
+        assert "Portfolio/capacity blocks:" in joined
+        assert "Missing/unknown data blocks:" in joined
+        assert "Execution/adapter failures:" in joined
 
         assert audit.cycle.signals_collected == 2
         assert audit.cycle.signals_accepted == 1
@@ -1581,3 +1583,43 @@ def test_paper_soak_cli_prints_audit_sections(tmp_path: Path, monkeypatch) -> No
     assert "Guardrail diagnostics:" in result.stdout
     assert "Circuit breaker (paper):" in result.stdout
     assert "paper_mode_unaffected" in result.stdout
+
+
+def test_paper_soak_capacity_audit_details(tmp_path: Path) -> None:
+    """Capacity blocks show configured max, current open, and blocked count."""
+    async def run() -> None:
+        db_path = tmp_path / "capacity-audit.db"
+        constrained = cli_module.load_settings().model_copy(
+            update={
+                "position": cli_module.load_settings().position.model_copy(
+                    update={"max_open_positions": 1}
+                )
+            }
+        )
+        first = await cli_module.run_bounded_paper_cycle(
+            max_signals=1, timeout_seconds=0.1, db_path=db_path,
+            settings=constrained,
+            sources=[FakeSignalSource([[build_signal("seed", passes=True)]])],
+            poll_interval_s=0.0,
+        )
+        blocked = await cli_module.run_bounded_paper_cycle(
+            max_signals=1, timeout_seconds=0.1, db_path=db_path,
+            settings=constrained,
+            sources=[FakeSignalSource([[build_signal("blocked", passes=True)]])],
+            poll_interval_s=0.0,
+        )
+        audit = cli_module.PaperSoakAudit(
+            cycle=blocked,
+            health_ok=True, health_message="ok",
+            guardrail_diagnostics=("paper_mode_unaffected",),
+            circuit_breaker_diagnostics=("paper_mode_unaffected",),
+            readiness_checks=(),
+        )
+        lines = "\n".join(audit.lines())
+        assert "Portfolio/capacity blocks:" in lines
+        assert "max_open_positions_reached: 1" in lines
+        assert "configured_max_open_positions=1" in lines
+        assert "starting_open_positions=1" in lines
+        assert "persisted_open_positions=1" in lines
+
+    asyncio.run(run())

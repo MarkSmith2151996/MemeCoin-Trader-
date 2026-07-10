@@ -1676,7 +1676,6 @@ class PaperSoakAudit:
             f"Candidates rejected:       {self.cycle.candidates_evaluated - self.cycle.passed_risk_checks}",
             f"Paper trades entered:      {self.cycle.trades_persisted}",
             f"Skipped trades:            {self.cycle.signals_accepted - self.cycle.trades_persisted}",
-            f"Blocked trades (capacity): {self.cycle.capacity_blocked_candidates}",
             f"Guardrail diagnostics:     {','.join(self.guardrail_diagnostics) if self.guardrail_diagnostics else 'none'}",
             f"Circuit breaker (paper):   {','.join(self.circuit_breaker_diagnostics) if self.circuit_breaker_diagnostics else 'clear'}",
             f"Health status:             {'ok' if self.health_ok else self.health_message}",
@@ -1695,23 +1694,54 @@ class PaperSoakAudit:
         else:
             lines.append("Source failures:           none")
 
-        if self.cycle.rejection_reasons:
-            lines.append("Risk rejection breakdown:")
-            for reason, count in sorted(self.cycle.rejection_reasons.items(), key=lambda item: -item[1]):
+        risk_reasons: dict[str, int] = {}
+        capacity_reasons: dict[str, int] = {}
+        unknown_reasons: dict[str, int] = {}
+        for reason, count in (self.cycle.rejection_reasons or {}).items():
+            if "_unknown" in reason:
+                unknown_reasons[reason] = count
+            elif "max_" in reason:
+                capacity_reasons[reason] = count
+            else:
+                risk_reasons[reason] = count
+
+        if risk_reasons:
+            lines.append("Risk rejections:")
+            for reason, count in sorted(risk_reasons.items(), key=lambda item: -item[1]):
                 lines.append(f"  - {reason}: {count}")
         else:
-            lines.append("Risk rejection breakdown:  none")
+            lines.append("Risk rejections:           none")
 
-        if self.cycle.summary_rejection_reasons:
-            stale = {r: c for r, c in self.cycle.summary_rejection_reasons.items() if "_unknown" in r}
-            if stale:
-                lines.append("Stale data warnings:")
-                for reason, count in stale.items():
-                    lines.append(f"  - {reason}: {count} candidates had unavailable data")
-            else:
-                lines.append("Stale data warnings:       none")
+        if capacity_reasons:
+            lines.append("Portfolio/capacity blocks:")
+            for reason, count in sorted(capacity_reasons.items(), key=lambda item: -item[1]):
+                if reason == "max_open_positions_reached":
+                    lines.append(f"  - max_open_positions_reached: {count}")
+                    lines.append(f"    configured_max_open_positions={self.cycle.configured_max_open_positions}")
+                    lines.append(f"    starting_open_positions={self.cycle.starting_open_positions}")
+                    lines.append(f"    persisted_open_positions={self.cycle.persisted_open_positions}")
+                else:
+                    lines.append(f"  - {reason}: {count}")
         else:
-            lines.append("Stale data warnings:       none")
+            lines.append("Portfolio/capacity blocks: none")
+
+        if unknown_reasons:
+            lines.append("Missing/unknown data blocks:")
+            for reason, count in sorted(unknown_reasons.items(), key=lambda item: -item[1]):
+                lines.append(f"  - {reason}: {count}")
+        else:
+            lines.append("Missing/unknown data blocks: none")
+
+        execution_failures: dict[str, int] = {}
+        for reason, count in (self.cycle.summary_rejection_reasons or {}).items():
+            if "execution" in reason or "adapter" in reason or "unknown_or_other" in reason:
+                execution_failures[reason] = count
+        if execution_failures:
+            lines.append("Execution/adapter failures:")
+            for reason, count in sorted(execution_failures.items(), key=lambda item: -item[1]):
+                lines.append(f"  - {reason}: {count}")
+        else:
+            lines.append("Execution/adapter failures: none")
 
         lines.append("═══════════════════════════")
         return lines
