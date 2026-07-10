@@ -5,7 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 
 from src.core.models import Position, PositionStatus
-from src.execution.price_provider import PriceProvider
+from src.execution.price_provider import PriceProvider, UnavailablePriceProvider
 from src.strategy.position_manager import PositionManager
 
 
@@ -22,6 +22,7 @@ class PaperPnLPosition:
     unrealized_pnl_sol: float | None = None
     unrealized_pnl_pct: float | None = None
     mark_unavailable: bool = False
+    mark_reason: str = "price_unavailable"
 
 
 @dataclass
@@ -35,6 +36,7 @@ class PaperPnLSummary:
     mark_unavailable_count: int = 0
     unrealized_incomplete: bool = False
     positions: list[PaperPnLPosition] = field(default_factory=list)
+    marks_mode: str = "unavailable"
 
 
 class PaperPnLCalculator:
@@ -54,10 +56,11 @@ class PaperPnLCalculator:
         summary.closed_positions = len(closed_positions)
 
         for pos in paper_positions:
-            entry_cost = pos.amount_sol * pos.remaining_sell_pct
-            summary.total_sol_deployed += entry_cost
+            summary.total_sol_deployed += pos.amount_sol * pos.remaining_sell_pct
 
         summary.realized_pnl_sol = round(sum(p.realized_pnl_sol for p in closed_positions), 9)
+
+        summary.marks_mode = "live" if (self._price_provider is not None and not isinstance(self._price_provider, UnavailablePriceProvider)) else "unavailable"
 
         unrealized_total = 0.0
         any_mark_unavailable = False
@@ -75,21 +78,25 @@ class PaperPnLCalculator:
             )
 
             if pos.status == PositionStatus.CLOSED:
-                if pos.close_price_sol is not None and pos.close_price_sol > 0:
-                    pnl_pos.realized_pnl_sol = pos.realized_pnl_sol
                 summary.positions.append(pnl_pos)
                 continue
 
-            mark = None
-            if self._price_provider is not None and pos.status != PositionStatus.CLOSED:
-                mark = await self._price_provider.get_current_price(pos.mint_address)
+            if self._price_provider is not None:
+                result = await self._price_provider.get_price_with_diagnostic(pos.mint_address)
+                mark = result.price_sol
+                pnl_pos.mark_reason = result.reason
+            else:
+                mark = None
+                pnl_pos.mark_reason = "price_unavailable"
 
             if mark is not None and mark > 0:
                 pnl_pos.mark_price_sol = mark
                 pnl_pos.unrealized_pnl_sol = round(pos.token_amount * mark - pos.amount_sol, 9)
-                pnl_pos.unrealized_pnl_pct = round(
-                    ((mark - pos.entry_price_sol) / pos.entry_price_sol) * 100, 2
-                ) if pos.entry_price_sol > 0 else None
+                pnl_pos.unrealized_pnl_pct = (
+                    round(((mark - pos.entry_price_sol) / pos.entry_price_sol) * 100, 2)
+                    if pos.entry_price_sol > 0
+                    else None
+                )
                 unrealized_total += pnl_pos.unrealized_pnl_sol
             else:
                 pnl_pos.mark_unavailable = True

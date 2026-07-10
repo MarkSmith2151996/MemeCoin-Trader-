@@ -34,7 +34,7 @@ from src.execution.live_readiness import evaluate_micro_live_readiness
 from src.execution.jupiter_live import JupiterLiveExecutionAdapter
 from src.execution.paper import PaperExecutionAdapter
 from src.execution.paper_pnl import PaperPnLCalculator, PaperPnLSummary
-from src.execution.price_provider import UnavailablePriceProvider
+from src.execution.price_provider import DexScreenerPriceProvider, UnavailablePriceProvider
 from src.monitoring.dashboard import resolve_db_path
 from src.monitoring.health import check_health
 from src.risk.rugcheck import RugCheckClient
@@ -2153,8 +2153,10 @@ async def _print_paper_state(manager: PositionManager) -> None:
 
 
 def _format_pnl_summary(summary: PaperPnLSummary) -> None:
+    marks_label = "[green]live[/green]" if summary.marks_mode == "live" else "[yellow]unavailable[/yellow]"
     summary_line = (
         f"[bold]Paper PnL Summary[/bold]\n"
+        f"  Marks: {marks_label}\n"
         f"  Total paper positions: {summary.total_positions}\n"
         f"  Open: {summary.open_positions}  |  Closed: {summary.closed_positions}\n"
         f"  Total SOL deployed (open): {summary.total_sol_deployed:.6f}\n"
@@ -2176,19 +2178,24 @@ def _format_pnl_summary(summary: PaperPnLSummary) -> None:
         console.print("\n--- Per-Position Detail ---")
         for pos in sorted(summary.positions, key=lambda p: p.mint_address):
             status_icon = "[green]OPEN[/green]" if pos.status == PositionStatus.OPEN else "[red]CLOSED[/red]"
-            pnl_str = _fmt_pnl(pos.realized_pnl_sol) if pos.status == PositionStatus.CLOSED else (
-                "[yellow]mark_unavailable[/yellow]" if pos.mark_unavailable else _fmt_pnl(pos.unrealized_pnl_sol or 0.0)
-            )
+            if pos.status == PositionStatus.CLOSED:
+                pnl_str = _fmt_pnl(pos.realized_pnl_sol)
+            elif pos.mark_unavailable:
+                pnl_str = f"[yellow]unavailable ({pos.mark_reason})[/yellow]"
+            else:
+                pnl_str = _fmt_pnl(pos.unrealized_pnl_sol or 0.0)
+
             price_str = (
                 f"entry={pos.entry_price_sol:.10f}"
                 if pos.mark_price_sol is None
                 else f"entry={pos.entry_price_sol:.10f} mark={pos.mark_price_sol:.10f}"
             )
+            reason_str = f"  reason={pos.mark_reason}" if pos.mark_reason != "ok" and pos.mark_reason != "live_dexscreener" else ""
             console.print(
                 f"  mint={pos.mint_address[:16]}  {status_icon}  "
                 f"sol={pos.amount_sol:.4f}  tokens={pos.token_amount:.0f}  "
                 f"{price_str}  "
-                f"pnl={pnl_str}"
+                f"pnl={pnl_str}{reason_str}"
             )
 
 
@@ -2202,6 +2209,7 @@ def _fmt_pnl(value: float | None) -> str:
 
 @app.command("paper-pnl")
 def paper_pnl(
+    marks: str = typer.Option("unavailable", "--marks", help="Mark price source: 'unavailable' (default, no network) or 'live' (DexScreener read-only)."),
     db_path: str | None = typer.Option(None, help="Optional SQLite path override."),
 ) -> None:
     """Show paper PnL summary with per-position detail."""
@@ -2209,7 +2217,13 @@ def paper_pnl(
     runtime_db_path = resolve_db_path(db_path)
     asyncio.run(init_db(runtime_db_path))
     manager = PositionManager(runtime_db_path, settings)
-    calculator = PaperPnLCalculator(manager, price_provider=UnavailablePriceProvider())
+
+    if marks == "live":
+        provider = DexScreenerPriceProvider()
+    else:
+        provider = UnavailablePriceProvider()
+
+    calculator = PaperPnLCalculator(manager, price_provider=provider)
     summary = asyncio.run(calculator.compute_summary())
     _format_pnl_summary(summary)
 
@@ -2218,6 +2232,7 @@ def paper_pnl(
 def paper_close(
     mint: str = typer.Option("", "--mint", help="Mint address to close."),
     price: float | None = typer.Option(None, "--price", help="Manual exit price in SOL."),
+    use_mark: bool = typer.Option(False, "--use-mark", help="Attempt to use a live DexScreener mark price if no --price given."),
     close_all: bool = typer.Option(False, "--all", help="Close all open paper positions."),
     confirm: bool = typer.Option(False, "--confirm", help="Required confirmation for --all."),
     db_path: str | None = typer.Option(None, help="Optional SQLite path override."),
@@ -2239,8 +2254,14 @@ def paper_close(
 
         closed_count = 0
         paper_positions = asyncio.run(manager.get_paper_positions())
+        price_provider = DexScreenerPriceProvider() if use_mark else None
         for pos in paper_positions:
-            result = asyncio.run(manager.close_position(pos.mint_address, exit_price_sol=price))
+            exit_price = price
+            if exit_price is None and use_mark:
+                result = asyncio.run(price_provider.get_current_price(pos.mint_address))
+                if result is not None and result > 0:
+                    exit_price = result
+            result = asyncio.run(manager.close_position(pos.mint_address, exit_price_sol=exit_price))
             if result is not None:
                 closed_count += 1
         remaining = asyncio.run(manager.get_all_open())
@@ -2264,14 +2285,13 @@ def paper_close(
     resolved_price = price
     if resolved_price is None:
         resolved_price = position.close_price_sol
+    if resolved_price is None or resolved_price <= 0 and use_mark:
+        live_provider = DexScreenerPriceProvider()
+        mark = asyncio.run(live_provider.get_current_price(mint))
+        if mark is not None and mark > 0:
+            resolved_price = mark
     if resolved_price is None or resolved_price <= 0:
-        calculator = PaperPnLCalculator(manager, price_provider=UnavailablePriceProvider())
-        summary = asyncio.run(calculator.compute_summary())
-        matching = [p for p in summary.positions if p.mint_address == mint]
-        if matching and not matching[0].mark_unavailable:
-            resolved_price = matching[0].mark_price_sol
-    if resolved_price is None or resolved_price <= 0:
-        console.print("[red]No exit price available. Provide --price or ensure a mark price is accessible.[/red]")
+        console.print("[red]No exit price available. Provide --price or use --use-mark to attempt a live price fetch.[/red]")
         raise typer.Exit(code=1)
 
     closed = asyncio.run(manager.close_position(mint, exit_price_sol=resolved_price))
