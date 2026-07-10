@@ -179,8 +179,8 @@ def test_live_buy_blocked_has_preflight_explainer(tmp_path: Path) -> None:
     assert "Operator Next Steps" in output
 
 
-def test_live_buy_blocked_shows_missing_public_key(tmp_path: Path) -> None:
-    """Blocked live-buy lists TRADING_WALLET_PUBLIC_KEY as missing gate."""
+def test_live_buy_blocked_shows_private_key_as_gate(tmp_path: Path) -> None:
+    """Blocked live-buy lists TRADING_WALLET_PRIVATE_KEY as missing gate."""
     result = runner.invoke(
         cli_module.app,
         [
@@ -192,8 +192,7 @@ def test_live_buy_blocked_shows_missing_public_key(tmp_path: Path) -> None:
     )
     assert result.exit_code == 0
     output = result.stdout
-    assert "TRADING_WALLET_PUBLIC_KEY" in output
-    assert "balance/holdings" in output
+    assert "TRADING_WALLET_PRIVATE_KEY" in output
 
 
 def test_live_buy_blocked_shows_missing_private_key_as_gate(tmp_path: Path) -> None:

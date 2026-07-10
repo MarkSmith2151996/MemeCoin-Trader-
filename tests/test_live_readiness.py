@@ -204,7 +204,8 @@ def test_live_readiness_cli_reports_not_ready_by_default(tmp_path: Path) -> None
     assert "micro_live_ready=NOT READY" in result.stdout
     assert "guardrails=not_ready" in result.stdout
     assert "preflight=not_ready" in result.stdout
-    assert "position_reconciliation=not_ready diagnostics=wallet_holdings_lookup_unavailable" in result.stdout
+    assert "position_reconciliation=ok diagnostics=no_live_positions_to_reconcile" in result.stdout
+    assert "no_live_positions_to_reconcile" in result.stdout
     assert "circuit_breaker=ok diagnostics=paper_mode_unaffected" in result.stdout
     assert "I_UNDERSTAND_THIS_CAN_LOSE_REAL_SOL" not in result.stdout
 

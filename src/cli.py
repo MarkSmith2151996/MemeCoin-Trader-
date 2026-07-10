@@ -2008,7 +2008,9 @@ def live_readiness(
     db_path: str | None = typer.Option(None, help="Optional SQLite path override."),
 ) -> None:
     settings = load_settings()
-    manager = PositionManager(resolve_db_path(db_path), settings)
+    runtime_db_path = resolve_db_path(db_path)
+    asyncio.run(init_db(runtime_db_path))
+    manager = PositionManager(runtime_db_path, settings)
     simulator = try_create_transaction_simulator()
     balance = try_create_balance_lookup()
     holdings = try_create_holdings_lookup()
@@ -2033,7 +2035,9 @@ def live_exit(
     dry_run: bool = typer.Option(False, "--dry-run", help="Dry-run mode: report readiness only, do not execute."),
 ) -> None:
     settings = load_settings()
-    manager = PositionManager(resolve_db_path(db_path), settings)
+    runtime_db_path = resolve_db_path(db_path)
+    asyncio.run(init_db(runtime_db_path))
+    manager = PositionManager(runtime_db_path, settings)
     if dry_run:
         for line in _run_dry_report(settings, manager):
             console.print(line)
@@ -2067,7 +2071,9 @@ def live_buy(
     dry_run: bool = typer.Option(False, "--dry-run", help="Dry-run mode: report readiness only, do not execute."),
 ) -> None:
     settings = load_settings()
-    manager = PositionManager(resolve_db_path(db_path), settings)
+    runtime_db_path = resolve_db_path(db_path)
+    asyncio.run(init_db(runtime_db_path))
+    manager = PositionManager(runtime_db_path, settings)
     if dry_run:
         for line in _run_dry_report(settings, manager):
             console.print(line)
