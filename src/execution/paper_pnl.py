@@ -40,6 +40,10 @@ class PaperPnLSummary:
     positions: list[PaperPnLPosition] = field(default_factory=list)
     marks_mode: str = "unavailable"
     fill_quality_counts: dict[str, int] = field(default_factory=dict)
+    usable_mark_count: int = 0
+    unusable_mark_count: int = 0
+    mark_reason_counts: dict[str, int] = field(default_factory=dict)
+    report_confidence: str = "low_confidence"
 
 
 class PaperPnLCalculator:
@@ -68,6 +72,8 @@ class PaperPnLCalculator:
         unrealized_total = 0.0
         any_mark_unavailable = False
         mark_unavailable_count = 0
+        usable_mark_count = 0
+        mark_reason_counts: dict[str, int] = {}
 
         for pos in all_paper:
             pnl_pos = PaperPnLPosition(
@@ -120,6 +126,7 @@ class PaperPnLCalculator:
                     else None
                 )
                 pnl_pos.pnl_confidence = "high_confidence"
+                usable_mark_count += 1
                 unrealized_total += pnl_pos.unrealized_pnl_sol
             else:
                 pnl_pos.mark_unavailable = True
@@ -127,14 +134,22 @@ class PaperPnLCalculator:
                 any_mark_unavailable = True
                 mark_unavailable_count += 1
 
+            if pnl_pos.mark_unavailable:
+                mark_reason_counts[pnl_pos.mark_reason] = mark_reason_counts.get(pnl_pos.mark_reason, 0) + 1
+
             summary.positions.append(pnl_pos)
 
         summary.mark_unavailable_count = mark_unavailable_count
+        summary.usable_mark_count = usable_mark_count
+        summary.unusable_mark_count = mark_unavailable_count
+        summary.mark_reason_counts = mark_reason_counts
         if any_mark_unavailable:
             summary.unrealized_incomplete = True
             summary.unrealized_pnl_sol = None
         else:
             summary.unrealized_pnl_sol = round(unrealized_total, 9)
+
+        summary.report_confidence = _classify_report_confidence(summary)
 
         summary.total_sol_deployed = round(summary.total_sol_deployed, 6)
         return summary
@@ -161,4 +176,14 @@ def _confidence_for_fill_quality(fill_quality: PaperFillQuality) -> str:
         return "high_confidence"
     if fill_quality == PaperFillQuality.UNPRICED:
         return "unavailable"
+    return "low_confidence"
+
+
+def _classify_report_confidence(summary: PaperPnLSummary) -> str:
+    if summary.open_positions == 0:
+        return "high_confidence"
+    if summary.usable_mark_count == summary.open_positions and summary.unusable_mark_count == 0:
+        return "high_confidence"
+    if summary.usable_mark_count > 0:
+        return "partial"
     return "low_confidence"

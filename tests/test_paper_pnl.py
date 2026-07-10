@@ -17,7 +17,7 @@ from src.core.config import load_settings
 from src.core.database import get_recent_soak_runs, init_db, record_soak_run
 from src.core.models import PaperFillQuality, Position, PositionStatus, Signal, SignalSource, SignalType, SoakRunRecord, Trade
 from src.execution.paper_pnl import PaperPnLCalculator
-from src.execution.price_provider import FakePriceProvider, UnavailablePriceProvider
+from src.execution.price_provider import FakePriceProvider, PriceResult, UnavailablePriceProvider
 from src.strategy.position_manager import PositionManager
 
 
@@ -351,6 +351,103 @@ def test_paper_report_excludes_archived_legacy_rows(tmp_path: Path) -> None:
     assert "Open paper positions: 1" in result.stdout
     assert "Archived legacy paper positions excluded: 1" in result.stdout
     assert "legacy/unknown (legacy_unknown): 0" in result.stdout
+
+
+def test_paper_pnl_confidence_high_partial_low(tmp_path: Path) -> None:
+    settings = load_settings()
+
+    high_db = tmp_path / "confidence_high.db"
+    asyncio.run(init_db(high_db))
+    high_manager = PositionManager(high_db, settings)
+    _paper_position(high_manager, "ConfidenceHigh111111111111111111111111111111", amount_sol=1.0, price_sol=0.00001)
+    high_summary = asyncio.run(
+        PaperPnLCalculator(
+            high_manager,
+            price_provider=FakePriceProvider({"ConfidenceHigh111111111111111111111111111111": 0.00002}),
+        ).compute_summary()
+    )
+    assert high_summary.report_confidence == "high_confidence"
+    assert high_summary.usable_mark_count == 1
+    assert high_summary.unusable_mark_count == 0
+
+    partial_db = tmp_path / "confidence_partial.db"
+    asyncio.run(init_db(partial_db))
+    partial_manager = PositionManager(partial_db, settings)
+    _paper_position(partial_manager, "ConfidencePartial111111111111111111111111111", amount_sol=1.0, price_sol=0.00001)
+    _paper_position(partial_manager, "ConfidenceMissing111111111111111111111111111", amount_sol=1.0, price_sol=0.00001)
+    partial_summary = asyncio.run(
+        PaperPnLCalculator(
+            partial_manager,
+            price_provider=FakePriceProvider({"ConfidencePartial111111111111111111111111111": 0.00002}),
+        ).compute_summary()
+    )
+    assert partial_summary.report_confidence == "partial"
+    assert partial_summary.usable_mark_count == 1
+    assert partial_summary.mark_reason_counts["price_unavailable"] == 1
+
+    low_db = tmp_path / "confidence_low.db"
+    asyncio.run(init_db(low_db))
+    low_manager = PositionManager(low_db, settings)
+    legacy_position = Position(
+        mint_address="ConfidenceLegacy11111111111111111111111111111",
+        entry_trade_id="legacy-trade-9",
+        amount_sol=1.0,
+        token_amount=0.0,
+        entry_price_sol=1.0,
+        mode="paper",
+    )
+    from src.core.database import record_position
+    asyncio.run(record_position(low_db, legacy_position))
+    low_summary = asyncio.run(PaperPnLCalculator(low_manager, price_provider=UnavailablePriceProvider()).compute_summary())
+    assert low_summary.report_confidence == "low_confidence"
+    assert low_summary.usable_mark_count == 0
+    assert low_summary.mark_reason_counts["legacy_low_confidence"] == 1
+
+
+def test_paper_report_live_marks_show_coverage_and_hints(tmp_path: Path, monkeypatch) -> None:
+    db = tmp_path / "report_hints.db"
+    asyncio.run(init_db(db))
+    settings = load_settings()
+    manager = PositionManager(db, settings)
+
+    _paper_position(manager, "HintGood111111111111111111111111111111111111", amount_sol=1.0, price_sol=0.00001)
+    _paper_position(manager, "HintNoPairs111111111111111111111111111111111", amount_sol=1.0, price_sol=0.00001)
+    legacy_position = Position(
+        mint_address="HintLegacy1111111111111111111111111111111111",
+        entry_trade_id="legacy-trade-10",
+        amount_sol=1.0,
+        token_amount=0.0,
+        entry_price_sol=1.0,
+        mode="paper",
+    )
+    from src.core.database import record_position
+    asyncio.run(record_position(db, legacy_position))
+
+    class StubDexProvider:
+        async def get_price_with_diagnostic(self, mint_address: str) -> PriceResult:
+            if mint_address == "HintGood111111111111111111111111111111111111":
+                return PriceResult(0.00002, "live_dexscreener")
+            if mint_address == "HintNoPairs111111111111111111111111111111111":
+                return PriceResult(None, "no_pairs")
+            return PriceResult(None, "price_unavailable")
+
+        async def get_current_price(self, mint_address: str) -> float | None:
+            result = await self.get_price_with_diagnostic(mint_address)
+            return result.price_sol
+
+    monkeypatch.setattr(cli_module, "DexScreenerPriceProvider", StubDexProvider)
+
+    result = runner.invoke(cli_module.app, ["paper-report", "--marks", "live", "--db-path", str(db)])
+    assert result.exit_code == 0
+    assert "Mark Coverage" in result.stdout
+    assert "Usable marks: 1" in result.stdout
+    assert "Without usable marks: 2" in result.stdout
+    assert "no_pairs: 1" in result.stdout
+    assert "legacy_low_confidence: 1" in result.stdout
+    assert "report confidence:" in result.stdout.lower()
+    assert "partial" in result.stdout.lower()
+    assert "paper-state --legacy" in result.stdout
+    assert "DexScreener mark coverage is missing" in result.stdout
 
 
 def test_paper_fill_rejects_invalid_price(tmp_path: Path) -> None:

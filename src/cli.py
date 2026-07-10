@@ -2275,6 +2275,41 @@ def _fill_quality_confidence(fill_quality: PaperFillQuality) -> str:
     return "low_confidence"
 
 
+def _report_confidence_label(confidence: str) -> str:
+    if confidence == "high_confidence":
+        return "[green]high_confidence[/green]"
+    if confidence == "partial":
+        return "[yellow]partial[/yellow]"
+    return "[red]low_confidence[/red]"
+
+
+def _print_mark_coverage(summary: PaperPnLSummary) -> None:
+    console.print("\n--- Mark Coverage ---")
+    console.print(f"  Open positions considered: {summary.open_positions}")
+    console.print(f"  Usable marks: {summary.usable_mark_count}")
+    console.print(f"  Without usable marks: {summary.unusable_mark_count}")
+    for reason, count in sorted(summary.mark_reason_counts.items()):
+        console.print(f"  {reason}: {count}")
+    console.print(f"  Report confidence: {_report_confidence_label(summary.report_confidence)}")
+
+
+def _paper_report_hints(summary: PaperPnLSummary, capacity_blocked: int = 0) -> list[str]:
+    hints: list[str] = []
+    if summary.open_positions == 0:
+        hints.append("No open paper positions: run `paper-soak --max-signals 50` to generate a fresh bounded paper session.")
+    if summary.mark_reason_counts.get("legacy_low_confidence", 0) > 0:
+        hints.append("Legacy rows dominate current paper data: run `paper-state --legacy` and use `paper-state --archive-legacy --confirm` if you want to exclude them from current reports.")
+    if summary.mark_reason_counts.get("unpriced_entry", 0) > 0:
+        hints.append("Some paper entries were unpriced at fill time: unrealized PnL stays unavailable until future fills have quote data.")
+    if any(summary.mark_reason_counts.get(reason, 0) > 0 for reason in ("no_pairs", "no_solana_pairs")):
+        hints.append("DexScreener mark coverage is missing for some mints: these may be fake/mock mints or not yet indexed on Solana pairs.")
+    if capacity_blocked > 0:
+        hints.append("Recent paper-soak runs hit capacity blocks: inspect `paper-state` and close or archive stale paper positions before the next soak.")
+    if not hints and summary.report_confidence == "high_confidence":
+        hints.append("Current paper PnL coverage is fully priced for active positions.")
+    return hints
+
+
 def _format_pnl_summary(summary: PaperPnLSummary) -> None:
     marks_label = "[green]live[/green]" if summary.marks_mode == "live" else "[yellow]unavailable[/yellow]"
     summary_line = (
@@ -2306,6 +2341,14 @@ def _format_pnl_summary(summary: PaperPnLSummary) -> None:
         ):
             count = summary.fill_quality_counts.get(fill_quality.value, 0)
             console.print(f"  {fill_quality.value}: {count} ({_fill_quality_label(fill_quality)})")
+
+    _print_mark_coverage(summary)
+
+    hints = _paper_report_hints(summary)
+    if hints:
+        console.print("\n--- Actionable Hints ---")
+        for hint in hints:
+            console.print(f"  - {hint}")
 
     if summary.positions:
         console.print("\n--- Per-Position Detail ---")
@@ -2584,6 +2627,8 @@ def paper_report(
     archived_paper_positions = asyncio.run(manager.get_archived_paper_positions())
 
     total_trades = _count_paper_trades(runtime_db_path)
+    latest_runs = asyncio.run(get_recent_soak_runs(runtime_db_path, limit=1))
+    latest_capacity_blocked = latest_runs[0].capacity_blocked if latest_runs else 0
 
     best_trade: float | None = None
     worst_trade: float | None = None
@@ -2625,6 +2670,15 @@ def paper_report(
     ):
         count = pnl_summary.fill_quality_counts.get(fill_quality.value, 0)
         console.print(f"  {_fill_quality_label(fill_quality)} ({fill_quality.value}): {count}")
+    console.print(f"  Report confidence: {_report_confidence_label(pnl_summary.report_confidence)}")
+    console.print("")
+
+    console.print("[bold]Mark Coverage[/bold]")
+    console.print(f"  Open positions considered: {pnl_summary.open_positions}")
+    console.print(f"  Usable marks: {pnl_summary.usable_mark_count}")
+    console.print(f"  Without usable marks: {pnl_summary.unusable_mark_count}")
+    for reason, count in sorted(pnl_summary.mark_reason_counts.items()):
+        console.print(f"  {reason}: {count}")
     console.print("")
 
     console.print("[bold]Best/Worst Closed Trades[/bold]")
@@ -2650,6 +2704,11 @@ def paper_report(
 
     console.print("[bold]Paper-Soak Diagnostics[/bold]")
     _display_soak_diagnostics(runtime_db_path)
+    console.print("")
+
+    console.print("[bold]Actionable Hints[/bold]")
+    for hint in _paper_report_hints(pnl_summary, capacity_blocked=latest_capacity_blocked):
+        console.print(f"  - {hint}")
     console.print("")
 
     console.print("[bold]Live Readiness (diagnostic only — does not affect paper mode)[/bold]")
