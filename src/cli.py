@@ -26,6 +26,7 @@ from src.execution.live_guardrails import evaluate_live_guardrails
 from src.execution.env_readiness import evaluate_env_readiness
 from src.execution.helius_providers import (
     try_create_balance_lookup,
+    try_create_holdings_lookup,
     try_create_transaction_simulator,
 )
 from src.execution.live_readiness import evaluate_micro_live_readiness
@@ -1848,12 +1849,14 @@ def live_readiness(
     manager = PositionManager(resolve_db_path(db_path), settings)
     simulator = try_create_transaction_simulator()
     balance = try_create_balance_lookup()
+    holdings = try_create_holdings_lookup()
     report = asyncio.run(
         evaluate_micro_live_readiness(
             settings,
             position_manager=manager,
             wallet_balance_lookup=balance,
             transaction_simulator=simulator,
+            wallet_holdings_lookup=holdings,
             circuit_breaker=LiveCircuitBreaker(),
         )
     )
