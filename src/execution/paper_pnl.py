@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from datetime import UTC, datetime
 
 from src.core.models import PaperFillQuality, Position, PositionStatus
 from src.execution.price_provider import PriceProvider, UnavailablePriceProvider
@@ -25,6 +26,7 @@ class PaperPnLPosition:
     mark_unavailable: bool = False
     mark_reason: str = "price_unavailable"
     pnl_confidence: str = "low_confidence"
+    opened_at: datetime | None = None
 
 
 @dataclass
@@ -85,6 +87,7 @@ class PaperPnLCalculator:
                 fill_quality=pos.fill_quality,
                 close_price_sol=pos.close_price_sol,
                 realized_pnl_sol=pos.realized_pnl_sol,
+                opened_at=pos.opened_at,
             )
 
             if pos.status == PositionStatus.OPEN:

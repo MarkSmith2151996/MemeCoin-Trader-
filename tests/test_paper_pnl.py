@@ -6,6 +6,7 @@ All tests use CLI invocation with temporary DBs — no real trades or wallet acc
 from __future__ import annotations
 
 import asyncio
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import aiosqlite
@@ -1165,3 +1166,232 @@ def test_paper_report_no_soak_data_shows_hint(tmp_path: Path) -> None:
     result = runner.invoke(cli_module.app, ["paper-report", "--db-path", str(db)])
     assert result.exit_code == 0
     assert "run 'paper-soak" in result.stdout
+
+
+def test_position_age_label_fresh(tmp_path: Path) -> None:
+    db = tmp_path / "age_fresh.db"
+    asyncio.run(init_db(db))
+    manager = PositionManager(db, load_settings())
+
+    trade = Trade(
+        mint_address="FreshAge11111111111111111111111111111111111",
+        side="BUY", amount_sol=1.0, price_sol=0.00001, mode="paper",
+    )
+    asyncio.run(manager.open_position(trade, None))
+
+    positions = asyncio.run(manager.get_paper_positions())
+    assert len(positions) == 1
+    label = cli_module._position_age_label(positions[0])
+    assert label == "fresh", f"expected fresh got {label}"
+
+
+def test_position_age_label_stale(tmp_path: Path) -> None:
+    db = tmp_path / "age_stale.db"
+    asyncio.run(init_db(db))
+    old = datetime.now(UTC) - timedelta(hours=48)
+    old_position = Position(
+        mint_address="StaleAge1111111111111111111111111111111111",
+        entry_trade_id="stale-trade",
+        amount_sol=1.0, token_amount=100000.0, entry_price_sol=0.00001,
+        mode="paper", fill_quality=PaperFillQuality.PRICED_QUOTE,
+        opened_at=old,
+    )
+    from src.core.database import record_position
+    asyncio.run(record_position(db, old_position))
+    manager = PositionManager(db, load_settings())
+    positions = asyncio.run(manager.get_paper_positions())
+    assert len(positions) == 1
+    label = cli_module._position_age_label(positions[0])
+    assert label == "stale", f"expected stale got {label}"
+
+
+def test_position_age_label_missing_mark(tmp_path: Path) -> None:
+    db = tmp_path / "age_missing_mark.db"
+    asyncio.run(init_db(db))
+    manager = PositionManager(db, load_settings())
+    unpriced_trade = Trade(
+        mint_address="MissingMark1111111111111111111111111111111",
+        side="BUY", amount_sol=1.0, token_amount=None, price_sol=None, mode="paper",
+    )
+    asyncio.run(manager.open_position(unpriced_trade, None))
+    positions = asyncio.run(manager.get_paper_positions())
+    assert len(positions) == 1
+    label = cli_module._position_age_label(positions[0])
+    assert label == "missing_mark"
+
+
+def test_position_age_label_low_confidence_fill(tmp_path: Path) -> None:
+    db = tmp_path / "age_low_confidence.db"
+    asyncio.run(init_db(db))
+    legacy_position = Position(
+        mint_address="LowConf11111111111111111111111111111111111",
+        entry_trade_id="legacy-trade-age",
+        amount_sol=1.0, token_amount=100000.0, entry_price_sol=1.0,
+        mode="paper",
+    )
+    from src.core.database import record_position
+    asyncio.run(record_position(db, legacy_position))
+    manager = PositionManager(db, load_settings())
+    positions = asyncio.run(manager.get_paper_positions())
+    assert len(positions) == 1
+    label = cli_module._position_age_label(positions[0])
+    assert label == "low_confidence_fill", f"expected low_confidence_fill got {label}"
+
+
+def test_position_age_label_aging(tmp_path: Path) -> None:
+    db = tmp_path / "age_aging.db"
+    asyncio.run(init_db(db))
+    three_hours_ago = datetime.now(UTC) - timedelta(hours=3)
+    aging_position = Position(
+        mint_address="AgingPos1111111111111111111111111111111111",
+        entry_trade_id="aging-trade",
+        amount_sol=1.0, token_amount=100000.0, entry_price_sol=0.00001,
+        mode="paper", fill_quality=PaperFillQuality.PRICED_QUOTE,
+        opened_at=three_hours_ago,
+    )
+    from src.core.database import record_position
+    asyncio.run(record_position(db, aging_position))
+    manager = PositionManager(db, load_settings())
+    positions = asyncio.run(manager.get_paper_positions())
+    assert len(positions) == 1
+    label = cli_module._position_age_label(positions[0])
+    assert label == "aging", f"expected aging got {label}"
+
+
+def test_close_suggestion_for_stale(tmp_path: Path) -> None:
+    db = tmp_path / "suggest_stale.db"
+    asyncio.run(init_db(db))
+    old = datetime.now(UTC) - timedelta(hours=48)
+    stale_pos = Position(
+        mint_address="SuggestStale111111111111111111111111111111",
+        entry_trade_id="suggest-trade",
+        amount_sol=1.0, token_amount=100000.0, entry_price_sol=0.00001,
+        mode="paper", fill_quality=PaperFillQuality.PRICED_QUOTE,
+        opened_at=old,
+    )
+    from src.core.database import record_position
+    asyncio.run(record_position(db, stale_pos))
+    manager = PositionManager(db, load_settings())
+    [pos] = asyncio.run(manager.get_paper_positions())
+    hint = cli_module._close_suggestion(pos)
+    assert "paper-close --preview" in hint
+    assert "stale" in cli_module._position_age_label(pos)
+
+
+def test_close_suggestion_for_missing_mark(tmp_path: Path) -> None:
+    db = tmp_path / "suggest_missing_mark.db"
+    asyncio.run(init_db(db))
+    manager = PositionManager(db, load_settings())
+    unpriced = Trade(
+        mint_address="SuggestUnpriced1111111111111111111111111111",
+        side="BUY", amount_sol=1.0, token_amount=None, price_sol=None, mode="paper",
+    )
+    asyncio.run(manager.open_position(unpriced, None))
+    [pos] = asyncio.run(manager.get_paper_positions())
+    hint = cli_module._close_suggestion(pos)
+    assert "unpriced" in hint
+    assert "unavailable" in hint
+
+
+def test_close_suggestion_for_fresh_is_empty(tmp_path: Path) -> None:
+    db = tmp_path / "suggest_fresh.db"
+    asyncio.run(init_db(db))
+    manager = PositionManager(db, load_settings())
+    trade = Trade(
+        mint_address="SuggestFresh1111111111111111111111111111111",
+        side="BUY", amount_sol=1.0, price_sol=0.00001, mode="paper",
+    )
+    asyncio.run(manager.open_position(trade, None))
+    [pos] = asyncio.run(manager.get_paper_positions())
+    hint = cli_module._close_suggestion(pos)
+    assert hint == ""
+
+
+def test_paper_report_shows_age_labels(tmp_path: Path) -> None:
+    db = tmp_path / "report_age_labels.db"
+    asyncio.run(init_db(db))
+    manager = PositionManager(db, load_settings())
+    trade = Trade(
+        mint_address="ReportAgeTest11111111111111111111111111111",
+        side="BUY", amount_sol=1.0, price_sol=0.00001, mode="paper",
+    )
+    asyncio.run(manager.open_position(trade, None))
+
+    result = runner.invoke(cli_module.app, ["paper-report", "--db-path", str(db)])
+    assert result.exit_code == 0
+    assert "fresh" in result.stdout
+
+
+def test_paper_report_suggestion_does_not_mutate(tmp_path: Path) -> None:
+    db = tmp_path / "suggest_no_mutate.db"
+    asyncio.run(init_db(db))
+    old = datetime.now(UTC) - timedelta(hours=48)
+    stale_pos = Position(
+        mint_address="NoMutateSuggest1111111111111111111111111111",
+        entry_trade_id="no-mutate-trade",
+        amount_sol=1.0, token_amount=100000.0, entry_price_sol=0.00001,
+        mode="paper", fill_quality=PaperFillQuality.PRICED_QUOTE,
+        opened_at=old,
+    )
+    from src.core.database import record_position
+    asyncio.run(record_position(db, stale_pos))
+
+    result = runner.invoke(cli_module.app, ["paper-report", "--db-path", str(db)])
+    assert result.exit_code == 0
+    assert "stale" in result.stdout
+    assert "paper-close --preview" in result.stdout
+
+    manager = PositionManager(db, load_settings())
+    positions = asyncio.run(manager.get_paper_positions())
+    assert len(positions) == 1
+    assert positions[0].status == PositionStatus.OPEN
+
+
+def test_paper_state_shows_age_label(tmp_path: Path) -> None:
+    db = tmp_path / "state_age_label.db"
+    asyncio.run(init_db(db))
+    manager = PositionManager(db, load_settings())
+    trade = Trade(
+        mint_address="StateAgeLabel11111111111111111111111111111",
+        side="BUY", amount_sol=1.0, price_sol=0.00001, mode="paper",
+    )
+    asyncio.run(manager.open_position(trade, None))
+
+    result = runner.invoke(cli_module.app, ["paper-state", "--db-path", str(db)])
+    assert result.exit_code == 0
+    assert "fresh" in result.stdout
+
+
+def test_paper_pnl_shows_age_label(tmp_path: Path) -> None:
+    db = tmp_path / "pnl_age_label.db"
+    asyncio.run(init_db(db))
+    manager = PositionManager(db, load_settings())
+    trade = Trade(
+        mint_address="PnlAgeLabel1111111111111111111111111111111",
+        side="BUY", amount_sol=1.0, price_sol=0.00001, mode="paper",
+    )
+    asyncio.run(manager.open_position(trade, None))
+
+    result = runner.invoke(cli_module.app, ["paper-pnl", "--db-path", str(db)])
+    assert result.exit_code == 0
+    assert "fresh" in result.stdout
+
+
+def test_position_age_label_no_secrets_printed(tmp_path: Path) -> None:
+    db = tmp_path / "age_no_secrets.db"
+    asyncio.run(init_db(db))
+    manager = PositionManager(db, load_settings())
+    trade = Trade(
+        mint_address="NoSecretsAge1111111111111111111111111111111",
+        side="BUY", amount_sol=1.0, price_sol=0.00001, mode="paper",
+    )
+    asyncio.run(manager.open_position(trade, None))
+
+    result = runner.invoke(cli_module.app, ["paper-state", "--db-path", str(db)])
+    assert result.exit_code == 0
+    for secret in ("PRIVATE_KEY", "WALLET_PRIVATE", "mnemonic", "seed phrase"):
+        assert secret.lower() not in result.stdout.lower()
+    result = runner.invoke(cli_module.app, ["paper-pnl", "--db-path", str(db)])
+    assert result.exit_code == 0
+    for secret in ("PRIVATE_KEY", "WALLET_PRIVATE", "mnemonic", "seed phrase"):
+        assert secret.lower() not in result.stdout.lower()

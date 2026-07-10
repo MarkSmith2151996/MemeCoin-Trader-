@@ -8,7 +8,7 @@ import logging
 import sqlite3
 from collections import Counter
 from dataclasses import dataclass, field
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from time import monotonic
 from typing import Any
@@ -2336,12 +2336,14 @@ async def _print_paper_state(manager: PositionManager) -> None:
     if paper_positions:
         console.print("\n--- Paper Positions ---")
         for pos in sorted(paper_positions, key=lambda p: p.opened_at):
+            age_label = _position_age_label(pos)
             console.print(
                 f"  mint={pos.mint_address[:16]}  "
                 f"sol={pos.amount_sol:.4f}  "
                 f"tokens={pos.token_amount:.0f}  "
                 f"price={pos.entry_price_sol:.8f}  "
                 f"quality={pos.fill_quality.value}  "
+                f"age={age_label}  "
                 f"opened={pos.opened_at.strftime('%H:%M:%S')}"
             )
 
@@ -2381,6 +2383,28 @@ def _fill_quality_confidence(fill_quality: PaperFillQuality) -> str:
     return "low_confidence"
 
 
+def _position_age_label(position: Position) -> str:
+    if position.fill_quality == PaperFillQuality.UNPRICED or position.entry_price_sol <= 0:
+        return "missing_mark"
+    if position.fill_quality == PaperFillQuality.LEGACY_UNKNOWN:
+        return "low_confidence_fill"
+    age = datetime.now(UTC) - position.opened_at
+    if age < timedelta(hours=1):
+        return "fresh"
+    if age < timedelta(hours=24):
+        return "aging"
+    return "stale"
+
+
+def _close_suggestion(position: Position) -> str:
+    label = _position_age_label(position)
+    if label == "stale" or label == "aging":
+        return f"Suggestion: review with `paper-close --preview --mint {position.mint_address[:16]}...`"
+    if label == "missing_mark":
+        return f"Suggestion: entry was unpriced — simulated PnL unavailable for `paper-close --preview`"
+    return ""
+
+
 def _report_confidence_label(confidence: str) -> str:
     if confidence == "high_confidence":
         return "[green]high_confidence[/green]"
@@ -2411,6 +2435,9 @@ def _paper_report_hints(summary: PaperPnLSummary, capacity_blocked: int = 0) -> 
         hints.append("DexScreener mark coverage is missing for some mints: these may be fake/mock mints or not yet indexed on Solana pairs.")
     if capacity_blocked > 0:
         hints.append("Recent paper-soak runs hit capacity blocks: inspect `paper-state` and close or archive stale paper positions before the next soak.")
+    stale_count = sum(1 for p in summary.positions if _position_age_label(p) in ("stale", "aging"))
+    if stale_count > 0:
+        hints.append(f"{stale_count} paper position(s) are stale or aging: use `paper-close --preview --mint <addr>` to review simulated close PnL before closing.")
     if not hints and summary.report_confidence == "high_confidence":
         hints.append("Current paper PnL coverage is fully priced for active positions.")
     return hints
@@ -2472,14 +2499,18 @@ def _format_pnl_summary(summary: PaperPnLSummary) -> None:
                 if pos.mark_price_sol is None
                 else f"entry={pos.entry_price_sol:.10f} mark={pos.mark_price_sol:.10f}"
             )
+            age_label = _position_age_label(pos)
             reason_str = f"  reason={pos.mark_reason}" if pos.mark_reason != "ok" and pos.mark_reason != "live_dexscreener" else ""
-            confidence_str = f"  quality={pos.fill_quality.value} confidence={pos.pnl_confidence}"
+            confidence_str = f"  quality={pos.fill_quality.value} confidence={pos.pnl_confidence} age={age_label}"
             console.print(
                 f"  mint={pos.mint_address[:16]}  {status_icon}  "
                 f"sol={pos.amount_sol:.4f}  tokens={pos.token_amount:.0f}  "
                 f"{price_str}  "
                 f"pnl={pnl_str}{confidence_str}{reason_str}"
             )
+            hint = _close_suggestion(pos)
+            if hint:
+                console.print(f"  {hint}")
 
 
 def _display_soak_diagnostics(db_path: str | Path) -> None:
@@ -2799,11 +2830,15 @@ def paper_report(
     if paper_positions:
         for pos in sorted(paper_positions, key=lambda p: p.opened_at, reverse=True)[:5]:
             status_str = "[green]OPEN[/green]"
+            age_label = _position_age_label(pos)
+            hint = _close_suggestion(pos)
             console.print(
                 f"  {pos.mint_address[:16]}  {status_str}  "
                 f"sol={pos.amount_sol:.4f}  tokens={pos.token_amount:.0f}  "
-                f"entry={pos.entry_price_sol:.10f}  quality={pos.fill_quality.value}"
+                f"entry={pos.entry_price_sol:.10f}  quality={pos.fill_quality.value}  age={age_label}"
             )
+            if hint:
+                console.print(f"    {hint}")
     else:
         console.print("  [yellow](no open paper positions)[/yellow]")
     console.print("")
