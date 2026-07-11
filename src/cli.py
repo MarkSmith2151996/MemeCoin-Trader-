@@ -670,7 +670,8 @@ def _raw_safe_recheck_snapshot(diagnostic: dict[str, object]) -> dict[str, objec
         "creator_policy_state", "creator_unknown_reason", "creator_holding_source",
         "liquidity_data_state", "liquidity_source", "liquidity_unknown_reason",
         "risk_approval_state", "rejection_reason", "failed_check", "metadata_completeness_state",
-        "rejection_mark_price_sol", "rejection_liquidity_sol",
+        "rejection_mark_price_sol", "rejection_mark_provider", "rejection_mark_timestamp",
+        "rejection_mark_missing_reason", "rejection_liquidity_sol",
     )
     snapshot = {key: diagnostic.get(key) for key in keys}
     # Normalized per-check results make later dry runs deterministic without storing provider payloads.
@@ -875,6 +876,8 @@ def _build_rejected_candidate_diagnostic(
     symbol = _stringish(_first_present(token_section, payload, keys=("symbol", "ticker", "name"))) or "unknown"
     liquidity_value = _check_metric_value(record, "liquidity_check")
     top10_value = _check_metric_value(record, "top10_holder_check")
+    rejection_mark = _rejection_mark_price(payload, metrics)
+    rejection_liquidity = _coerce_numeric(liquidity_diagnostics.get("selected_liquidity_sol", liquidity_value))
 
     return {
         "rank": rank,
@@ -892,8 +895,11 @@ def _build_rejected_candidate_diagnostic(
         "failed_check": (record.failed_check if record is not None and record.failed_check is not None else _format_rejection_reason(decision.rejection_reason)),
         "risk_check_results": record.check_results if record is not None else {},
         "rejection_reason": decision.rejection_reason or "unknown_or_other",
-        "rejection_mark_price_sol": _rejection_mark_price(payload, metrics),
-        "rejection_liquidity_sol": liquidity_diagnostics.get("selected_liquidity_sol", liquidity_value),
+        "rejection_mark_price_sol": rejection_mark,
+        "rejection_mark_provider": "signal_payload" if rejection_mark is not None else "unavailable",
+        "rejection_mark_timestamp": datetime.now(UTC).isoformat(),
+        "rejection_mark_missing_reason": None if rejection_mark is not None else "source_price_missing",
+        "rejection_liquidity_sol": rejection_liquidity,
         "risk_score": record.risk_score if record is not None else None,
         "attention_score": attention_diagnostics.get("attention_score", 0),
         "attention_tier": attention_diagnostics.get("attention_tier", "ignore"),
@@ -1020,8 +1026,13 @@ def _build_rejected_candidate_diagnostic(
 def _rejection_mark_price(payload: dict[str, object], metrics: dict[str, object]) -> float | None:
     """Keep a normalized observed SOL mark when a source already supplied one."""
     value = _first_present(metrics, payload, keys=("price_sol", "priceSol", "priceNative"))
-    price = _coerce_numeric(value)
-    return price if price is not None and price > 0 else None
+    if isinstance(value, bool) or value is None:
+        return None
+    try:
+        price = float(value)
+    except (TypeError, ValueError):
+        return None
+    return price if math.isfinite(price) and price > 0 else None
 
 
 def _build_accepted_candidate_diagnostic(

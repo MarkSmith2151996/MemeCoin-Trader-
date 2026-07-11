@@ -2499,6 +2499,35 @@ def test_rejected_outcomes_preserve_missing_baseline_and_unavailable_marks(tmp_p
     assert all(outcome.return_multiple is None for outcome in unavailable)
 
 
+def test_rejected_snapshot_persists_source_baseline_or_explicit_missing_reason(tmp_path: Path) -> None:
+    async def run() -> None:
+        db_path = tmp_path / "rejection-baseline.db"
+        marked = build_signal("baseline-marked", passes=False)
+        marked.payload["priceNative"] = "0.000012"
+        missing = build_signal("baseline-missing", passes=False)
+        await cli_module.run_bounded_paper_cycle(
+            max_signals=2,
+            timeout_seconds=0.1,
+            db_path=db_path,
+            sources=[FakeSignalSource([[marked, missing]])],
+            poll_interval_s=0.0,
+        )
+        records = await get_recent_paper_decisions(db_path, limit=10)
+        snapshots = {
+            record.mint_address: json.loads(record.diagnostics_json)["recheck_snapshot"]
+            for record in records
+        }
+        assert snapshots["baseline-marked"]["rejection_mark_price_sol"] == 0.000012
+        assert snapshots["baseline-marked"]["rejection_mark_provider"] == "signal_payload"
+        assert snapshots["baseline-marked"]["rejection_mark_missing_reason"] is None
+        assert datetime.fromisoformat(snapshots["baseline-marked"]["rejection_mark_timestamp"])
+        assert snapshots["baseline-missing"]["rejection_mark_price_sol"] is None
+        assert snapshots["baseline-missing"]["rejection_mark_provider"] == "unavailable"
+        assert snapshots["baseline-missing"]["rejection_mark_missing_reason"] == "source_price_missing"
+
+    asyncio.run(run())
+
+
 def test_rejected_outcomes_cli_is_bounded_and_read_only(tmp_path: Path) -> None:
     db = tmp_path / "rejected-outcomes-cli.db"
     asyncio.run(init_db(db))
