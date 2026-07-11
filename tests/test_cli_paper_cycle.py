@@ -2158,3 +2158,89 @@ def test_paper_decisions_export_does_not_mutate_db(tmp_path: Path) -> None:
     decisions = asyncio.run(get_recent_paper_decisions(db, limit=10))
     assert len(decisions) == 1
     assert decisions[0].action_outcome == "rejected"
+
+
+def test_snapshot_dry_run_rechecks_only_covered_rows_without_execution_or_state_changes(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    db = tmp_path / "snapshot-dry-run.db"
+    asyncio.run(init_db(db))
+    all_pass = {check_name: "pass" for check_name in cli_module._SNAPSHOT_CHECK_ORDER}
+    replayable_pass = {
+        "mint": "snapshot-pass-mint",
+        "source": "manual",
+        "rejection_reason": "prior_rejection",
+        "check_results": all_pass,
+    }
+    replayable_reject = {
+        "mint": "snapshot-reject-mint",
+        "source": "manual",
+        "rejection_reason": "top10_holder_check_failed",
+        "failed_check": "top10_holder_check",
+    }
+    for mint, diagnostics in (
+        ("snapshot-pass-mint", {"recheck_snapshot": replayable_pass, "attention_score": 91}),
+        ("snapshot-reject-mint", {"recheck_snapshot": replayable_reject, "attention_score": 12}),
+        ("legacy-mint", {}),
+    ):
+        asyncio.run(
+            record_paper_decision(
+                db,
+                PaperDecisionRecord(
+                    mint_address=mint,
+                    source="manual",
+                    action_outcome="rejected",
+                    decision="rejected",
+                    primary_reason="top10_holder_check_failed",
+                    risk_score=42.0,
+                    diagnostics_json=json.dumps(diagnostics, sort_keys=True),
+                ),
+            )
+        )
+
+    async def unexpected_execution(*args, **kwargs):
+        raise AssertionError("snapshot dry-run must not execute a swap")
+
+    async def unexpected_live_readiness(*args, **kwargs):
+        raise AssertionError("snapshot dry-run must not evaluate live readiness")
+
+    monkeypatch.setattr(cli_module.PaperExecutionAdapter, "execute_swap", unexpected_execution)
+    monkeypatch.setattr(cli_module, "execute_guarded_live_buy", unexpected_execution)
+    monkeypatch.setattr(cli_module, "evaluate_micro_live_readiness", unexpected_live_readiness)
+    before = asyncio.run(get_recent_paper_decisions(db, limit=10))
+
+    result = runner.invoke(cli_module.app, ["paper-recheck-snapshot-dry-run", "--db-path", str(db)])
+
+    after = asyncio.run(get_recent_paper_decisions(db, limit=10))
+    assert result.exit_code == 0
+    assert "Replayable snapshots: 2" in result.stdout
+    assert "Skipped missing snapshots: 1" in result.stdout
+    assert "Dry-run pass: 1" in result.stdout
+    assert "Dry-run reject: 1" in result.stdout
+    assert "top10_holder_check" in result.stdout
+    assert [record.model_dump_json() for record in after] == [record.model_dump_json() for record in before]
+    assert load_recent_trades(db, limit=10) == []
+
+
+def test_raw_safe_snapshot_captures_normalized_check_results_only() -> None:
+    snapshot = cli_module._raw_safe_recheck_snapshot(
+        {
+            "action_outcome": "rejected",
+            "mint": "safe-snapshot-mint",
+            "source": "manual",
+            "rejection_reason": "top10_holder_check_failed",
+            "risk_check_results": {
+                "top10_holder_check": {"result": "FAIL", "value": 99.0, "threshold": 50.0},
+                "liquidity_check": {"result": "PASS", "value": 100.0, "threshold": 10.0},
+                "unrelated": {"result": "PASS", "secret": "not copied"},
+            },
+        }
+    )
+
+    assert snapshot is not None
+    assert snapshot["check_results"] == {
+        "liquidity_check": "pass",
+        "top10_holder_check": "fail",
+    }
+    assert "secret" not in json.dumps(snapshot)

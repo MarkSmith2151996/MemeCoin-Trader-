@@ -22,7 +22,7 @@ from rich.console import Console
 
 from src.core.config import Settings, load_settings
 from src.core.database import get_recent_paper_decisions, get_recent_soak_runs, init_db, record_paper_decision, record_soak_run, record_trade
-from src.core.models import PaperDecisionRecord, PaperFillQuality, Position, PositionStatus, SoakRunRecord
+from src.core.models import CheckResult, PaperDecisionRecord, PaperFillQuality, Position, PositionStatus, RiskAssessment, SoakRunRecord
 from src.execution.base import ExecutionAdapter
 from src.execution.live_buy import execute_guarded_live_buy
 from src.execution.live_circuit_breaker import LiveCircuitBreaker
@@ -671,7 +671,71 @@ def _raw_safe_recheck_snapshot(diagnostic: dict[str, object]) -> dict[str, objec
         "liquidity_data_state", "liquidity_source", "liquidity_unknown_reason",
         "risk_approval_state", "rejection_reason", "failed_check", "metadata_completeness_state",
     )
-    return {key: diagnostic.get(key) for key in keys}
+    snapshot = {key: diagnostic.get(key) for key in keys}
+    # Normalized per-check results make later dry runs deterministic without storing provider payloads.
+    snapshot["check_results"] = _snapshot_check_results(diagnostic)
+    return snapshot
+
+
+_SNAPSHOT_CHECK_ORDER = (
+    "liquidity_check",
+    "top10_holder_check",
+    "creator_holding_check",
+    "age_check",
+    "unique_buyers_check",
+    "mint_authority_check",
+    "freeze_authority_check",
+    "honeypot_check",
+)
+
+
+def _snapshot_check_results(diagnostic: dict[str, object]) -> dict[str, str]:
+    """Copy only normalized normal-risk outcomes from the diagnostic record."""
+    raw = diagnostic.get("risk_check_results")
+    if not isinstance(raw, dict):
+        return {}
+    results: dict[str, str] = {}
+    for check_name in _SNAPSHOT_CHECK_ORDER:
+        entry = raw.get(check_name)
+        result = entry.get("result") if isinstance(entry, dict) else None
+        if isinstance(result, str) and result.lower() in {"pass", "fail", "unknown"}:
+            results[check_name] = result.lower()
+    return results
+
+
+def _snapshot_recheck_assessment(snapshot: dict[str, object]) -> RiskAssessment:
+    """Rebuild a fail-closed normal risk gate from a bounded normalized snapshot."""
+    raw_results = snapshot.get("check_results")
+    raw_results = raw_results if isinstance(raw_results, dict) else {}
+    checks: dict[str, CheckResult] = {check_name: CheckResult.UNKNOWN for check_name in _SNAPSHOT_CHECK_ORDER}
+    for check_name in _SNAPSHOT_CHECK_ORDER:
+        result = raw_results.get(check_name)
+        if isinstance(result, str):
+            try:
+                checks[check_name] = CheckResult(result.upper())
+            except ValueError:
+                pass
+
+    # MT-223 snapshots predate normalized per-check results. Preserve their recorded blocker
+    # while leaving every unrecorded check UNKNOWN, so historical rows remain fail-closed.
+    failed_check = snapshot.get("failed_check")
+    if isinstance(failed_check, str) and failed_check in checks:
+        checks[failed_check] = CheckResult.FAIL
+
+    return RiskAssessment(**checks)
+
+
+def _snapshot_first_failing_check(snapshot: dict[str, object], assessment: RiskAssessment) -> str:
+    for check_name in _SNAPSHOT_CHECK_ORDER:
+        if getattr(assessment, check_name) == CheckResult.FAIL:
+            return check_name
+    failed_check = snapshot.get("failed_check")
+    if isinstance(failed_check, str) and failed_check:
+        return failed_check
+    for check_name in _SNAPSHOT_CHECK_ORDER:
+        if getattr(assessment, check_name) == CheckResult.UNKNOWN:
+            return f"{check_name}_unknown"
+    return "risk_check_blocked"
 
 
 def _paper_decision_edge_display(record: PaperDecisionRecord) -> str:
@@ -825,6 +889,7 @@ def _build_rejected_candidate_diagnostic(
         "decision": "rejected" if action_outcome == "rejected" else "skipped",
         "action_outcome": action_outcome,
         "failed_check": (record.failed_check if record is not None and record.failed_check is not None else _format_rejection_reason(decision.rejection_reason)),
+        "risk_check_results": record.check_results if record is not None else {},
         "rejection_reason": decision.rejection_reason or "unknown_or_other",
         "risk_score": record.risk_score if record is not None else None,
         "attention_score": attention_diagnostics.get("attention_score", 0),
@@ -3811,6 +3876,46 @@ def paper_recheck_snapshot_readiness(
     console.print(f"  Missing snapshots (legacy): {queued - covered}")
     console.print(f"  Replayable normalized snapshots: {replayable}")
     console.print(f"  Main blockers: {dict(blockers.most_common())}")
+    console.print("[yellow]WARNING: Paper results are simulated. Not real trading advice.[/yellow]")
+
+
+@app.command("paper-recheck-snapshot-dry-run")
+def paper_recheck_snapshot_dry_run(
+    limit: int = typer.Option(500, "--limit", "-n", help="Recent persisted decisions to inspect."),
+    db_path: str | None = typer.Option(None, help="Optional SQLite path override."),
+) -> None:
+    """Replay bounded snapshot evidence through the normal risk gate without any action."""
+    runtime_db_path = resolve_db_path(db_path)
+    asyncio.run(init_db(runtime_db_path))
+    records = asyncio.run(get_recent_paper_decisions(runtime_db_path, limit=limit))
+    replayable = skipped_missing = dry_run_pass = dry_run_reject = 0
+    first_failures: Counter[str] = Counter()
+    for record in records:
+        if record.action_outcome == "traded":
+            continue
+        try:
+            diagnostics = json.loads(record.diagnostics_json)
+        except (TypeError, json.JSONDecodeError):
+            diagnostics = {}
+        snapshot = diagnostics.get("recheck_snapshot") if isinstance(diagnostics, dict) else None
+        if not isinstance(snapshot, dict) or not snapshot.get("mint") or not snapshot.get("source") or not snapshot.get("rejection_reason"):
+            skipped_missing += 1
+            continue
+        replayable += 1
+        assessment = _snapshot_recheck_assessment(snapshot)
+        if assessment.all_checks_pass:
+            dry_run_pass += 1
+        else:
+            dry_run_reject += 1
+            first_failures[_snapshot_first_failing_check(snapshot, assessment)] += 1
+
+    console.print("[bold]Paper Snapshot Dry-Run Recheck[/bold]")
+    console.print("  DISPLAY-ONLY. Replays normalized snapshot evidence through the normal risk gate; it never executes, ranks, sizes, or accepts candidates.")
+    console.print(f"  Replayable snapshots: {replayable}")
+    console.print(f"  Skipped missing snapshots: {skipped_missing}")
+    console.print(f"  Dry-run pass: {dry_run_pass}")
+    console.print(f"  Dry-run reject: {dry_run_reject}")
+    console.print(f"  First failing check: {dict(first_failures.most_common())}")
     console.print("[yellow]WARNING: Paper results are simulated. Not real trading advice.[/yellow]")
 
 
