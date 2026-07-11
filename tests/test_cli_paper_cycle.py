@@ -2523,7 +2523,44 @@ def test_rejected_snapshot_persists_source_baseline_or_explicit_missing_reason(t
         assert datetime.fromisoformat(snapshots["baseline-marked"]["rejection_mark_timestamp"])
         assert snapshots["baseline-missing"]["rejection_mark_price_sol"] is None
         assert snapshots["baseline-missing"]["rejection_mark_provider"] == "unavailable"
-        assert snapshots["baseline-missing"]["rejection_mark_missing_reason"] == "source_price_missing"
+        assert snapshots["baseline-missing"]["rejection_mark_missing_reason"] == "invalid_mint_for_mark"
+        assert snapshots["baseline-missing"]["rejection_provider_mark_status"] == "invalid_mint_for_mark"
+
+    asyncio.run(run())
+
+
+def test_rejected_snapshot_captures_read_only_provider_mark_after_rejection(tmp_path: Path) -> None:
+    async def run() -> None:
+        db_path = tmp_path / "provider-rejection-baseline.db"
+        mint = "So11111111111111111111111111111111111111112"
+        summary = await cli_module.run_bounded_paper_cycle(
+            max_signals=1,
+            timeout_seconds=0.1,
+            db_path=db_path,
+            sources=[FakeSignalSource([[build_signal(mint, passes=False)]])],
+            rejection_mark_provider=FakePriceProvider({mint: 0.00002}),
+            poll_interval_s=0.0,
+        )
+        records = await get_recent_paper_decisions(db_path, limit=1)
+        snapshot = json.loads(records[0].diagnostics_json)["recheck_snapshot"]
+
+        assert summary.signals_rejected == 1
+        assert summary.signals_accepted == 0
+        assert summary.trades_persisted == 0
+        assert snapshot["rejection_mark_price_sol"] == 0.00002
+        assert snapshot["rejection_mark_provider"] == "fake"
+        assert snapshot["rejection_provider_mark_price_sol"] == 0.00002
+        assert snapshot["rejection_provider_mark_provider"] == "fake"
+        assert snapshot["rejection_provider_mark_status"] == "ok"
+        assert datetime.fromisoformat(snapshot["rejection_provider_mark_timestamp"])
+
+        outcomes, _ = await cli_module.collect_rejected_candidate_outcomes(
+            records,
+            UnavailablePriceProvider(),
+            limit=1,
+        )
+        assert outcomes[0].baseline_mark_provider == "fake"
+        assert outcomes[0].baseline_mark_status == "ok"
 
     asyncio.run(run())
 

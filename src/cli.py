@@ -359,6 +359,7 @@ async def run_bounded_paper_cycle(
     sources: list[SignalSource] | None = None,
     execution: ExecutionAdapter | None = None,
     risk_scorer: Any = None,
+    rejection_mark_provider: PriceProvider | None = None,
     poll_interval_s: float = 1.0,
 ) -> PaperCycleSummary:
     normalized_risk_profile = normalize_risk_profile(risk_profile)
@@ -367,6 +368,7 @@ async def run_bounded_paper_cycle(
     signal_sources = list(sources) if sources is not None else build_signal_sources()
     aggregator = build_signal_aggregator(signal_sources, runtime_db_path)
     execution_adapter = execution or PaperExecutionAdapter(price_provider=DexScreenerPriceProvider())
+    baseline_mark_provider = rejection_mark_provider or DexScreenerPriceProvider()
 
     await init_db(runtime_db_path)
     initial_trade_count = _count_rows(runtime_db_path, "trades")
@@ -451,14 +453,15 @@ async def run_bounded_paper_cycle(
                     rejection_reasons[decision.rejection_reason or "unknown_or_other"] += 1
                     if record is None or record.failed_check is None:
                         summary_rejection_reasons[_format_rejection_reason(decision.rejection_reason)] += 1
-                    rejected_candidate_diagnostics.append(
-                        _build_rejected_candidate_diagnostic(
-                            rank=signals_collected,
-                            signal=signal,
-                            decision=decision,
-                            record=record,
-                        )
+                    rejected_diagnostic = _build_rejected_candidate_diagnostic(
+                        rank=signals_collected,
+                        signal=signal,
+                        decision=decision,
+                        record=record,
                     )
+                    if rejected_diagnostic["action_outcome"] == "rejected":
+                        await _capture_rejection_provider_mark(rejected_diagnostic, baseline_mark_provider)
+                    rejected_candidate_diagnostics.append(rejected_diagnostic)
                     continue
 
                 signals_accepted += 1
@@ -673,6 +676,8 @@ def _raw_safe_recheck_snapshot(diagnostic: dict[str, object]) -> dict[str, objec
         "rejection_mark_price_sol", "rejection_mark_provider", "rejection_mark_timestamp",
         "rejection_mark_missing_reason", "rejection_liquidity_sol", "rejection_baseline_price_fields",
         "rejection_baseline_liquidity_fields", "rejection_baseline_payload_provider",
+        "rejection_provider_mark_price_sol", "rejection_provider_mark_liquidity_usd",
+        "rejection_provider_mark_provider", "rejection_provider_mark_timestamp", "rejection_provider_mark_status",
     )
     snapshot = {key: diagnostic.get(key) for key in keys}
     # Normalized per-check results make later dry runs deterministic without storing provider payloads.
@@ -1068,6 +1073,53 @@ def _baseline_payload_field_coverage(payload: dict[str, object], metrics: dict[s
         "liquidity_fields": tuple(liquidity_fields),
         "provider": provider.strip() if isinstance(provider, str) and provider.strip() else "not_recorded",
     }
+
+
+def _is_markable_solana_mint(mint: object) -> bool:
+    if not isinstance(mint, str) or not 32 <= len(mint) <= 44:
+        return False
+    return all(character in "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz" for character in mint)
+
+
+async def _capture_rejection_provider_mark(diagnostic: dict[str, object], provider: PriceProvider) -> None:
+    """Attach read-only provider evidence after rejection without touching the decision path."""
+    mint = diagnostic.get("mint")
+    timestamp = datetime.now(UTC).isoformat()
+    if provider.name == "live" and not _is_markable_solana_mint(mint):
+        diagnostic.update(
+            {
+                "rejection_provider_mark_price_sol": None,
+                "rejection_provider_mark_liquidity_usd": None,
+                "rejection_provider_mark_provider": provider.name,
+                "rejection_provider_mark_timestamp": timestamp,
+                "rejection_provider_mark_status": "invalid_mint_for_mark",
+            }
+        )
+        if diagnostic.get("rejection_mark_price_sol") is None:
+            diagnostic["rejection_mark_missing_reason"] = "invalid_mint_for_mark"
+        return
+    try:
+        result = await provider.get_price_with_diagnostic(str(mint))
+    except Exception:  # pragma: no cover - defensive provider boundary
+        result = None
+    price = result.price_sol if result is not None and _is_valid_price(result.price_sol) else None
+    status = result.reason if result is not None else "provider_error"
+    diagnostic.update(
+        {
+            "rejection_provider_mark_price_sol": price,
+            "rejection_provider_mark_liquidity_usd": result.liquidity_usd if result is not None else None,
+            "rejection_provider_mark_provider": provider.name,
+            "rejection_provider_mark_timestamp": timestamp,
+            "rejection_provider_mark_status": status,
+        }
+    )
+    if price is not None:
+        diagnostic["rejection_mark_price_sol"] = price
+        diagnostic["rejection_mark_provider"] = provider.name
+        diagnostic["rejection_mark_timestamp"] = timestamp
+        diagnostic["rejection_mark_missing_reason"] = None
+    elif diagnostic.get("rejection_mark_price_sol") is None:
+        diagnostic["rejection_mark_missing_reason"] = status
 
 
 def _build_accepted_candidate_diagnostic(
@@ -4282,6 +4334,8 @@ class RejectedCandidateOutcome:
     current_liquidity_usd: float | None = None
     later_mark_provider: str = "unknown"
     later_mark_timestamp: str | None = None
+    baseline_mark_provider: str = "not_recorded"
+    baseline_mark_status: str = "not_recorded"
 
 
 def _outcome_snapshot(record: PaperDecisionRecord) -> dict[str, object] | None:
@@ -4347,6 +4401,8 @@ async def collect_rejected_candidate_outcomes(
                 current_liquidity_usd=mark.liquidity_usd,
                 later_mark_provider=price_provider.name,
                 later_mark_timestamp=datetime.now(UTC).isoformat(),
+                baseline_mark_provider=str(snapshot.get("rejection_mark_provider") or "not_recorded"),
+                baseline_mark_status=str(snapshot.get("rejection_provider_mark_status") or snapshot.get("rejection_mark_missing_reason") or "not_recorded"),
             )
         )
     return outcomes, skipped_missing
@@ -4382,7 +4438,9 @@ def paper_rejected_outcomes(
         liquidity = f"{outcome.liquidity_sol:.4f}" if outcome.liquidity_sol is not None else "unavailable"
         console.print(
             f"  mint={_short_mint(outcome.mint)} source={outcome.source} mode={outcome.mode} blocker={outcome.blocker} "
-            f"age={age} baseline={baseline} current={current} return={multiple} liquidity_at_rejection={liquidity} mark_reason={outcome.mark_reason}"
+            f"age={age} baseline={baseline} baseline_provider={outcome.baseline_mark_provider} "
+            f"baseline_status={outcome.baseline_mark_status} current={current} return={multiple} "
+            f"liquidity_at_rejection={liquidity} mark_reason={outcome.mark_reason}"
         )
     console.print("[yellow]WARNING: Paper results are simulated. Not real trading advice.[/yellow]")
 
