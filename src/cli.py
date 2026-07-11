@@ -3528,5 +3528,53 @@ def paper_attribution_readiness(
     console.print("[yellow]WARNING: Paper results are simulated. Not real profit or loss.[/yellow]")
 
 
+@app.command("paper-blockers")
+def paper_blockers(
+    limit: int = typer.Option(50, "--limit", "-n", help="Recent persisted decisions to analyze."),
+    db_path: str | None = typer.Option(None, help="Optional SQLite path override."),
+) -> None:
+    """Explain persisted paper rejection and unknown-data blockers without changing gates."""
+    runtime_db_path = resolve_db_path(db_path)
+    asyncio.run(init_db(runtime_db_path))
+    records = asyncio.run(get_recent_paper_decisions(runtime_db_path, limit=limit))
+    strict: Counter[str] = Counter()
+    unknown: Counter[str] = Counter()
+    examples: dict[str, str] = {}
+    for record in records:
+        reason = record.primary_reason or "unknown"
+        bucket = unknown if reason.endswith("_unknown") else strict
+        bucket[reason] += 1
+        examples.setdefault(reason, record.symbol or record.mint_address[:16] or "unknown")
+    console.print("[bold]Paper Rejection Blockers[/bold]")
+    console.print("  Paper-only diagnostic; strict approval is unchanged.")
+    for title, counts in (("Strict risk failures", strict), ("Unknown-data blocks", unknown)):
+        console.print(f"  [bold]{title}:[/bold]")
+        for reason, count in counts.most_common():
+            console.print(f"    {reason}: {count} (example: {examples[reason]})")
+    console.print("[yellow]WARNING: Paper results are simulated. Not real trading advice.[/yellow]")
+
+
+@app.command("paper-shadow-blockers")
+def paper_shadow_blockers(
+    limit: int = typer.Option(50, "--limit", "-n", help="Recent persisted decisions to analyze."),
+    db_path: str | None = typer.Option(None, help="Optional SQLite path override."),
+) -> None:
+    """Report counterfactual blocker removals without relaxing any actual gate."""
+    runtime_db_path = resolve_db_path(db_path)
+    asyncio.run(init_db(runtime_db_path))
+    records = asyncio.run(get_recent_paper_decisions(runtime_db_path, limit=limit))
+    reasons = Counter(record.primary_reason or "unknown" for record in records if record.action_outcome != "traded")
+    unknown = sum(count for reason, count in reasons.items() if reason.endswith("_unknown"))
+    strict = sum(count for reason, count in reasons.items() if not reason.endswith("_unknown"))
+    console.print("[bold]Paper Shadow Blocker Analysis[/bold]")
+    console.print("  HYPOTHETICAL ONLY - NOT TRADING. No risk gate, approval, or execution behavior changed.")
+    console.print(f"  Current rejected/non-traded: {sum(reasons.values())}")
+    console.print(f"  If unknown-data blockers alone were resolved: up to {unknown} candidates require re-evaluation, not automatic acceptance.")
+    console.print(f"  If strict-risk blockers alone were removed: up to {strict} candidates require re-evaluation, not automatic acceptance.")
+    for reason, count in reasons.most_common():
+        console.print(f"    {reason}: hypothetical review set {count}")
+    console.print("[yellow]WARNING: Paper results are simulated. Not real trading advice.[/yellow]")
+
+
 if __name__ == "__main__":
     app()
