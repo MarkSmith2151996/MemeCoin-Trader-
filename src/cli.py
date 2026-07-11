@@ -611,6 +611,7 @@ def _paper_decision_record(
         "authority_policy_state": diagnostic.get("authority_policy_state"),
         "honeypot_policy_state": diagnostic.get("honeypot_policy_state"),
         "risk_approval_state": diagnostic.get("risk_approval_state"),
+        "trade_id": diagnostic.get("trade_id"),
         "edge_score": diagnostic.get("edge_score"),
         "edge_breakdown": diagnostic.get("edge_breakdown"),
         "attention_quality": diagnostic.get("attention_quality"),
