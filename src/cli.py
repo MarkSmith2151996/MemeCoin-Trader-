@@ -824,6 +824,7 @@ def _build_rejected_candidate_diagnostic(
             "selected_top10_holder_pct",
             top10_value if top10_value is not None else "unknown",
         ),
+        "top10_holder_threshold_pct": holder_policy.get("top10_holder_threshold_pct"),
         "top10_holder_source": _top10_holder_source_hint(payload, record),
         "bonding_curve_addresses": tuple(holder_diagnostics.get("bonding_curve_addresses", ())),
         "local_holder_raw_account_count": holder_diagnostics.get("local_holder_raw_account_count", 0),
