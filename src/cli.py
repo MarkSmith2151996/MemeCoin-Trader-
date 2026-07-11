@@ -3629,6 +3629,21 @@ def _provider_category(provenance: object) -> str:
     return "unknown"
 
 
+def _replay_action_hint(reason: str, holder_bucket: str, provider: str, threshold_review: str) -> str:
+    """Return a display-only follow-up hint; it never changes rejection state."""
+    if provider == "unavailable":
+        return "provider_retry"
+    if provider == "missing_field":
+        return "data_fix"
+    if threshold_review == "yes":
+        return "threshold_review+full_recheck"
+    if holder_bucket == "severe_fail":
+        return "severe_skip"
+    if holder_bucket == "unknown" or provider == "legacy_unknown":
+        return "unknown_hold"
+    return "full_recheck"
+
+
 @app.command("paper-shadow-blockers")
 def paper_shadow_blockers(
     limit: int = typer.Option(50, "--limit", "-n", help="Recent persisted decisions to analyze."),
@@ -3710,8 +3725,9 @@ def paper_candidate_replay(
         provider = _provider_category(provenance) if record.primary_reason.endswith("_unknown") else "not_applicable"
         pct = _coerce_numeric(diagnostics.get("top10_holder_pct"))
         review = "yes" if record.primary_reason == "top10_holder_check_failed" and pct is not None and pct <= threshold_pct else "no"
+        hint = _replay_action_hint(record.primary_reason, holder_bucket, provider, review)
         label = record.symbol or record.name or record.mint_address[:16] or "unknown"
-        console.print(f"  {label} current={record.primary_reason} holder={holder_bucket} provider={provider} threshold_review={review}")
+        console.print(f"  {label} current={record.primary_reason} holder={holder_bucket} provider={provider} threshold_review={review} hint={hint}")
     console.print("[yellow]WARNING: Paper results are simulated. Not real trading advice.[/yellow]")
 
 
