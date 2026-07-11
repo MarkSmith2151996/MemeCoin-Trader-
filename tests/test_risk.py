@@ -972,6 +972,8 @@ def test_discovery_mode_creator_unknown_remains_unknown_and_is_labeled_relaxed()
 
     assert assessment.creator_holding_check == CheckResult.UNKNOWN
     assert signal.payload["creator_policy"]["creator_policy_state"] == "discovery_relaxed"
+    assert "edge_score" not in signal.payload
+    assert "edge_breakdown" not in signal.payload
 
 
 def test_known_creator_holding_above_threshold_still_fails_in_discovery() -> None:

@@ -179,6 +179,39 @@ def test_signals_are_ranked_highest_first() -> None:
     asyncio.run(run())
 
 
+def test_discovery_diagnostic_inputs_do_not_change_aggregator_order_or_signal_strength() -> None:
+    async def run() -> None:
+        composite_a = build_signal(
+            mint="edge-composite",
+            source=SignalSourceEnum.PUMP_FUN,
+            confidence=0.5,
+            observed_at=BASE_TIME,
+        )
+        composite_b = build_signal(
+            mint="edge-composite",
+            source=SignalSourceEnum.WHALE_TRACKER,
+            confidence=0.5,
+            observed_at=BASE_TIME + timedelta(seconds=5),
+        )
+        standalone = build_signal(
+            mint="edge-standalone",
+            source=SignalSourceEnum.ONCHAIN,
+            confidence=0.7,
+            observed_at=BASE_TIME + timedelta(seconds=2),
+        )
+
+        ranked = await SignalAggregator(
+            [FakeSource("pump_fun", [composite_a]), FakeSource("whale", [composite_b]), FakeSource("onchain", [standalone])]
+        ).poll_all()
+
+        assert [signal.mint_address for signal in ranked] == ["edge-composite", "edge-standalone"]
+        assert ranked[0].confidence == pytest.approx(0.75)
+        assert ranked[0].payload["source_count"] == 2
+        assert ranked[0].payload["composite_score"] == pytest.approx(0.75)
+
+    asyncio.run(run())
+
+
 def test_single_source_signal_passes_through_unmodified_strength() -> None:
     async def run() -> None:
         original = build_signal(

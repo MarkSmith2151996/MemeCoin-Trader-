@@ -203,16 +203,17 @@ class PaperCycleSummary:
             return []
 
         lines = ["Top discovery candidates:"]
-        lines.append("  # | symbol | mint | source | mode | attn | approval | outcome | reason | theme | meta")
+        lines.append("  # | symbol | mint | source | mode | attn | edge | approval | outcome | reason | theme | meta")
         for diagnostic in candidates[:8]:
             lines.append(
-                "  {rank} | {symbol} | {mint_short} | {source} | {mode} | {attn} | {approval} | {outcome} | {reason} | {theme} | {meta}".format(
+                "  {rank} | {symbol} | {mint_short} | {source} | {mode} | {attn} | {edge} | {approval} | {outcome} | {reason} | {theme} | {meta}".format(
                     rank=diagnostic.get("rank", "?"),
                     symbol=diagnostic.get("symbol", "unknown"),
                     mint_short=diagnostic.get("mint_short", "unknown"),
                     source=diagnostic.get("source", "unknown"),
                     mode=diagnostic.get("candidate_mode", "unknown"),
                     attn=_candidate_attention_display(diagnostic),
+                    edge=diagnostic.get("edge_score", "n/a"),
                     approval=diagnostic.get("risk_approval_state", "strict_rejected"),
                     outcome=diagnostic.get("action_outcome", diagnostic.get("decision", "unknown")),
                     reason=_candidate_summary_reason(diagnostic),
@@ -494,6 +495,11 @@ async def run_bounded_paper_cycle(
         accepted_candidate_diagnostics,
         rejected_candidate_diagnostics,
     )
+    if normalized_risk_profile == "discovery":
+        accepted_candidate_diagnostics, rejected_candidate_diagnostics = _apply_discovery_edge_diagnostics(
+            accepted_candidate_diagnostics,
+            rejected_candidate_diagnostics,
+        )
     await _persist_paper_decisions(
         runtime_db_path,
         cycle_id=cycle_id,
@@ -601,6 +607,8 @@ def _paper_decision_record(
         "authority_policy_state": diagnostic.get("authority_policy_state"),
         "honeypot_policy_state": diagnostic.get("honeypot_policy_state"),
         "risk_approval_state": diagnostic.get("risk_approval_state"),
+        "edge_score": diagnostic.get("edge_score"),
+        "edge_breakdown": diagnostic.get("edge_breakdown"),
         "metadata_completeness_state": diagnostic.get("metadata_completeness_state"),
         "social_signal_state": diagnostic.get("social_signal_state"),
         "source_count": diagnostic.get("source_count"),
@@ -714,6 +722,7 @@ def _build_rejected_candidate_diagnostic(
         "confidence": round(signal.confidence, 6),
         "weight": round(signal.weight, 6),
         "effective_score": round(min(signal.confidence * max(signal.weight, 0.0), 1.0), 6),
+        "composite_score": payload.get("composite_score"),
         "decision": "rejected" if action_outcome == "rejected" else "skipped",
         "action_outcome": action_outcome,
         "failed_check": (record.failed_check if record is not None and record.failed_check is not None else _format_rejection_reason(decision.rejection_reason)),
@@ -725,6 +734,7 @@ def _build_rejected_candidate_diagnostic(
         "narrative_tags": tuple(attention_diagnostics.get("narrative_tags", ())),
         "candidate_mode": payload.get("candidate_mode", "unknown"),
         "social_signal_state": attention_diagnostics.get("social_signal_state", "missing"),
+        "social_credibility_tier": social.get("highest_tier", "unknown"),
         "metadata_completeness_state": attention_diagnostics.get("metadata_completeness_state", "sparse"),
         "rugcheck_top10_holder_pct": holder_diagnostics.get("rugcheck_top10_holder_pct", "unknown"),
         "local_filtered_top10_holder_pct": holder_diagnostics.get("local_filtered_top10_holder_pct", "unknown"),
@@ -875,6 +885,7 @@ def _build_accepted_candidate_diagnostic(
         "confidence": round(signal.confidence, 6),
         "weight": round(signal.weight, 6),
         "effective_score": round(min(signal.confidence * max(signal.weight, 0.0), 1.0), 6),
+        "composite_score": payload.get("composite_score"),
         "decision": "accepted",
         "action_outcome": action_outcome,
         "trade_id": getattr(decision.trade, "id", None),
@@ -887,6 +898,7 @@ def _build_accepted_candidate_diagnostic(
         "narrative_tags": tuple(attention_diagnostics.get("narrative_tags", ())),
         "candidate_mode": payload.get("candidate_mode", "unknown"),
         "social_signal_state": attention_diagnostics.get("social_signal_state", "missing"),
+        "social_credibility_tier": social.get("highest_tier", "unknown"),
         "metadata_completeness_state": attention_diagnostics.get("metadata_completeness_state", "sparse"),
         "token_age_minutes": holder_policy.get("token_age_minutes", age_policy.get("token_age_minutes")),
         "stage_hint": holder_policy.get("stage_hint", age_policy.get("stage_hint", "unknown")),
@@ -995,12 +1007,14 @@ def _compact_candidate_snapshot(diagnostic: dict[str, object]) -> dict[str, obje
         "confidence": diagnostic.get("confidence"),
         "weight": diagnostic.get("weight"),
         "effective_score": diagnostic.get("effective_score"),
+        "composite_score": diagnostic.get("composite_score"),
         "attention_score": diagnostic.get("attention_score"),
         "attention_tier": diagnostic.get("attention_tier"),
         "attention_reasons": list(diagnostic.get("attention_reasons", ())),
         "narrative_tags": list(diagnostic.get("narrative_tags", ())),
         "candidate_mode": diagnostic.get("candidate_mode"),
         "social_signal_state": diagnostic.get("social_signal_state"),
+        "social_credibility_tier": diagnostic.get("social_credibility_tier"),
         "metadata_completeness_state": diagnostic.get("metadata_completeness_state"),
         "token_age_minutes": diagnostic.get("token_age_minutes"),
         "stage_hint": diagnostic.get("stage_hint"),
@@ -1016,6 +1030,9 @@ def _compact_candidate_snapshot(diagnostic: dict[str, object]) -> dict[str, obje
         "authority_policy_state": diagnostic.get("authority_policy_state"),
         "honeypot_policy_state": diagnostic.get("honeypot_policy_state"),
         "main_warnings": list(diagnostic.get("main_warnings", ())),
+        "risk_approval_state": diagnostic.get("risk_approval_state"),
+        "edge_score": diagnostic.get("edge_score"),
+        "edge_breakdown": diagnostic.get("edge_breakdown"),
         "narrative_quality_hint": diagnostic.get("narrative_quality_hint"),
         "theme_cluster_hint": diagnostic.get("theme_cluster_hint"),
         "name_quality_hint": diagnostic.get("name_quality_hint"),
@@ -1063,6 +1080,56 @@ def _apply_discovery_ranking_penalties(
             "ranking_penalty_reasons": reasons,
             "ranking_attention_score": max(attention_score - penalty_points, 0),
         }
+
+    return [enrich(item) for item in accepted], [enrich(item) for item in rejected]
+
+
+def _apply_discovery_edge_diagnostics(
+    accepted: list[dict[str, object]],
+    rejected: list[dict[str, object]],
+) -> tuple[list[dict[str, object]], list[dict[str, object]]]:
+    """Attach display-only discovery context after all decisions and ranking inputs exist."""
+
+    def enrich(diagnostic: dict[str, object]) -> dict[str, object]:
+        source_count = diagnostic.get("source_count")
+        source_count = source_count if isinstance(source_count, int) and source_count > 0 else 1
+        composite_score = _coerce_numeric(diagnostic.get("composite_score"))
+        effective_score = _coerce_numeric(diagnostic.get("effective_score")) or 0.0
+        source_score = composite_score if composite_score is not None else effective_score
+        attention_score = _coerce_numeric(diagnostic.get("attention_score")) or 0.0
+        ranking_penalty = diagnostic.get("ranking_penalty_points")
+        ranking_penalty = ranking_penalty if isinstance(ranking_penalty, int) else 0
+        warnings_penalty = min(_warning_count(diagnostic) * 3, 15)
+        approval = diagnostic.get("risk_approval_state", "strict_rejected")
+        approval_adjustment = {
+            "strict_approved": 5,
+            "discovery_relaxed": 0,
+            "strict_rejected": -10,
+        }.get(approval, -10)
+        social_state = diagnostic.get("social_signal_state", "missing")
+        social_bonus = 4 if social_state not in {"missing", "unknown", None} else 0
+        edge_score = round(
+            max(
+                0.0,
+                min(
+                    source_score * 45
+                    + min(max(source_count - 1, 0), 2) * 7
+                    + min(max(attention_score, 0.0), 100.0) * 0.35
+                    + social_bonus
+                    + approval_adjustment
+                    - ranking_penalty
+                    - warnings_penalty,
+                    100.0,
+                ),
+            )
+        )
+        mode = diagnostic.get("candidate_mode", "unknown")
+        breakdown = (
+            f"src={source_count}/comp={source_score:.2f} mode={mode} "
+            f"attn={int(attention_score)}/{social_state} weak=-{ranking_penalty} "
+            f"warn=-{warnings_penalty} approval={approval}"
+        )
+        return {**diagnostic, "edge_score": edge_score, "edge_breakdown": breakdown}
 
     return [enrich(item) for item in accepted], [enrich(item) for item in rejected]
 

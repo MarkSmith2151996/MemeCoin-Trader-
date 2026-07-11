@@ -146,6 +146,35 @@ def test_decision_engine_keeps_fixed_sizing_when_liquidity_sizing_disabled() -> 
     asyncio.run(run())
 
 
+def test_decision_engine_ignores_discovery_edge_diagnostics_for_strict_execution() -> None:
+    async def run() -> None:
+        settings = Settings()
+        adapter = FakeExecutionAdapter({"mint": 0.25})
+        manager = PositionManager(None, settings)
+        engine = DecisionEngine(adapter, FakeRiskScorer(safe_assessment()), manager, settings)
+
+        decision = await engine.evaluate_signal_with_diagnostics(
+            Signal(
+                source=SignalSource.MANUAL,
+                type=SignalType.BUY,
+                mint_address="mint",
+                confidence=0.8,
+                payload={
+                    "edge_score": 100,
+                    "edge_breakdown": "src=3/comp=1.00 mode=launch attn=100/present",
+                },
+            )
+        )
+
+        assert decision.trade is not None
+        assert decision.trade.amount_sol == 0.4
+        assert "edge_score" not in decision.trade.metadata
+        assert len(adapter.executed) == 1
+        assert adapter.executed[0].amount_sol == decision.trade.amount_sol
+
+    asyncio.run(run())
+
+
 def test_decision_engine_blocks_failed_risk() -> None:
     async def run() -> None:
         settings = Settings()

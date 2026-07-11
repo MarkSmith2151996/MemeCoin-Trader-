@@ -730,6 +730,54 @@ def test_discovery_cli_safe_lines_include_ranked_candidate_summary(tmp_path: Pat
     asyncio.run(run())
 
 
+def test_discovery_edge_diagnostics_are_deterministic_safe_and_paper_only(tmp_path: Path) -> None:
+    async def run() -> None:
+        db_path = tmp_path / "edge-diagnostics.db"
+        pump_signal = build_signal("edge-mint", passes=True).model_copy(
+            update={"source": SignalSourceEnum.PUMP_FUN, "type": SignalType.NEW_POOL}
+        )
+        onchain_signal = build_signal("edge-mint", passes=True).model_copy(
+            update={"source": SignalSourceEnum.ONCHAIN, "type": SignalType.BUY}
+        )
+        onchain_signal.payload.update(
+            {
+                "symbol": "EDGE",
+                "api_key": "do-not-leak-edge-secret",
+                "attention_diagnostics": {
+                    "attention_score": 80,
+                    "attention_tier": "strong_watch",
+                    "social_signal_state": "present",
+                },
+            }
+        )
+
+        summary = await cli_module.run_bounded_paper_cycle(
+            max_signals=1,
+            timeout_seconds=0.1,
+            db_path=db_path,
+            risk_profile="discovery",
+            sources=[FakeSignalSource([[pump_signal]]), FakeSignalSource([[onchain_signal]])],
+            poll_interval_s=0.0,
+        )
+        diagnostic = summary.accepted_candidate_diagnostics[0]
+        snapshot = load_recent_trades(db_path, limit=1)[0].metadata["candidate_snapshot"]
+        repeat = cli_module._apply_discovery_edge_diagnostics([dict(diagnostic)], [])[0][0]
+        output = "\n".join(summary.safe_lines())
+
+        assert summary.execution_mode == "paper"
+        assert diagnostic["edge_score"] == repeat["edge_score"]
+        assert diagnostic["edge_breakdown"] == repeat["edge_breakdown"]
+        assert "src=2/comp=" in diagnostic["edge_breakdown"]
+        assert "approval=strict_rejected" in diagnostic["edge_breakdown"]
+        assert snapshot["edge_score"] == diagnostic["edge_score"]
+        assert snapshot["edge_breakdown"] == diagnostic["edge_breakdown"]
+        assert "| edge |" in output
+        assert "do-not-leak-edge-secret" not in str(snapshot)
+        assert "do-not-leak-edge-secret" not in output
+
+    asyncio.run(run())
+
+
 def test_discovery_cli_safe_lines_show_migration_mode_as_diagnostic_only(tmp_path: Path) -> None:
     async def run() -> None:
         db_path = tmp_path / "migration-mode-summary.db"
