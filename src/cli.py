@@ -3556,6 +3556,7 @@ def paper_blockers(
     unknown: Counter[str] = Counter()
     holder_buckets: Counter[str] = Counter()
     unknown_provenance: Counter[str] = Counter()
+    provider_categories: Counter[str] = Counter()
     examples: dict[str, str] = {}
     for record in records:
         reason = record.primary_reason or "unknown"
@@ -3578,6 +3579,7 @@ def paper_blockers(
                 diagnostics = {}
             provenance = diagnostics.get("creator_unknown_reason") if isinstance(diagnostics, dict) else None
             unknown_provenance[f"creator:{provenance or 'unknown'}"] += 1
+            provider_categories[f"creator:{_provider_category(provenance)}"] += 1
         elif reason == "liquidity_check_unknown":
             try:
                 diagnostics = json.loads(record.diagnostics_json)
@@ -3585,6 +3587,7 @@ def paper_blockers(
                 diagnostics = {}
             provenance = diagnostics.get("liquidity_unknown_reason") if isinstance(diagnostics, dict) else None
             unknown_provenance[f"liquidity:{provenance or 'unknown'}"] += 1
+            provider_categories[f"liquidity:{_provider_category(provenance)}"] += 1
     console.print("[bold]Paper Rejection Blockers[/bold]")
     console.print("  Paper-only diagnostic; strict approval is unchanged.")
     for title, counts in (("Strict risk failures", strict), ("Unknown-data blocks", unknown)):
@@ -3595,6 +3598,7 @@ def paper_blockers(
         console.print(f"  [bold]Holder-risk buckets (diagnostic only; not acceptance):[/bold] {dict(holder_buckets.most_common())}")
     if unknown_provenance:
         console.print(f"  [bold]Unknown-data provenance:[/bold] {dict(unknown_provenance.most_common())}")
+        console.print(f"  [bold]Provider/path categories (evidence-based):[/bold] {dict(provider_categories.most_common())}")
     console.print("[yellow]WARNING: Paper results are simulated. Not real trading advice.[/yellow]")
 
 
@@ -3612,6 +3616,17 @@ def _holder_risk_bucket(value: object, threshold: object) -> str:
     if ratio <= 1.5:
         return "moderate_fail"
     return "severe_fail"
+
+
+def _provider_category(provenance: object) -> str:
+    text = str(provenance or "").lower()
+    if not text or text == "unknown":
+        return "legacy_unknown"
+    if "provider_missing" in text or "provider_error" in text:
+        return "unavailable"
+    if "did not include normalized" in text or "no normalized" in text:
+        return "missing_field"
+    return "unknown"
 
 
 @app.command("paper-shadow-blockers")
