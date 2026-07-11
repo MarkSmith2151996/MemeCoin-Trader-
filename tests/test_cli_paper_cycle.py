@@ -9,6 +9,7 @@ import src.cli as cli_module
 from src.core.config import RiskConfig
 from src.core.database import get_recent_paper_decisions, init_db, record_paper_decision, record_position
 from src.core.models import CheckResult, PaperDecisionRecord, Position, RiskAssessment, Signal, SignalSource as SignalSourceEnum, SignalType, TokenInfo
+from src.execution.price_provider import FakePriceProvider, UnavailablePriceProvider
 from src.monitoring.dashboard import load_open_positions, load_recent_trades
 from src.risk.rugcheck import RugCheckResult
 from src.risk.scorer import DiscoveryRiskScorer, HolderLookupResult
@@ -2449,4 +2450,83 @@ def test_weak_source_preview_is_read_only_and_not_a_ranking_signal(tmp_path: Pat
     assert "source=pump_fun mode=launch preview=provider_data_gap" in result.stdout
     assert "not ranking" in result.stdout
     assert "trading signals" in result.stdout
+    assert [record.model_dump_json() for record in after] == [record.model_dump_json() for record in before]
+
+
+def test_rejected_outcomes_preserve_missing_baseline_and_unavailable_marks(tmp_path: Path) -> None:
+    db = tmp_path / "rejected-outcomes.db"
+    asyncio.run(init_db(db))
+    for mint, baseline in (("missing-baseline", None), ("unavailable-mark", 0.00001), ("marked", 0.00001)):
+        snapshot = {
+            "mint": mint,
+            "source": "pump_fun",
+            "candidate_mode": "launch",
+            "rejection_reason": "top10_holder_check_failed",
+            "failed_check": "top10_holder_check",
+            "rejection_mark_price_sol": baseline,
+            "rejection_liquidity_sol": 25.0,
+        }
+        asyncio.run(record_paper_decision(db, PaperDecisionRecord(
+            mint_address=mint,
+            source="manual",
+            action_outcome="rejected",
+            decision="rejected",
+            primary_reason="rejected",
+            diagnostics_json=json.dumps({"recheck_snapshot": snapshot}, sort_keys=True),
+        )))
+
+    records = asyncio.run(get_recent_paper_decisions(db, limit=10))
+    outcomes, skipped = asyncio.run(cli_module.collect_rejected_candidate_outcomes(
+        records,
+        FakePriceProvider({"missing-baseline": 0.00002, "marked": 0.00002}),
+        limit=3,
+    ))
+    by_mint = {outcome.mint: outcome for outcome in outcomes}
+
+    assert len(outcomes) == 3
+    assert skipped == 0
+    assert by_mint["marked"].return_multiple == 2.0
+    assert by_mint["missing-baseline"].current_mark_sol == 0.00002
+    assert by_mint["missing-baseline"].rejection_mark_sol is None
+    assert by_mint["missing-baseline"].return_multiple is None
+
+    unavailable, _ = asyncio.run(cli_module.collect_rejected_candidate_outcomes(
+        records,
+        UnavailablePriceProvider(),
+        limit=3,
+    ))
+    assert all(outcome.current_mark_sol is None for outcome in unavailable)
+    assert all(outcome.return_multiple is None for outcome in unavailable)
+
+
+def test_rejected_outcomes_cli_is_bounded_and_read_only(tmp_path: Path) -> None:
+    db = tmp_path / "rejected-outcomes-cli.db"
+    asyncio.run(init_db(db))
+    for index in range(3):
+        snapshot = {
+            "mint": f"outcome-{index}",
+            "source": "pump_fun",
+            "candidate_mode": "launch",
+            "rejection_reason": "creator_holding_check_unknown",
+            "failed_check": "creator_holding_check_unknown",
+        }
+        asyncio.run(record_paper_decision(db, PaperDecisionRecord(
+            mint_address=f"outcome-{index}",
+            source="manual",
+            action_outcome="rejected",
+            decision="rejected",
+            primary_reason="rejected",
+            diagnostics_json=json.dumps({"recheck_snapshot": snapshot}, sort_keys=True),
+        )))
+
+    before = asyncio.run(get_recent_paper_decisions(db, limit=10))
+    result = runner.invoke(cli_module.app, ["paper-rejected-outcomes", "--limit", "2", "--db-path", str(db)])
+    after = asyncio.run(get_recent_paper_decisions(db, limit=10))
+
+    assert result.exit_code == 0
+    assert "Rejected snapshots tracked: 2" in result.stdout
+    assert "Missing baseline marks: 2" in result.stdout
+    assert "Unvailable current marks" not in result.stdout
+    assert "Unavailable current marks: 2" in result.stdout
+    assert "missing_baseline" in result.stdout
     assert [record.model_dump_json() for record in after] == [record.model_dump_json() for record in before]

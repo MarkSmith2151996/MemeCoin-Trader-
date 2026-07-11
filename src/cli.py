@@ -39,7 +39,7 @@ from src.execution.live_readiness import evaluate_micro_live_readiness
 from src.execution.jupiter_live import JupiterLiveExecutionAdapter
 from src.execution.paper import PaperExecutionAdapter
 from src.execution.paper_pnl import PaperPnLCalculator, PaperPnLSummary
-from src.execution.price_provider import DexScreenerPriceProvider, UnavailablePriceProvider
+from src.execution.price_provider import DexScreenerPriceProvider, PriceProvider, UnavailablePriceProvider
 from src.monitoring.dashboard import resolve_db_path
 from src.monitoring.health import check_health
 from src.risk.rugcheck import RugCheckClient
@@ -670,6 +670,7 @@ def _raw_safe_recheck_snapshot(diagnostic: dict[str, object]) -> dict[str, objec
         "creator_policy_state", "creator_unknown_reason", "creator_holding_source",
         "liquidity_data_state", "liquidity_source", "liquidity_unknown_reason",
         "risk_approval_state", "rejection_reason", "failed_check", "metadata_completeness_state",
+        "rejection_mark_price_sol", "rejection_liquidity_sol",
     )
     snapshot = {key: diagnostic.get(key) for key in keys}
     # Normalized per-check results make later dry runs deterministic without storing provider payloads.
@@ -891,6 +892,8 @@ def _build_rejected_candidate_diagnostic(
         "failed_check": (record.failed_check if record is not None and record.failed_check is not None else _format_rejection_reason(decision.rejection_reason)),
         "risk_check_results": record.check_results if record is not None else {},
         "rejection_reason": decision.rejection_reason or "unknown_or_other",
+        "rejection_mark_price_sol": _rejection_mark_price(payload, metrics),
+        "rejection_liquidity_sol": liquidity_diagnostics.get("selected_liquidity_sol", liquidity_value),
         "risk_score": record.risk_score if record is not None else None,
         "attention_score": attention_diagnostics.get("attention_score", 0),
         "attention_tier": attention_diagnostics.get("attention_tier", "ignore"),
@@ -1012,6 +1015,13 @@ def _build_rejected_candidate_diagnostic(
         ),
         "notes": _diagnostic_note(payload, record),
     }
+
+
+def _rejection_mark_price(payload: dict[str, object], metrics: dict[str, object]) -> float | None:
+    """Keep a normalized observed SOL mark when a source already supplied one."""
+    value = _first_present(metrics, payload, keys=("price_sol", "priceSol", "priceNative"))
+    price = _coerce_numeric(value)
+    return price if price is not None and price > 0 else None
 
 
 def _build_accepted_candidate_diagnostic(
@@ -4207,6 +4217,120 @@ def paper_recheck_snapshot_weak_source_preview(
         console.print(
             f"  source={source} mode={mode} preview={flag} bucket={bucket} rejected={total} "
             f"blockers={dict(summary['blockers'].most_common())} unknown_data={summary['unknown_data']} examples={examples}"
+        )
+    console.print("[yellow]WARNING: Paper results are simulated. Not real trading advice.[/yellow]")
+
+
+@dataclass(slots=True)
+class RejectedCandidateOutcome:
+    mint: str
+    source: str
+    mode: str
+    blocker: str
+    age_hours: float | None
+    rejection_mark_sol: float | None
+    current_mark_sol: float | None
+    mark_reason: str
+    return_multiple: float | None
+    liquidity_sol: float | None
+
+
+def _outcome_snapshot(record: PaperDecisionRecord) -> dict[str, object] | None:
+    try:
+        diagnostics = json.loads(record.diagnostics_json)
+    except (TypeError, json.JSONDecodeError):
+        return None
+    snapshot = diagnostics.get("recheck_snapshot") if isinstance(diagnostics, dict) else None
+    if not isinstance(snapshot, dict) or not snapshot.get("mint") or not snapshot.get("source") or not snapshot.get("rejection_reason"):
+        return None
+    return snapshot
+
+
+def _outcome_age_hours(recorded_at: str) -> float | None:
+    try:
+        recorded = datetime.fromisoformat(recorded_at)
+    except (TypeError, ValueError):
+        return None
+    if recorded.tzinfo is None:
+        recorded = recorded.replace(tzinfo=UTC)
+    return round(max((datetime.now(UTC) - recorded).total_seconds(), 0.0) / 3600, 2)
+
+
+async def collect_rejected_candidate_outcomes(
+    records: list[PaperDecisionRecord],
+    price_provider: PriceProvider,
+    *,
+    limit: int,
+) -> tuple[list[RejectedCandidateOutcome], int]:
+    """Read bounded rejected evidence and safe marks without changing candidate state."""
+    outcomes: list[RejectedCandidateOutcome] = []
+    skipped_missing = 0
+    for record in records:
+        if record.action_outcome == "traded":
+            continue
+        snapshot = _outcome_snapshot(record)
+        if snapshot is None:
+            skipped_missing += 1
+            continue
+        if len(outcomes) >= limit:
+            break
+        assessment = _snapshot_recheck_assessment(snapshot)
+        if assessment.all_checks_pass:
+            continue
+        mark = await price_provider.get_price_with_diagnostic(str(snapshot["mint"]))
+        baseline = _coerce_numeric(snapshot.get("rejection_mark_price_sol"))
+        baseline = baseline if baseline is not None and baseline > 0 else None
+        current_mark = mark.price_sol if _is_valid_price(mark.price_sol) else None
+        return_multiple = round(current_mark / baseline, 4) if current_mark is not None and baseline is not None else None
+        liquidity = _coerce_numeric(snapshot.get("rejection_liquidity_sol"))
+        outcomes.append(
+            RejectedCandidateOutcome(
+                mint=str(snapshot["mint"]),
+                source=str(snapshot.get("source") or "unknown"),
+                mode=str(snapshot.get("candidate_mode") or "unknown"),
+                blocker=_snapshot_first_failing_check(snapshot, assessment),
+                age_hours=_outcome_age_hours(record.recorded_at),
+                rejection_mark_sol=baseline,
+                current_mark_sol=current_mark,
+                mark_reason=mark.reason,
+                return_multiple=return_multiple,
+                liquidity_sol=liquidity if liquidity is not None and liquidity >= 0 else None,
+            )
+        )
+    return outcomes, skipped_missing
+
+
+@app.command("paper-rejected-outcomes")
+def paper_rejected_outcomes(
+    limit: int = typer.Option(25, "--limit", "-n", min=1, max=50, help="Maximum rejected snapshots to report."),
+    marks: str = typer.Option("unavailable", "--marks", help="Mark price source: 'unavailable' (default) or read-only 'live' DexScreener."),
+    db_path: str | None = typer.Option(None, help="Optional SQLite path override."),
+) -> None:
+    """Report post-rejection paper research marks without accepting or trading candidates."""
+    if marks not in {"live", "unavailable"}:
+        raise typer.BadParameter("must be 'unavailable' or 'live'", param_hint="--marks")
+    runtime_db_path = resolve_db_path(db_path)
+    asyncio.run(init_db(runtime_db_path))
+    records = asyncio.run(get_recent_paper_decisions(runtime_db_path, limit=max(limit * 20, 500)))
+    provider: PriceProvider = DexScreenerPriceProvider() if marks == "live" else UnavailablePriceProvider()
+    outcomes, skipped_missing = asyncio.run(collect_rejected_candidate_outcomes(records, provider, limit=limit))
+    missing_baseline = sum(outcome.rejection_mark_sol is None for outcome in outcomes)
+    unavailable_marks = sum(outcome.current_mark_sol is None for outcome in outcomes)
+    console.print("[bold]Paper Rejected Candidate Outcomes[/bold]")
+    console.print("  PAPER/RESEARCH ONLY. Outcomes are diagnostics, not trade recommendations; they do not alter ranking, gates, acceptance, execution, PnL, attribution, or readiness.")
+    console.print(f"  Rejected snapshots tracked: {len(outcomes)}")
+    console.print(f"  Skipped missing snapshots: {skipped_missing}")
+    console.print(f"  Missing baseline marks: {missing_baseline}")
+    console.print(f"  Unavailable current marks: {unavailable_marks}")
+    for outcome in outcomes:
+        baseline = f"{outcome.rejection_mark_sol:.10f}" if outcome.rejection_mark_sol is not None else "missing_baseline"
+        current = f"{outcome.current_mark_sol:.10f}" if outcome.current_mark_sol is not None else "unavailable"
+        multiple = f"{outcome.return_multiple:.4f}x" if outcome.return_multiple is not None else "not_computable"
+        age = f"{outcome.age_hours:.2f}h" if outcome.age_hours is not None else "unknown"
+        liquidity = f"{outcome.liquidity_sol:.4f}" if outcome.liquidity_sol is not None else "unavailable"
+        console.print(
+            f"  mint={_short_mint(outcome.mint)} source={outcome.source} mode={outcome.mode} blocker={outcome.blocker} "
+            f"age={age} baseline={baseline} current={current} return={multiple} liquidity_at_rejection={liquidity} mark_reason={outcome.mark_reason}"
         )
     console.print("[yellow]WARNING: Paper results are simulated. Not real trading advice.[/yellow]")
 
