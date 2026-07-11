@@ -2528,6 +2528,53 @@ def test_rejected_snapshot_persists_source_baseline_or_explicit_missing_reason(t
     asyncio.run(run())
 
 
+def test_baseline_field_coverage_records_field_names_without_raw_values(tmp_path: Path) -> None:
+    coverage = cli_module._baseline_payload_field_coverage(
+        {
+            "priceNative": "0.000012",
+            "initialSolAmount": 3.0,
+            "provider": "pumpportal",
+        },
+        {"liquidity_usd": 12_000.0},
+    )
+    assert coverage == {
+        "price_fields": ("payload.priceNative",),
+        "liquidity_fields": ("metrics.liquidity_usd", "payload.initialSolAmount"),
+        "provider": "pumpportal",
+    }
+
+    db = tmp_path / "baseline-coverage.db"
+    asyncio.run(init_db(db))
+    snapshot = {
+        "mint": "coverage-mint",
+        "source": "onchain",
+        "rejection_reason": "creator_holding_check_unknown",
+        "rejection_mark_price_sol": None,
+        "rejection_mark_missing_reason": "source_price_missing",
+        "rejection_baseline_payload_provider": "dexscreener",
+        "rejection_baseline_price_fields": [],
+        "rejection_baseline_liquidity_fields": ["metrics.liquidity_usd"],
+    }
+    asyncio.run(record_paper_decision(db, PaperDecisionRecord(
+        mint_address="coverage-mint",
+        source="manual",
+        action_outcome="rejected",
+        decision="rejected",
+        primary_reason="rejected",
+        diagnostics_json=json.dumps({"recheck_snapshot": snapshot}, sort_keys=True),
+    )))
+    before = asyncio.run(get_recent_paper_decisions(db, limit=10))
+    result = runner.invoke(cli_module.app, ["paper-rejected-baseline-coverage", "--db-path", str(db)])
+    after = asyncio.run(get_recent_paper_decisions(db, limit=10))
+    assert result.exit_code == 0
+    assert "baseline_missing" in result.stdout
+    assert "missing_reason:source_price_missing" in result.stdout
+    assert "payload_provider:dexscreener" in result.stdout
+    assert "liquidity_field:metrics.liquidity_usd" in result.stdout
+    assert "12000" not in result.stdout
+    assert [record.model_dump_json() for record in after] == [record.model_dump_json() for record in before]
+
+
 def test_rejected_outcomes_cli_is_bounded_and_read_only(tmp_path: Path) -> None:
     db = tmp_path / "rejected-outcomes-cli.db"
     asyncio.run(init_db(db))

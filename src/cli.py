@@ -671,7 +671,8 @@ def _raw_safe_recheck_snapshot(diagnostic: dict[str, object]) -> dict[str, objec
         "liquidity_data_state", "liquidity_source", "liquidity_unknown_reason",
         "risk_approval_state", "rejection_reason", "failed_check", "metadata_completeness_state",
         "rejection_mark_price_sol", "rejection_mark_provider", "rejection_mark_timestamp",
-        "rejection_mark_missing_reason", "rejection_liquidity_sol",
+        "rejection_mark_missing_reason", "rejection_liquidity_sol", "rejection_baseline_price_fields",
+        "rejection_baseline_liquidity_fields", "rejection_baseline_payload_provider",
     )
     snapshot = {key: diagnostic.get(key) for key in keys}
     # Normalized per-check results make later dry runs deterministic without storing provider payloads.
@@ -878,6 +879,7 @@ def _build_rejected_candidate_diagnostic(
     top10_value = _check_metric_value(record, "top10_holder_check")
     rejection_mark = _rejection_mark_price(payload, metrics)
     rejection_liquidity = _coerce_numeric(liquidity_diagnostics.get("selected_liquidity_sol", liquidity_value))
+    baseline_field_coverage = _baseline_payload_field_coverage(payload, metrics)
 
     return {
         "rank": rank,
@@ -900,6 +902,9 @@ def _build_rejected_candidate_diagnostic(
         "rejection_mark_timestamp": datetime.now(UTC).isoformat(),
         "rejection_mark_missing_reason": None if rejection_mark is not None else "source_price_missing",
         "rejection_liquidity_sol": rejection_liquidity,
+        "rejection_baseline_price_fields": baseline_field_coverage["price_fields"],
+        "rejection_baseline_liquidity_fields": baseline_field_coverage["liquidity_fields"],
+        "rejection_baseline_payload_provider": baseline_field_coverage["provider"],
         "risk_score": record.risk_score if record is not None else None,
         "attention_score": attention_diagnostics.get("attention_score", 0),
         "attention_tier": attention_diagnostics.get("attention_tier", "ignore"),
@@ -1033,6 +1038,36 @@ def _rejection_mark_price(payload: dict[str, object], metrics: dict[str, object]
     except (TypeError, ValueError):
         return None
     return price if math.isfinite(price) and price > 0 else None
+
+
+def _baseline_payload_field_coverage(payload: dict[str, object], metrics: dict[str, object]) -> dict[str, object]:
+    """Record bounded field presence only; never retain raw provider payload values."""
+    price_fields = [
+        f"metrics.{field_name}"
+        for field_name in ("price_sol", "priceSol", "priceNative")
+        if metrics.get(field_name) is not None
+    ]
+    price_fields.extend(
+        f"payload.{field_name}"
+        for field_name in ("price_sol", "priceSol", "priceNative")
+        if payload.get(field_name) is not None
+    )
+    liquidity_fields = [
+        f"metrics.{field_name}"
+        for field_name in ("liquidity_sol", "liquiditySol", "liquidity_usd")
+        if metrics.get(field_name) is not None
+    ]
+    liquidity_fields.extend(
+        f"payload.{field_name}"
+        for field_name in ("liquidity_sol", "liquiditySol", "initialSolAmount", "initialLiquiditySol", "initial_liquidity_sol")
+        if payload.get(field_name) is not None
+    )
+    provider = payload.get("provider")
+    return {
+        "price_fields": tuple(price_fields),
+        "liquidity_fields": tuple(liquidity_fields),
+        "provider": provider.strip() if isinstance(provider, str) and provider.strip() else "not_recorded",
+    }
 
 
 def _build_accepted_candidate_diagnostic(
@@ -4454,6 +4489,48 @@ def paper_rejected_later_marks(
             f"liquidity_usd={liquidity} provider={outcome.later_mark_provider} status={outcome.mark_reason} "
             f"timestamp={outcome.later_mark_timestamp or 'unknown'} label={_rejected_outcome_label(outcome)}"
         )
+    console.print("[yellow]WARNING: Paper results are simulated. Not real trading advice.[/yellow]")
+
+
+@app.command("paper-rejected-baseline-coverage")
+def paper_rejected_baseline_coverage(
+    limit: int = typer.Option(500, "--limit", "-n", min=1, max=500, help="Recent persisted decisions to inspect."),
+    db_path: str | None = typer.Option(None, help="Optional SQLite path override."),
+) -> None:
+    """Show bounded baseline-source field coverage from rejected snapshots only."""
+    runtime_db_path = resolve_db_path(db_path)
+    asyncio.run(init_db(runtime_db_path))
+    records = asyncio.run(get_recent_paper_decisions(runtime_db_path, limit=limit))
+    summaries: dict[str, Counter[str]] = {}
+    replayable = skipped_missing = 0
+    for record in records:
+        if record.action_outcome == "traded":
+            continue
+        snapshot = _outcome_snapshot(record)
+        if snapshot is None:
+            skipped_missing += 1
+            continue
+        replayable += 1
+        source = str(snapshot.get("source") or "unknown")
+        counts = summaries.setdefault(source, Counter())
+        counts["baseline_present" if _coerce_numeric(snapshot.get("rejection_mark_price_sol")) else "baseline_missing"] += 1
+        reason = snapshot.get("rejection_mark_missing_reason")
+        counts[f"missing_reason:{reason or 'none'}"] += 1
+        provider = snapshot.get("rejection_baseline_payload_provider")
+        counts[f"payload_provider:{provider or 'not_recorded'}"] += 1
+        price_fields = snapshot.get("rejection_baseline_price_fields")
+        liquidity_fields = snapshot.get("rejection_baseline_liquidity_fields")
+        for field_name in price_fields if isinstance(price_fields, list) else ():
+            counts[f"price_field:{field_name}"] += 1
+        for field_name in liquidity_fields if isinstance(liquidity_fields, list) else ():
+            counts[f"liquidity_field:{field_name}"] += 1
+    console.print("[bold]Paper Rejected Baseline Coverage[/bold]")
+    console.print("  DIAGNOSTIC-ONLY. Field presence is bounded schema metadata, not a signal, ranking input, or acceptance path.")
+    console.print(f"  Replayable rejected snapshots: {replayable}")
+    console.print(f"  Skipped missing snapshots: {skipped_missing}")
+    for source, counts in sorted(summaries.items()):
+        print_counts = {key: value for key, value in sorted(counts.items())}
+        console.print(f"  source={source} coverage={print_counts}")
     console.print("[yellow]WARNING: Paper results are simulated. Not real trading advice.[/yellow]")
 
 
