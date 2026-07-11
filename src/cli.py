@@ -615,6 +615,7 @@ def _paper_decision_record(
         "edge_breakdown": diagnostic.get("edge_breakdown"),
         "attention_quality": diagnostic.get("attention_quality"),
         "attention_detail": diagnostic.get("attention_detail"),
+        "narrative_category": diagnostic.get("narrative_category"),
         "metadata_completeness_state": diagnostic.get("metadata_completeness_state"),
         "social_signal_state": diagnostic.get("social_signal_state"),
         "source_count": diagnostic.get("source_count"),
@@ -684,6 +685,16 @@ def _paper_decision_attention_display(record: PaperDecisionRecord) -> str:
     if not isinstance(detail, str) or not detail.strip():
         return f"attention={quality.strip()} detail=not-recorded"
     return f"attention={quality.strip()} detail={detail.strip()}"
+
+
+def _paper_decision_narrative_display(record: PaperDecisionRecord) -> str:
+    """Format persisted paper-only narrative category telemetry."""
+    try:
+        diagnostics = json.loads(record.diagnostics_json)
+    except (TypeError, json.JSONDecodeError):
+        return "narrative=not-recorded"
+    category = diagnostics.get("narrative_category") if isinstance(diagnostics, dict) else None
+    return f"narrative={category.strip()}" if isinstance(category, str) and category.strip() else "narrative=not-recorded"
 
 
 def _extract_rejection_record(metadata: dict[str, object]) -> RejectionRecord | None:
@@ -1186,10 +1197,12 @@ def _apply_paper_attention_diagnostics(
 ) -> tuple[list[dict[str, object]], list[dict[str, object]]]:
     def enrich(diagnostic: dict[str, object]) -> dict[str, object]:
         attention_quality, attention_detail = _attention_quality_diagnostics(diagnostic)
+        narrative_category = _narrative_category_diagnostic(diagnostic)
         return {
             **diagnostic,
             "attention_quality": attention_quality,
             "attention_detail": attention_detail,
+            "narrative_category": narrative_category,
         }
 
     return [enrich(item) for item in accepted], [enrich(item) for item in rejected]
@@ -1223,6 +1236,29 @@ def _attention_quality_diagnostics(diagnostic: dict[str, object]) -> tuple[str, 
         f"approval={approval} warn={warning_count}"
     )
     return quality, detail
+
+
+def _narrative_category_diagnostic(diagnostic: dict[str, object]) -> str:
+    """Classify existing paper diagnostic context without influencing decisions."""
+    source_count = diagnostic.get("source_count")
+    source_count = source_count if isinstance(source_count, int) and source_count > 0 else 1
+    source = str(diagnostic.get("source") or "unknown")
+    mode = str(diagnostic.get("candidate_mode") or "unknown")
+    social = str(diagnostic.get("social_signal_state") or "missing")
+    weak_identity = diagnostic.get("ranking_penalty_points")
+    if source == "composite" or source_count > 1:
+        return "composite_attention"
+    if mode == "migration":
+        return "migration"
+    if source == "whale_tracker":
+        return "whale_activity"
+    if social not in {"missing", "unknown"}:
+        return "social_mention"
+    if isinstance(weak_identity, int) and weak_identity > 0:
+        return "weak_identity"
+    if mode == "launch":
+        return "launch_hype"
+    return "unknown"
 
 
 def _discovery_ranking_penalty(diagnostic: dict[str, object]) -> tuple[int, tuple[str, ...]]:
@@ -3243,7 +3279,7 @@ def paper_decisions(
         console.print(f"  Mode: paper (simulated)")
         console.print(
             "  Discovery edge and attention quality are paper-only operator/research diagnostics; "
-            "they do not affect strict risk, ranking, sizing, or execution."
+            "they do not affect strict risk, ranking, sizing, or execution. Narrative category is also diagnostic-only."
         )
         console.print("")
 
@@ -3276,7 +3312,7 @@ def paper_decisions(
                 console.print(
                     f"  {label}  source={d.source}  mode={d.candidate_mode}  "
                     f"score={d.attention_score}  {_paper_decision_edge_display(d)}  "
-                    f"{_paper_decision_attention_display(d)}"
+                    f"{_paper_decision_attention_display(d)}  {_paper_decision_narrative_display(d)}"
                 )
             if len(accepted) > 5:
                 console.print(f"  ... and {len(accepted) - 5} more")
@@ -3289,7 +3325,7 @@ def paper_decisions(
                 console.print(
                     f"  {label}  reason={d.primary_reason}  source={d.source}  "
                     f"mode={d.candidate_mode}  {_paper_decision_edge_display(d)}  "
-                    f"{_paper_decision_attention_display(d)}"
+                    f"{_paper_decision_attention_display(d)}  {_paper_decision_narrative_display(d)}"
                 )
             if len(rejected) > 5:
                 console.print(f"  ... and {len(rejected) - 5} more")
