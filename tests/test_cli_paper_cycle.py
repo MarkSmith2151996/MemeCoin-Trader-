@@ -215,6 +215,8 @@ def test_paper_cycle_persists_accepted_and_rejected_fake_signals(tmp_path: Path)
         assert accepted.mint_address == "accepted-mint"
         assert accepted.primary_reason == "traded"
         assert rejected.primary_reason == "honeypot_check_failed"
+        assert json.loads(accepted.diagnostics_json)["trade_id"] == positions[0].entry_trade_id == trades[0].id
+        assert json.loads(rejected.diagnostics_json)["trade_id"] is None
 
     asyncio.run(run())
 
