@@ -3608,5 +3608,41 @@ def paper_shadow_blockers(
     console.print("[yellow]WARNING: Paper results are simulated. Not real trading advice.[/yellow]")
 
 
+@app.command("paper-holder-threshold-shadow")
+def paper_holder_threshold_shadow(
+    threshold_pct: float = typer.Option(60.0, "--threshold-pct", min=0.01, help="Hypothetical holder cap for review-set analysis."),
+    limit: int = typer.Option(50, "--limit", "-n", help="Recent persisted decisions to analyze."),
+    db_path: str | None = typer.Option(None, help="Optional SQLite path override."),
+) -> None:
+    """Show holder-failure review sets under a hypothetical cap without changing gates."""
+    runtime_db_path = resolve_db_path(db_path)
+    asyncio.run(init_db(runtime_db_path))
+    records = asyncio.run(get_recent_paper_decisions(runtime_db_path, limit=limit))
+    numeric = 0
+    review = 0
+    unknown = 0
+    for record in records:
+        if record.primary_reason != "top10_holder_check_failed":
+            continue
+        try:
+            diagnostics = json.loads(record.diagnostics_json)
+        except (TypeError, json.JSONDecodeError):
+            diagnostics = {}
+        pct = _coerce_numeric(diagnostics.get("top10_holder_pct")) if isinstance(diagnostics, dict) else None
+        if pct is None:
+            unknown += 1
+        else:
+            numeric += 1
+            if pct <= threshold_pct:
+                review += 1
+    console.print("[bold]Paper Holder Threshold Shadow[/bold]")
+    console.print("  HYPOTHETICAL REVIEW ONLY - NOT TRADING. Actual holder threshold and approval are unchanged.")
+    console.print(f"  Hypothetical cap: {threshold_pct:g}%")
+    console.print(f"  Numeric holder failures analyzed: {numeric}")
+    console.print(f"  Unknown holder values excluded: {unknown}")
+    console.print(f"  Candidates at/below hypothetical cap: {review} (require full re-evaluation, not acceptance)")
+    console.print("[yellow]WARNING: Paper results are simulated. Not real trading advice.[/yellow]")
+
+
 if __name__ == "__main__":
     app()
