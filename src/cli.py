@@ -3985,5 +3985,65 @@ def paper_recheck_snapshot_risk_sources(
     console.print("[yellow]WARNING: Paper results are simulated. Not real trading advice.[/yellow]")
 
 
+@app.command("paper-recheck-snapshot-source-quality")
+def paper_recheck_snapshot_source_quality(
+    limit: int = typer.Option(500, "--limit", "-n", help="Recent persisted decisions to inspect."),
+    db_path: str | None = typer.Option(None, help="Optional SQLite path override."),
+) -> None:
+    """Summarize rejected snapshot evidence by discovery source quality, not trade quality."""
+    runtime_db_path = resolve_db_path(db_path)
+    asyncio.run(init_db(runtime_db_path))
+    records = asyncio.run(get_recent_paper_decisions(runtime_db_path, limit=limit))
+    summaries: dict[tuple[str, str], dict[str, object]] = {}
+    replayable = skipped_missing = 0
+    for record in records:
+        if record.action_outcome == "traded":
+            continue
+        try:
+            diagnostics = json.loads(record.diagnostics_json)
+        except (TypeError, json.JSONDecodeError):
+            diagnostics = {}
+        snapshot = diagnostics.get("recheck_snapshot") if isinstance(diagnostics, dict) else None
+        if not isinstance(snapshot, dict) or not snapshot.get("mint") or not snapshot.get("source") or not snapshot.get("rejection_reason"):
+            skipped_missing += 1
+            continue
+        assessment = _snapshot_recheck_assessment(snapshot)
+        if assessment.all_checks_pass:
+            continue
+        replayable += 1
+        key = (str(snapshot.get("source") or "unknown"), str(snapshot.get("candidate_mode") or "unknown"))
+        summary = summaries.setdefault(
+            key,
+            {"blockers": Counter(), "holders": Counter(), "unknown_data": 0, "examples": []},
+        )
+        blocker = _snapshot_first_failing_check(snapshot, assessment)
+        summary["blockers"][blocker] += 1
+        if blocker.endswith("_unknown"):
+            summary["unknown_data"] += 1
+        holder_bucket = _holder_risk_bucket(
+            snapshot.get("top10_holder_pct"),
+            snapshot.get("top10_holder_threshold_pct"),
+        )
+        if blocker == "top10_holder_check":
+            summary["holders"][holder_bucket] += 1
+        examples = summary["examples"]
+        if len(examples) < 3:
+            examples.append(_short_mint(str(snapshot["mint"])))
+
+    console.print("[bold]Paper Snapshot Source Quality[/bold]")
+    console.print("  DIAGNOSTIC-ONLY. Rejected snapshot evidence is not a trading signal and does not affect ranking, gates, sizing, acceptance, execution, or readiness.")
+    console.print(f"  Replayable rejected snapshots: {replayable}")
+    console.print(f"  Skipped missing snapshots: {skipped_missing}")
+    for (source, mode), summary in sorted(summaries.items()):
+        blockers = dict(summary["blockers"].most_common())
+        holders = dict(summary["holders"].most_common()) or {"not_applicable": 0}
+        examples = ", ".join(summary["examples"]) or "none"
+        console.print(
+            f"  source={source} mode={mode} rejected={sum(summary['blockers'].values())} "
+            f"unknown_data={summary['unknown_data']} blockers={blockers} holder_severity={holders} examples={examples}"
+        )
+    console.print("[yellow]WARNING: Paper results are simulated. Not real trading advice.[/yellow]")
+
+
 if __name__ == "__main__":
     app()

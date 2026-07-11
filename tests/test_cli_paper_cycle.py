@@ -2306,3 +2306,47 @@ def test_snapshot_risk_source_analysis_groups_rejections_without_mutating_state(
     assert "holder=unknown count=1" in result.stdout
     assert "Top10 holder failure clusters:" in result.stdout
     assert [record.model_dump_json() for record in after] == [record.model_dump_json() for record in before]
+
+
+def test_snapshot_source_quality_summarizes_rejections_without_trading_state_changes(tmp_path: Path) -> None:
+    db = tmp_path / "snapshot-source-quality.db"
+    asyncio.run(init_db(db))
+    for mint, source, mode, blocker, holder_pct in (
+        ("whale-holder", "whale_tracker", "unknown", "top10_holder_check", 95.0),
+        ("whale-creator", "whale_tracker", "unknown", "creator_holding_check_unknown", None),
+        ("pump-holder", "pump_fun", "launch", "top10_holder_check", 55.0),
+    ):
+        snapshot = {
+            "mint": mint,
+            "source": source,
+            "candidate_mode": mode,
+            "rejection_reason": blocker,
+            "failed_check": blocker,
+            "top10_holder_pct": holder_pct,
+            "top10_holder_threshold_pct": 50.0,
+        }
+        asyncio.run(
+            record_paper_decision(
+                db,
+                PaperDecisionRecord(
+                    mint_address=mint,
+                    source="manual",
+                    action_outcome="rejected",
+                    decision="rejected",
+                    primary_reason="rejected",
+                    diagnostics_json=json.dumps({"recheck_snapshot": snapshot}, sort_keys=True),
+                ),
+            )
+        )
+
+    before = asyncio.run(get_recent_paper_decisions(db, limit=10))
+    result = runner.invoke(cli_module.app, ["paper-recheck-snapshot-source-quality", "--db-path", str(db)])
+    after = asyncio.run(get_recent_paper_decisions(db, limit=10))
+
+    assert result.exit_code == 0
+    assert "DIAGNOSTIC-ONLY" in result.stdout
+    assert "source=whale_tracker mode=unknown rejected=2 unknown_data=1" in result.stdout
+    assert "source=pump_fun mode=launch rejected=1 unknown_data=0" in result.stdout
+    assert "holder_severity={'severe_fail': 1}" in result.stdout
+    assert "holder_severity={'near_threshold': 1}" in result.stdout
+    assert [record.model_dump_json() for record in after] == [record.model_dump_json() for record in before]
