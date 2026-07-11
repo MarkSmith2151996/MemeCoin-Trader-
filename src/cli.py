@@ -3687,5 +3687,33 @@ def paper_holder_threshold_shadow(
     console.print("[yellow]WARNING: Paper results are simulated. Not real trading advice.[/yellow]")
 
 
+@app.command("paper-candidate-replay")
+def paper_candidate_replay(
+    threshold_pct: float = typer.Option(60.0, "--threshold-pct", min=0.01, help="Hypothetical holder cap for review flag."),
+    limit: int = typer.Option(10, "--limit", "-n", help="Max rejected candidates to display."),
+    db_path: str | None = typer.Option(None, help="Optional SQLite path override."),
+) -> None:
+    """Replay persisted rejected candidates as display-only review records."""
+    runtime_db_path = resolve_db_path(db_path)
+    asyncio.run(init_db(runtime_db_path))
+    records = asyncio.run(get_recent_paper_decisions(runtime_db_path, limit=max(limit * 5, 50)))
+    console.print("[bold]Paper Candidate Replay[/bold]")
+    console.print("  DISPLAY-ONLY REVIEW. NOT TRADING; every record remains rejected and requires full re-evaluation.")
+    for record in [item for item in records if item.action_outcome != "traded"][:limit]:
+        try:
+            diagnostics = json.loads(record.diagnostics_json)
+        except (TypeError, json.JSONDecodeError):
+            diagnostics = {}
+        diagnostics = diagnostics if isinstance(diagnostics, dict) else {}
+        holder_bucket = _holder_risk_bucket(diagnostics.get("top10_holder_pct"), diagnostics.get("top10_holder_threshold_pct"))
+        provenance = diagnostics.get("creator_unknown_reason") if record.primary_reason == "creator_holding_check_unknown" else diagnostics.get("liquidity_unknown_reason")
+        provider = _provider_category(provenance) if record.primary_reason.endswith("_unknown") else "not_applicable"
+        pct = _coerce_numeric(diagnostics.get("top10_holder_pct"))
+        review = "yes" if record.primary_reason == "top10_holder_check_failed" and pct is not None and pct <= threshold_pct else "no"
+        label = record.symbol or record.name or record.mint_address[:16] or "unknown"
+        console.print(f"  {label} current={record.primary_reason} holder={holder_bucket} provider={provider} threshold_review={review}")
+    console.print("[yellow]WARNING: Paper results are simulated. Not real trading advice.[/yellow]")
+
+
 if __name__ == "__main__":
     app()
