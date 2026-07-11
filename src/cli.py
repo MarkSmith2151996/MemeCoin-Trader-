@@ -3421,5 +3421,38 @@ def paper_shortlist(
     console.print("[yellow]WARNING: Paper results are simulated. Not real profit or loss.[/yellow]")
 
 
+@app.command("paper-drilldown")
+def paper_drilldown(
+    mint: str = typer.Option(..., "--mint", help="Persisted paper decision mint address."),
+    db_path: str | None = typer.Option(None, help="Optional SQLite path override."),
+) -> None:
+    """Display safe, normalized diagnostics for one persisted paper candidate."""
+    runtime_db_path = resolve_db_path(db_path)
+    asyncio.run(init_db(runtime_db_path))
+    records = asyncio.run(get_recent_paper_decisions(runtime_db_path, limit=500))
+    record = next((item for item in records if item.mint_address == mint), None)
+    if record is None:
+        raise typer.BadParameter("no persisted paper decision found for mint")
+    try:
+        diagnostics = json.loads(record.diagnostics_json)
+    except (TypeError, json.JSONDecodeError):
+        diagnostics = {}
+    diagnostics = diagnostics if isinstance(diagnostics, dict) else {}
+    console.print("[bold]Paper Candidate Drilldown[/bold]")
+    console.print("  Paper-only operator/research diagnostic; normalized safe fields only.")
+    console.print(f"  Mint: {record.mint_address}")
+    console.print(f"  Candidate: {record.symbol or record.name or 'unknown'}")
+    console.print(f"  Recorded: {record.recorded_at}")
+    console.print(f"  Source/mode: {record.source}/{record.candidate_mode}")
+    console.print(f"  Reason: {record.primary_reason}")
+    console.print(f"  Approval: {diagnostics.get('risk_approval_state', 'not-recorded')}")
+    console.print(f"  {_paper_decision_edge_display(record)}")
+    console.print(f"  {_paper_decision_attention_display(record)}")
+    console.print(f"  {_paper_decision_narrative_display(record)}")
+    console.print(f"  Source count: {diagnostics.get('source_count') or 'not-recorded'}")
+    console.print(f"  Warnings: {len(diagnostics.get('main_warnings', [])) if isinstance(diagnostics.get('main_warnings'), list) else 'not-recorded'}")
+    console.print("[yellow]WARNING: Paper results are simulated. Not real profit or loss.[/yellow]")
+
+
 if __name__ == "__main__":
     app()
