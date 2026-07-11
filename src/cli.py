@@ -3367,5 +3367,47 @@ def paper_decisions(
         console.print("[yellow]WARNING: Paper results are simulated. Not real profit or loss.[/yellow]")
 
 
+@app.command("paper-shortlist")
+def paper_shortlist(
+    limit: int = typer.Option(10, "--limit", "-n", help="Max display-only paper candidates to show."),
+    db_path: str | None = typer.Option(None, help="Optional SQLite path override."),
+) -> None:
+    """Display a paper-only research shortlist from persisted decision telemetry."""
+    runtime_db_path = resolve_db_path(db_path)
+    asyncio.run(init_db(runtime_db_path))
+    records = asyncio.run(get_recent_paper_decisions(runtime_db_path, limit=max(limit * 10, 50)))
+
+    def shortlist_key(record: PaperDecisionRecord) -> tuple[float, float, str]:
+        try:
+            diagnostics = json.loads(record.diagnostics_json)
+        except (TypeError, json.JSONDecodeError):
+            diagnostics = {}
+        if not isinstance(diagnostics, dict):
+            diagnostics = {}
+        edge = diagnostics.get("edge_score")
+        edge_value = float(edge) if isinstance(edge, (int, float)) and not isinstance(edge, bool) else -1.0
+        attention = {"strong": 2, "mixed": 1, "thin": 0}.get(diagnostics.get("attention_quality"), -1)
+        return edge_value, float(attention), str(record.id or "")
+
+    shortlist = sorted(records, key=shortlist_key, reverse=True)[:limit]
+    console.print("[bold]Paper Discovery Shortlist[/bold]")
+    console.print("  Paper-only operator/research diagnostic; not a trading recommendation or execution queue.")
+    if not shortlist:
+        console.print("  [yellow]No paper decision telemetry found.[/yellow]")
+    for record in shortlist:
+        label = record.symbol or record.name or (record.mint_address[:16] if record.mint_address else "unknown")
+        try:
+            diagnostics = json.loads(record.diagnostics_json)
+        except (TypeError, json.JSONDecodeError):
+            diagnostics = {}
+        diagnostics = diagnostics if isinstance(diagnostics, dict) else {}
+        console.print(
+            f"  {label} reason={record.primary_reason} approval={diagnostics.get('risk_approval_state', 'not-recorded')} "
+            f"{_paper_decision_edge_display(record)} {_paper_decision_attention_display(record)} "
+            f"{_paper_decision_narrative_display(record)}"
+        )
+    console.print("[yellow]WARNING: Paper results are simulated. Not real profit or loss.[/yellow]")
+
+
 if __name__ == "__main__":
     app()
