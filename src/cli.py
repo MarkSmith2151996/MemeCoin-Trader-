@@ -3731,5 +3731,38 @@ def paper_candidate_replay(
     console.print("[yellow]WARNING: Paper results are simulated. Not real trading advice.[/yellow]")
 
 
+@app.command("paper-recheck-queue")
+def paper_recheck_queue(
+    threshold_pct: float = typer.Option(60.0, "--threshold-pct", min=0.01, help="Hypothetical holder cap for review hints."),
+    limit: int = typer.Option(50, "--limit", "-n", help="Recent persisted decisions to inspect."),
+    db_path: str | None = typer.Option(None, help="Optional SQLite path override."),
+) -> None:
+    """List display-only recheck candidates derived from persisted replay evidence."""
+    runtime_db_path = resolve_db_path(db_path)
+    asyncio.run(init_db(runtime_db_path))
+    records = asyncio.run(get_recent_paper_decisions(runtime_db_path, limit=limit))
+    console.print("[bold]Paper Recheck Queue[/bold]")
+    console.print("  DISPLAY-ONLY. Queue entries remain rejected and are not orders or trading actions.")
+    for record in records:
+        if record.action_outcome == "traded":
+            continue
+        try:
+            diagnostics = json.loads(record.diagnostics_json)
+        except (TypeError, json.JSONDecodeError):
+            diagnostics = {}
+        diagnostics = diagnostics if isinstance(diagnostics, dict) else {}
+        bucket = _holder_risk_bucket(diagnostics.get("top10_holder_pct"), diagnostics.get("top10_holder_threshold_pct"))
+        provenance = diagnostics.get("creator_unknown_reason") if record.primary_reason == "creator_holding_check_unknown" else diagnostics.get("liquidity_unknown_reason")
+        provider = _provider_category(provenance) if record.primary_reason.endswith("_unknown") else "not_applicable"
+        pct = _coerce_numeric(diagnostics.get("top10_holder_pct"))
+        review = "yes" if record.primary_reason == "top10_holder_check_failed" and pct is not None and pct <= threshold_pct else "no"
+        hint = _replay_action_hint(record.primary_reason, bucket, provider, review)
+        if hint not in {"provider_retry", "data_fix", "threshold_review+full_recheck", "full_recheck"}:
+            continue
+        label = record.symbol or record.name or record.mint_address[:16] or "unknown"
+        console.print(f"  {label} hint={hint} blocker={record.primary_reason} holder={bucket} provider={provider}")
+    console.print("[yellow]WARNING: Paper results are simulated. Not real trading advice.[/yellow]")
+
+
 if __name__ == "__main__":
     app()
