@@ -182,6 +182,7 @@ class DiscoveryRiskScorer:
             assessment,
             holder_diagnostics,
             policy_mode=self._holder_policy_mode,
+            top10_holder_threshold_pct=self._config.max_top10_holder_pct,
         )
         signal.payload["holder_policy"] = holder_policy
         assessment, age_policy = _apply_age_policy_assessment(
@@ -968,6 +969,7 @@ def _build_holder_policy_diagnostics(
     holder_diagnostics: Mapping[str, object],
     *,
     policy_mode: str,
+    top10_holder_threshold_pct: float,
 ) -> dict[str, object]:
     selected_top10_holder_pct = holder_diagnostics.get("selected_top10_holder_pct")
     holder_source = holder_diagnostics.get("top10_holder_source")
@@ -982,6 +984,8 @@ def _build_holder_policy_diagnostics(
             "token_age_minutes": age_minutes,
             "stage_hint": stage,
             "fresh_launch_context_used": fresh_context_used,
+            "selected_top10_holder_pct": selected_top10_holder_pct,
+            "top10_holder_threshold_pct": top10_holder_threshold_pct,
         }
 
     if assessment.top10_holder_check == CheckResult.UNKNOWN:
@@ -991,6 +995,8 @@ def _build_holder_policy_diagnostics(
             "token_age_minutes": age_minutes,
             "stage_hint": stage,
             "fresh_launch_context_used": fresh_context_used,
+            "selected_top10_holder_pct": selected_top10_holder_pct,
+            "top10_holder_threshold_pct": top10_holder_threshold_pct,
         }
 
     if policy_mode != "discovery":
@@ -1000,6 +1006,8 @@ def _build_holder_policy_diagnostics(
             "token_age_minutes": age_minutes,
             "stage_hint": stage,
             "fresh_launch_context_used": fresh_context_used,
+            "selected_top10_holder_pct": selected_top10_holder_pct,
+            "top10_holder_threshold_pct": top10_holder_threshold_pct,
         }
 
     trusted_source = holder_source in {"local_filtered_override", "local_filtered_lookup", "signal_payload"}
@@ -1018,6 +1026,8 @@ def _build_holder_policy_diagnostics(
             "token_age_minutes": age_minutes,
             "stage_hint": stage,
             "fresh_launch_context_used": fresh_context_used,
+            "selected_top10_holder_pct": selected_top10_holder_pct,
+            "top10_holder_threshold_pct": top10_holder_threshold_pct,
         }
 
     return {
@@ -1026,6 +1036,8 @@ def _build_holder_policy_diagnostics(
         "token_age_minutes": age_minutes,
         "stage_hint": stage,
         "fresh_launch_context_used": fresh_context_used,
+        "selected_top10_holder_pct": selected_top10_holder_pct,
+        "top10_holder_threshold_pct": top10_holder_threshold_pct,
     }
 
 
