@@ -2615,3 +2615,61 @@ def test_rejected_outcome_labels_require_marks_and_keep_source_reason_context(tm
     assert "source=pump_fun" in result.stdout
     assert "count=1" in result.stdout
     assert [record.model_dump_json() for record in after] == [record.model_dump_json() for record in before]
+
+
+def test_later_rejection_marks_only_fetch_baseline_covered_rows_and_stay_read_only(tmp_path: Path) -> None:
+    class CountingPriceProvider(FakePriceProvider):
+        def __init__(self) -> None:
+            super().__init__({"covered": 0.00002})
+            self.calls: list[str] = []
+
+        async def get_current_price(self, mint_address: str) -> float | None:
+            self.calls.append(mint_address)
+            return await super().get_current_price(mint_address)
+
+    db = tmp_path / "later-rejection-marks.db"
+    asyncio.run(init_db(db))
+    for mint, baseline in (("covered", 0.00001), ("missing", None)):
+        snapshot = {
+            "mint": mint,
+            "source": "pump_fun",
+            "candidate_mode": "launch",
+            "rejection_reason": "top10_holder_check_failed",
+            "failed_check": "top10_holder_check",
+            "rejection_mark_price_sol": baseline,
+        }
+        asyncio.run(record_paper_decision(db, PaperDecisionRecord(
+            mint_address=mint,
+            source="manual",
+            action_outcome="rejected",
+            decision="rejected",
+            primary_reason="rejected",
+            diagnostics_json=json.dumps({"recheck_snapshot": snapshot}, sort_keys=True),
+        )))
+
+    records = asyncio.run(get_recent_paper_decisions(db, limit=10))
+    provider = CountingPriceProvider()
+    outcomes, missing_snapshot, missing_baseline = asyncio.run(
+        cli_module.collect_later_rejection_marks(records, provider, limit=25)
+    )
+
+    assert missing_snapshot == 0
+    assert missing_baseline == 1
+    assert provider.calls == ["covered"]
+    assert len(outcomes) == 1
+    assert outcomes[0].current_mark_sol == 0.00002
+    assert outcomes[0].later_mark_provider == "fake"
+    assert outcomes[0].later_mark_timestamp is not None
+    assert cli_module._rejected_outcome_label(outcomes[0]) == "possible_too_strict_pumped"
+
+    before = asyncio.run(get_recent_paper_decisions(db, limit=10))
+    result = runner.invoke(
+        cli_module.app,
+        ["paper-rejected-later-marks", "--marks", "unavailable", "--db-path", str(db)],
+    )
+    after = asyncio.run(get_recent_paper_decisions(db, limit=10))
+    assert result.exit_code == 0
+    assert "Baseline-covered candidates: 1" in result.stdout
+    assert "Skipped missing baseline: 1" in result.stdout
+    assert "status=price_unavailable" in result.stdout
+    assert [record.model_dump_json() for record in after] == [record.model_dump_json() for record in before]

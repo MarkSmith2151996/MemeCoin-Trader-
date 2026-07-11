@@ -4245,6 +4245,8 @@ class RejectedCandidateOutcome:
     return_multiple: float | None
     liquidity_sol: float | None
     current_liquidity_usd: float | None = None
+    later_mark_provider: str = "unknown"
+    later_mark_timestamp: str | None = None
 
 
 def _outcome_snapshot(record: PaperDecisionRecord) -> dict[str, object] | None:
@@ -4308,6 +4310,8 @@ async def collect_rejected_candidate_outcomes(
                 return_multiple=return_multiple,
                 liquidity_sol=liquidity if liquidity is not None and liquidity >= 0 else None,
                 current_liquidity_usd=mark.liquidity_usd,
+                later_mark_provider=price_provider.name,
+                later_mark_timestamp=datetime.now(UTC).isoformat(),
             )
         )
     return outcomes, skipped_missing
@@ -4390,6 +4394,66 @@ def paper_rejected_outcome_labels(
     console.print(f"  Labels: {dict(labels.most_common())}")
     for (label, blocker, source), count in breakdowns.most_common():
         console.print(f"  label={label} blocker={blocker} source={source} count={count}")
+    console.print("[yellow]WARNING: Paper results are simulated. Not real trading advice.[/yellow]")
+
+
+async def collect_later_rejection_marks(
+    records: list[PaperDecisionRecord],
+    price_provider: PriceProvider,
+    *,
+    limit: int,
+) -> tuple[list[RejectedCandidateOutcome], int, int]:
+    """Fetch bounded later marks only for records with a real persisted baseline."""
+    baseline_records: list[PaperDecisionRecord] = []
+    skipped_missing_snapshot = 0
+    skipped_missing_baseline = 0
+    for record in records:
+        if record.action_outcome == "traded":
+            continue
+        snapshot = _outcome_snapshot(record)
+        if snapshot is None:
+            skipped_missing_snapshot += 1
+            continue
+        baseline = _coerce_numeric(snapshot.get("rejection_mark_price_sol"))
+        if baseline is None or baseline <= 0:
+            skipped_missing_baseline += 1
+            continue
+        baseline_records.append(record)
+    outcomes, _ = await collect_rejected_candidate_outcomes(baseline_records, price_provider, limit=limit)
+    return outcomes, skipped_missing_snapshot, skipped_missing_baseline
+
+
+@app.command("paper-rejected-later-marks")
+def paper_rejected_later_marks(
+    limit: int = typer.Option(25, "--limit", "-n", min=1, max=50, help="Maximum baseline-covered candidates to inspect."),
+    marks: str = typer.Option("live", "--marks", help="Mark price source: read-only 'live' DexScreener or 'unavailable'."),
+    db_path: str | None = typer.Option(None, help="Optional SQLite path override."),
+) -> None:
+    """Collect later read-only market marks only for baseline-covered rejected snapshots."""
+    if marks not in {"live", "unavailable"}:
+        raise typer.BadParameter("must be 'unavailable' or 'live'", param_hint="--marks")
+    runtime_db_path = resolve_db_path(db_path)
+    asyncio.run(init_db(runtime_db_path))
+    records = asyncio.run(get_recent_paper_decisions(runtime_db_path, limit=max(limit * 20, 500)))
+    provider: PriceProvider = DexScreenerPriceProvider() if marks == "live" else UnavailablePriceProvider()
+    outcomes, skipped_missing_snapshot, skipped_missing_baseline = asyncio.run(
+        collect_later_rejection_marks(records, provider, limit=limit)
+    )
+    available = sum(outcome.current_mark_sol is not None for outcome in outcomes)
+    console.print("[bold]Paper Rejected Later Marks[/bold]")
+    console.print("  DIAGNOSTIC-ONLY. Later marks do not alter ranking, gates, acceptance, execution, PnL, attribution, or readiness.")
+    console.print(f"  Baseline-covered candidates: {len(outcomes)}")
+    console.print(f"  Skipped missing snapshots: {skipped_missing_snapshot}")
+    console.print(f"  Skipped missing baseline: {skipped_missing_baseline}")
+    console.print(f"  Later marks available: {available}")
+    for outcome in outcomes:
+        current = f"{outcome.current_mark_sol:.10f}" if outcome.current_mark_sol is not None else "unavailable"
+        liquidity = f"{outcome.current_liquidity_usd:.2f}" if outcome.current_liquidity_usd is not None else "unavailable"
+        console.print(
+            f"  mint={_short_mint(outcome.mint)} baseline={outcome.rejection_mark_sol:.10f} current={current} "
+            f"liquidity_usd={liquidity} provider={outcome.later_mark_provider} status={outcome.mark_reason} "
+            f"timestamp={outcome.later_mark_timestamp or 'unknown'} label={_rejected_outcome_label(outcome)}"
+        )
     console.print("[yellow]WARNING: Paper results are simulated. Not real trading advice.[/yellow]")
 
 
