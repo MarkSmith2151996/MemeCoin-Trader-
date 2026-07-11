@@ -4066,6 +4066,17 @@ def _source_quality_bucket(
     return "mixed_risk"
 
 
+def _source_investigation_flag(bucket: str) -> str:
+    """Map a diagnostic bucket to an investigation-only label."""
+    return {
+        "severe_holder_heavy": "severe_risk_source",
+        "unknown_data_heavy": "provider_data_gap",
+        "near_threshold_heavy": "near_threshold_review",
+        "sparse_sample": "sparse_sample",
+        "insufficient_data": "sparse_sample",
+    }.get(bucket, "investigate_source")
+
+
 @app.command("paper-recheck-snapshot-source-buckets")
 def paper_recheck_snapshot_source_buckets(
     limit: int = typer.Option(500, "--limit", "-n", help="Recent persisted decisions to inspect."),
@@ -4130,6 +4141,72 @@ def paper_recheck_snapshot_source_buckets(
             f"  source={source} mode={mode} bucket={bucket} rejected={total} primary_blocker={primary_blocker} "
             f"holder_severity={dict(holders.most_common()) or {'not_applicable': 0}} "
             f"unknown_data={summary['unknown_data']} examples={examples}"
+        )
+    console.print("[yellow]WARNING: Paper results are simulated. Not real trading advice.[/yellow]")
+
+
+@app.command("paper-recheck-snapshot-weak-source-preview")
+def paper_recheck_snapshot_weak_source_preview(
+    limit: int = typer.Option(500, "--limit", "-n", help="Recent persisted decisions to inspect."),
+    db_path: str | None = typer.Option(None, help="Optional SQLite path override."),
+) -> None:
+    """Preview source investigation flags from persisted snapshot evidence only."""
+    runtime_db_path = resolve_db_path(db_path)
+    asyncio.run(init_db(runtime_db_path))
+    records = asyncio.run(get_recent_paper_decisions(runtime_db_path, limit=limit))
+    summaries: dict[tuple[str, str], dict[str, object]] = {}
+    replayable = skipped_missing = 0
+    for record in records:
+        if record.action_outcome == "traded":
+            continue
+        try:
+            diagnostics = json.loads(record.diagnostics_json)
+        except (TypeError, json.JSONDecodeError):
+            diagnostics = {}
+        snapshot = diagnostics.get("recheck_snapshot") if isinstance(diagnostics, dict) else None
+        if not isinstance(snapshot, dict) or not snapshot.get("mint") or not snapshot.get("source") or not snapshot.get("rejection_reason"):
+            skipped_missing += 1
+            continue
+        assessment = _snapshot_recheck_assessment(snapshot)
+        if assessment.all_checks_pass:
+            continue
+        replayable += 1
+        key = (str(snapshot.get("source") or "unknown"), str(snapshot.get("candidate_mode") or "unknown"))
+        summary = summaries.setdefault(
+            key,
+            {"blockers": Counter(), "holders": Counter(), "unknown_data": 0, "examples": []},
+        )
+        blocker = _snapshot_first_failing_check(snapshot, assessment)
+        summary["blockers"][blocker] += 1
+        if blocker.endswith("_unknown"):
+            summary["unknown_data"] += 1
+        if blocker == "top10_holder_check":
+            summary["holders"][_holder_risk_bucket(
+                snapshot.get("top10_holder_pct"),
+                snapshot.get("top10_holder_threshold_pct"),
+            )] += 1
+        examples = summary["examples"]
+        if len(examples) < 3:
+            examples.append(_short_mint(str(snapshot["mint"])))
+
+    console.print("[bold]Paper Snapshot Weak-Source Preview[/bold]")
+    console.print("  DIAGNOSTIC-ONLY PREVIEW. Flags are investigation prompts, not ranking, suppression, acceptance, or trading signals.")
+    console.print(f"  Replayable rejected snapshots: {replayable}")
+    console.print(f"  Skipped missing snapshots: {skipped_missing}")
+    for (source, mode), summary in sorted(summaries.items()):
+        total = sum(summary["blockers"].values())
+        holders = summary["holders"]
+        bucket = _source_quality_bucket(
+            total,
+            severe_holders=holders["severe_fail"],
+            unknown_data=summary["unknown_data"],
+            near_threshold_holders=holders["near_threshold"],
+        )
+        flag = _source_investigation_flag(bucket)
+        examples = ", ".join(summary["examples"]) or "none"
+        console.print(
+            f"  source={source} mode={mode} preview={flag} bucket={bucket} rejected={total} "
+            f"blockers={dict(summary['blockers'].most_common())} unknown_data={summary['unknown_data']} examples={examples}"
         )
     console.print("[yellow]WARNING: Paper results are simulated. Not real trading advice.[/yellow]")
 
