@@ -1928,6 +1928,8 @@ def test_paper_decisions_displays_persisted_discovery_edge_diagnostics(tmp_path:
     diagnostics = {
         "edge_score": 73,
         "edge_breakdown": "src=2/comp=0.84 mode=launch attn=79/present weak=-0 warn=-3 approval=discovery_relaxed",
+        "attention_quality": "strong",
+        "attention_detail": "mode=launch src=composite/2 social=present attn=79/active weak=-0 approval=discovery_relaxed warn=1",
     }
     asyncio.run(
         record_paper_decision(
@@ -1948,10 +1950,13 @@ def test_paper_decisions_displays_persisted_discovery_edge_diagnostics(tmp_path:
     result = runner.invoke(cli_module.app, ["paper-decisions", "--db-path", str(db)])
 
     assert result.exit_code == 0
-    assert "Discovery edge is an operator diagnostic only" in result.stdout
+    assert "paper-only operator/research" in result.stdout
+    assert "diagnostics; they do not affect strict risk" in result.stdout
     assert "edge=73" in result.stdout
     assert "detail=src=2/comp=0.84 mode=launch" in result.stdout
     assert "approval=discovery_relaxed" in result.stdout
+    assert "attention=strong" in result.stdout
+    assert "detail=mode=launch src=composite/2" in result.stdout
 
 
 def test_paper_decisions_edge_fallback_preserves_strict_record_and_never_calls_live_buy(
@@ -1983,10 +1988,45 @@ def test_paper_decisions_edge_fallback_preserves_strict_record_and_never_calls_l
 
     assert result.exit_code == 0
     assert "edge=not-recorded" in result.stdout
+    assert "attention=not-recorded" in result.stdout
     assert stored.risk_profile == "strict"
     assert stored.action_outcome == "rejected"
     assert stored.primary_reason == "honeypot_check_unknown"
     assert live_buy_calls == []
+
+
+def test_attention_quality_diagnostics_are_deterministic_and_persisted_paper_only() -> None:
+    diagnostic = {
+        "source": "composite",
+        "source_count": 2,
+        "candidate_mode": "launch",
+        "social_signal_state": "present",
+        "attention_score": 79,
+        "attention_tier": "active",
+        "ranking_penalty_points": 4,
+        "risk_approval_state": "discovery_relaxed",
+        "main_warnings": ("limited holder evidence",),
+    }
+
+    enriched = cli_module._apply_paper_attention_diagnostics([dict(diagnostic)], [])[0][0]
+    repeat = cli_module._apply_paper_attention_diagnostics([dict(diagnostic)], [])[0][0]
+    record = cli_module._paper_decision_record(
+        enriched,
+        cycle_id="paper-cycle",
+        execution_mode="paper",
+        risk_profile="discovery",
+    )
+    persisted = json.loads(record.diagnostics_json)
+
+    assert enriched["attention_quality"] == "strong"
+    assert enriched["attention_detail"] == (
+        "mode=launch src=composite/2 social=present attn=79/active weak=-4 "
+        "approval=discovery_relaxed warn=1"
+    )
+    assert repeat["attention_quality"] == enriched["attention_quality"]
+    assert repeat["attention_detail"] == enriched["attention_detail"]
+    assert persisted["attention_quality"] == enriched["attention_quality"]
+    assert persisted["attention_detail"] == enriched["attention_detail"]
 
 
 def test_paper_decisions_outcome_filter(tmp_path: Path) -> None:

@@ -495,6 +495,10 @@ async def run_bounded_paper_cycle(
         accepted_candidate_diagnostics,
         rejected_candidate_diagnostics,
     )
+    accepted_candidate_diagnostics, rejected_candidate_diagnostics = _apply_paper_attention_diagnostics(
+        accepted_candidate_diagnostics,
+        rejected_candidate_diagnostics,
+    )
     if normalized_risk_profile == "discovery":
         accepted_candidate_diagnostics, rejected_candidate_diagnostics = _apply_discovery_edge_diagnostics(
             accepted_candidate_diagnostics,
@@ -609,6 +613,8 @@ def _paper_decision_record(
         "risk_approval_state": diagnostic.get("risk_approval_state"),
         "edge_score": diagnostic.get("edge_score"),
         "edge_breakdown": diagnostic.get("edge_breakdown"),
+        "attention_quality": diagnostic.get("attention_quality"),
+        "attention_detail": diagnostic.get("attention_detail"),
         "metadata_completeness_state": diagnostic.get("metadata_completeness_state"),
         "social_signal_state": diagnostic.get("social_signal_state"),
         "source_count": diagnostic.get("source_count"),
@@ -660,6 +666,24 @@ def _paper_decision_edge_display(record: PaperDecisionRecord) -> str:
     if not isinstance(breakdown, str) or not breakdown.strip():
         return f"edge={score:g} detail=not-recorded"
     return f"edge={score:g} detail={breakdown.strip()}"
+
+
+def _paper_decision_attention_display(record: PaperDecisionRecord) -> str:
+    """Format persisted paper-only attention research diagnostics."""
+    try:
+        diagnostics = json.loads(record.diagnostics_json)
+    except (TypeError, json.JSONDecodeError):
+        return "attention=not-recorded"
+    if not isinstance(diagnostics, dict):
+        return "attention=not-recorded"
+
+    quality = diagnostics.get("attention_quality")
+    detail = diagnostics.get("attention_detail")
+    if not isinstance(quality, str) or not quality.strip():
+        return "attention=not-recorded"
+    if not isinstance(detail, str) or not detail.strip():
+        return f"attention={quality.strip()} detail=not-recorded"
+    return f"attention={quality.strip()} detail={detail.strip()}"
 
 
 def _extract_rejection_record(metadata: dict[str, object]) -> RejectionRecord | None:
@@ -1147,9 +1171,58 @@ def _apply_discovery_edge_diagnostics(
             f"attn={int(attention_score)}/{social_state} weak=-{ranking_penalty} "
             f"warn=-{warnings_penalty} approval={approval}"
         )
-        return {**diagnostic, "edge_score": edge_score, "edge_breakdown": breakdown}
+        return {
+            **diagnostic,
+            "edge_score": edge_score,
+            "edge_breakdown": breakdown,
+        }
 
     return [enrich(item) for item in accepted], [enrich(item) for item in rejected]
+
+
+def _apply_paper_attention_diagnostics(
+    accepted: list[dict[str, object]],
+    rejected: list[dict[str, object]],
+) -> tuple[list[dict[str, object]], list[dict[str, object]]]:
+    def enrich(diagnostic: dict[str, object]) -> dict[str, object]:
+        attention_quality, attention_detail = _attention_quality_diagnostics(diagnostic)
+        return {
+            **diagnostic,
+            "attention_quality": attention_quality,
+            "attention_detail": attention_detail,
+        }
+
+    return [enrich(item) for item in accepted], [enrich(item) for item in rejected]
+
+
+def _attention_quality_diagnostics(diagnostic: dict[str, object]) -> tuple[str, str]:
+    """Summarize existing paper candidate context without feeding any decision path."""
+    source_count = diagnostic.get("source_count")
+    source_count = source_count if isinstance(source_count, int) and source_count > 0 else 1
+    source = str(diagnostic.get("source") or "unknown")
+    source_context = "composite" if source == "composite" or source_count > 1 else source
+    mode = str(diagnostic.get("candidate_mode") or "unknown")
+    social_state = str(diagnostic.get("social_signal_state") or "missing")
+    attention_score = _coerce_numeric(diagnostic.get("attention_score")) or 0.0
+    attention_tier = str(diagnostic.get("attention_tier") or "ignore")
+    weak_identity = diagnostic.get("ranking_penalty_points")
+    weak_identity = weak_identity if isinstance(weak_identity, int) and weak_identity > 0 else 0
+    warning_count = _warning_count(diagnostic)
+    approval = str(diagnostic.get("risk_approval_state") or "strict_rejected")
+
+    quality_score = min(max(attention_score, 0.0), 100.0)
+    quality_score += 10 if source_context == "composite" else 0
+    quality_score += 5 if social_state not in {"missing", "unknown"} else 0
+    quality_score -= weak_identity + min(warning_count * 5, 20)
+    quality_score += {"strict_approved": 5, "discovery_relaxed": 0, "strict_rejected": -5}.get(approval, -5)
+    quality_score = max(0, min(round(quality_score), 100))
+    quality = "strong" if quality_score >= 70 else "mixed" if quality_score >= 40 else "thin"
+    detail = (
+        f"mode={mode} src={source_context}/{source_count} social={social_state} "
+        f"attn={int(attention_score)}/{attention_tier} weak=-{weak_identity} "
+        f"approval={approval} warn={warning_count}"
+    )
+    return quality, detail
 
 
 def _discovery_ranking_penalty(diagnostic: dict[str, object]) -> tuple[int, tuple[str, ...]]:
@@ -3169,8 +3242,8 @@ def paper_decisions(
         console.print(f"  Generated: {now_str}")
         console.print(f"  Mode: paper (simulated)")
         console.print(
-            "  Discovery edge is an operator diagnostic only; it does not affect strict risk, "
-            "ranking, sizing, or execution."
+            "  Discovery edge and attention quality are paper-only operator/research diagnostics; "
+            "they do not affect strict risk, ranking, sizing, or execution."
         )
         console.print("")
 
@@ -3202,7 +3275,8 @@ def paper_decisions(
                 label = d.symbol or d.name or d.mint_address[:16] if d.mint_address else "unknown"
                 console.print(
                     f"  {label}  source={d.source}  mode={d.candidate_mode}  "
-                    f"score={d.attention_score}  {_paper_decision_edge_display(d)}"
+                    f"score={d.attention_score}  {_paper_decision_edge_display(d)}  "
+                    f"{_paper_decision_attention_display(d)}"
                 )
             if len(accepted) > 5:
                 console.print(f"  ... and {len(accepted) - 5} more")
@@ -3214,7 +3288,8 @@ def paper_decisions(
                 label = d.symbol or d.name or d.mint_address[:16] if d.mint_address else "unknown"
                 console.print(
                     f"  {label}  reason={d.primary_reason}  source={d.source}  "
-                    f"mode={d.candidate_mode}  {_paper_decision_edge_display(d)}"
+                    f"mode={d.candidate_mode}  {_paper_decision_edge_display(d)}  "
+                    f"{_paper_decision_attention_display(d)}"
                 )
             if len(rejected) > 5:
                 console.print(f"  ... and {len(rejected) - 5} more")
