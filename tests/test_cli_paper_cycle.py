@@ -2244,3 +2244,65 @@ def test_raw_safe_snapshot_captures_normalized_check_results_only() -> None:
         "top10_holder_check": "fail",
     }
     assert "secret" not in json.dumps(snapshot)
+
+
+def test_snapshot_risk_source_analysis_groups_rejections_without_mutating_state(tmp_path: Path) -> None:
+    db = tmp_path / "snapshot-risk-sources.db"
+    asyncio.run(init_db(db))
+    snapshots = (
+        {
+            "mint": "holder-one",
+            "source": "pump_fun",
+            "candidate_mode": "launch",
+            "rejection_reason": "top10_holder_check_failed",
+            "failed_check": "top10_holder_check",
+            "top10_holder_pct": 90.0,
+            "top10_holder_threshold_pct": 50.0,
+            "confidence": 0.8,
+            "effective_score": 0.8,
+            "metadata_completeness_state": "partial",
+        },
+        {
+            "mint": "holder-two",
+            "source": "pump_fun",
+            "candidate_mode": "launch",
+            "rejection_reason": "top10_holder_check_failed",
+            "failed_check": "top10_holder_check",
+            "top10_holder_pct": 99.0,
+            "top10_holder_threshold_pct": 50.0,
+        },
+        {
+            "mint": "creator-unknown",
+            "source": "onchain",
+            "candidate_mode": "migration",
+            "rejection_reason": "creator_holding_check_unknown",
+            "failed_check": "creator_holding_check_unknown",
+        },
+    )
+    for index, snapshot in enumerate(snapshots):
+        asyncio.run(
+            record_paper_decision(
+                db,
+                PaperDecisionRecord(
+                    mint_address=f"snapshot-{index}",
+                    source="manual",
+                    action_outcome="rejected",
+                    decision="rejected",
+                    primary_reason="rejected",
+                    diagnostics_json=json.dumps({"recheck_snapshot": snapshot}, sort_keys=True),
+                ),
+            )
+        )
+
+    before = asyncio.run(get_recent_paper_decisions(db, limit=10))
+    result = runner.invoke(cli_module.app, ["paper-recheck-snapshot-risk-sources", "--db-path", str(db)])
+    after = asyncio.run(get_recent_paper_decisions(db, limit=10))
+
+    assert result.exit_code == 0
+    assert "Replayable rejected snapshots: 3" in result.stdout
+    assert "source=pump_fun mode=launch blocker=top10_holder_check" in result.stdout
+    assert "holder=severe_fail count=2 repeated" in result.stdout
+    assert "source=onchain mode=migration blocker=creator_holding_check_unknown" in result.stdout
+    assert "holder=unknown count=1" in result.stdout
+    assert "Top10 holder failure clusters:" in result.stdout
+    assert [record.model_dump_json() for record in after] == [record.model_dump_json() for record in before]

@@ -3919,5 +3919,71 @@ def paper_recheck_snapshot_dry_run(
     console.print("[yellow]WARNING: Paper results are simulated. Not real trading advice.[/yellow]")
 
 
+@app.command("paper-recheck-snapshot-risk-sources")
+def paper_recheck_snapshot_risk_sources(
+    limit: int = typer.Option(500, "--limit", "-n", help="Recent persisted decisions to inspect."),
+    db_path: str | None = typer.Option(None, help="Optional SQLite path override."),
+) -> None:
+    """Group snapshot dry-run rejections by safe discovery source and risk context."""
+    runtime_db_path = resolve_db_path(db_path)
+    asyncio.run(init_db(runtime_db_path))
+    records = asyncio.run(get_recent_paper_decisions(runtime_db_path, limit=limit))
+    grouped: Counter[tuple[str, str, str, str]] = Counter()
+    holder_clusters: Counter[tuple[str, str, str]] = Counter()
+    contexts: dict[tuple[str, str, str, str], str] = {}
+    replayable = skipped_missing = 0
+    for record in records:
+        if record.action_outcome == "traded":
+            continue
+        try:
+            diagnostics = json.loads(record.diagnostics_json)
+        except (TypeError, json.JSONDecodeError):
+            diagnostics = {}
+        snapshot = diagnostics.get("recheck_snapshot") if isinstance(diagnostics, dict) else None
+        if not isinstance(snapshot, dict) or not snapshot.get("mint") or not snapshot.get("source") or not snapshot.get("rejection_reason"):
+            skipped_missing += 1
+            continue
+        assessment = _snapshot_recheck_assessment(snapshot)
+        if assessment.all_checks_pass:
+            continue
+        replayable += 1
+        source = str(snapshot.get("source") or "unknown")
+        mode = str(snapshot.get("candidate_mode") or "unknown")
+        blocker = _snapshot_first_failing_check(snapshot, assessment)
+        holder_bucket = _holder_risk_bucket(
+            snapshot.get("top10_holder_pct"),
+            snapshot.get("top10_holder_threshold_pct"),
+        )
+        group = (source, mode, blocker, holder_bucket)
+        grouped[group] += 1
+        contexts.setdefault(
+            group,
+            "confidence={confidence} effective_score={effective_score} metadata={metadata}".format(
+                confidence=snapshot.get("confidence", "unknown"),
+                effective_score=snapshot.get("effective_score", "unknown"),
+                metadata=snapshot.get("metadata_completeness_state", "unknown"),
+            ),
+        )
+        if blocker == "top10_holder_check":
+            holder_clusters[(source, mode, holder_bucket)] += 1
+
+    console.print("[bold]Paper Snapshot Risk Source Analysis[/bold]")
+    console.print("  DISPLAY-ONLY. Snapshot evidence is grouped for research only; it does not alter ranking, gates, sizing, acceptance, execution, or readiness.")
+    console.print(f"  Replayable rejected snapshots: {replayable}")
+    console.print(f"  Skipped missing snapshots: {skipped_missing}")
+    console.print("  [bold]Source / mode / blocker / holder bucket:[/bold]")
+    for (source, mode, blocker, holder_bucket), count in grouped.most_common():
+        repeated = " repeated" if count > 1 else ""
+        console.print(
+            f"    source={source} mode={mode} blocker={blocker} holder={holder_bucket} "
+            f"count={count}{repeated} {contexts[(source, mode, blocker, holder_bucket)]}"
+        )
+    console.print("  [bold]Top10 holder failure clusters:[/bold]")
+    for (source, mode, holder_bucket), count in holder_clusters.most_common():
+        repeated = " repeated" if count > 1 else ""
+        console.print(f"    source={source} mode={mode} holder={holder_bucket} count={count}{repeated}")
+    console.print("[yellow]WARNING: Paper results are simulated. Not real trading advice.[/yellow]")
+
+
 if __name__ == "__main__":
     app()
