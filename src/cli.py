@@ -608,6 +608,10 @@ def _paper_decision_record(
         "holder_policy_state": diagnostic.get("holder_policy_state"),
         "top10_holder_pct": diagnostic.get("top10_holder_pct"),
         "top10_holder_threshold_pct": diagnostic.get("top10_holder_threshold_pct"),
+        "creator_unknown_reason": diagnostic.get("creator_unknown_reason"),
+        "creator_holding_source": diagnostic.get("creator_holding_source"),
+        "liquidity_data_state": diagnostic.get("liquidity_data_state"),
+        "liquidity_source": diagnostic.get("liquidity_source"),
         "creator_policy_state": diagnostic.get("creator_policy_state"),
         "unique_buyers_policy_state": diagnostic.get("unique_buyers_policy_state"),
         "authority_policy_state": diagnostic.get("authority_policy_state"),
@@ -773,6 +777,7 @@ def _build_rejected_candidate_diagnostic(
     holder_policy = payload.get("holder_policy") if isinstance(payload.get("holder_policy"), dict) else {}
     age_policy = payload.get("age_policy") if isinstance(payload.get("age_policy"), dict) else {}
     liquidity_diagnostics = payload.get("liquidity_diagnostics") if isinstance(payload.get("liquidity_diagnostics"), dict) else {}
+    creator_diagnostics = payload.get("creator_diagnostics") if isinstance(payload.get("creator_diagnostics"), dict) else {}
     top10_result = _check_result_value(record, "top10_holder_check")
     liquidity_result = _check_result_value(record, "liquidity_check")
     authority_result = _check_result_value(record, "mint_authority_check")
@@ -825,6 +830,10 @@ def _build_rejected_candidate_diagnostic(
             top10_value if top10_value is not None else "unknown",
         ),
         "top10_holder_threshold_pct": holder_policy.get("top10_holder_threshold_pct"),
+        "creator_unknown_reason": creator_diagnostics.get("creator_holding_unknown_reason", "unknown"),
+        "creator_holding_source": creator_diagnostics.get("creator_holding_source", "unknown"),
+        "liquidity_data_state": liquidity_diagnostics.get("liquidity_data_state", "unknown"),
+        "liquidity_source": liquidity_diagnostics.get("liquidity_source", "unknown"),
         "top10_holder_source": _top10_holder_source_hint(payload, record),
         "bonding_curve_addresses": tuple(holder_diagnostics.get("bonding_curve_addresses", ())),
         "local_holder_raw_account_count": holder_diagnostics.get("local_holder_raw_account_count", 0),
@@ -3544,6 +3553,7 @@ def paper_blockers(
     strict: Counter[str] = Counter()
     unknown: Counter[str] = Counter()
     holder_buckets: Counter[str] = Counter()
+    unknown_provenance: Counter[str] = Counter()
     examples: dict[str, str] = {}
     for record in records:
         reason = record.primary_reason or "unknown"
@@ -3559,6 +3569,20 @@ def paper_blockers(
                 diagnostics.get("top10_holder_pct") if isinstance(diagnostics, dict) else None,
                 diagnostics.get("top10_holder_threshold_pct") if isinstance(diagnostics, dict) else None,
             )] += 1
+        elif reason == "creator_holding_check_unknown":
+            try:
+                diagnostics = json.loads(record.diagnostics_json)
+            except (TypeError, json.JSONDecodeError):
+                diagnostics = {}
+            provenance = diagnostics.get("creator_unknown_reason") if isinstance(diagnostics, dict) else None
+            unknown_provenance[f"creator:{provenance or 'unknown'}"] += 1
+        elif reason == "liquidity_check_unknown":
+            try:
+                diagnostics = json.loads(record.diagnostics_json)
+            except (TypeError, json.JSONDecodeError):
+                diagnostics = {}
+            provenance = diagnostics.get("liquidity_data_state") if isinstance(diagnostics, dict) else None
+            unknown_provenance[f"liquidity:{provenance or 'unknown'}"] += 1
     console.print("[bold]Paper Rejection Blockers[/bold]")
     console.print("  Paper-only diagnostic; strict approval is unchanged.")
     for title, counts in (("Strict risk failures", strict), ("Unknown-data blocks", unknown)):
@@ -3567,6 +3591,8 @@ def paper_blockers(
             console.print(f"    {reason}: {count} (example: {examples[reason]})")
     if holder_buckets:
         console.print(f"  [bold]Holder-risk buckets (diagnostic only; not acceptance):[/bold] {dict(holder_buckets.most_common())}")
+    if unknown_provenance:
+        console.print(f"  [bold]Unknown-data provenance:[/bold] {dict(unknown_provenance.most_common())}")
     console.print("[yellow]WARNING: Paper results are simulated. Not real trading advice.[/yellow]")
 
 
