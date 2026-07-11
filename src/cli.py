@@ -613,6 +613,7 @@ def _paper_decision_record(
         "liquidity_data_state": diagnostic.get("liquidity_data_state"),
         "liquidity_source": diagnostic.get("liquidity_source"),
         "liquidity_unknown_reason": diagnostic.get("liquidity_unknown_reason"),
+        "recheck_snapshot": _raw_safe_recheck_snapshot(diagnostic),
         "creator_policy_state": diagnostic.get("creator_policy_state"),
         "unique_buyers_policy_state": diagnostic.get("unique_buyers_policy_state"),
         "authority_policy_state": diagnostic.get("authority_policy_state"),
@@ -657,6 +658,20 @@ def _paper_decision_record(
         risk_score=float(diagnostic.get("risk_score")) if isinstance(diagnostic.get("risk_score"), (int, float)) else None,
         diagnostics_json=json.dumps(diagnostics_payload, sort_keys=True),
     )
+
+
+def _raw_safe_recheck_snapshot(diagnostic: dict[str, object]) -> dict[str, object] | None:
+    """Keep a bounded normalized replay input; never retain raw provider payloads or credentials."""
+    if diagnostic.get("action_outcome") == "traded":
+        return None
+    keys = (
+        "mint", "source", "candidate_mode", "confidence", "weight", "effective_score",
+        "top10_holder_pct", "top10_holder_threshold_pct", "holder_policy_state",
+        "creator_policy_state", "creator_unknown_reason", "creator_holding_source",
+        "liquidity_data_state", "liquidity_source", "liquidity_unknown_reason",
+        "risk_approval_state", "rejection_reason", "failed_check", "metadata_completeness_state",
+    )
+    return {key: diagnostic.get(key) for key in keys}
 
 
 def _paper_decision_edge_display(record: PaperDecisionRecord) -> str:
@@ -3761,6 +3776,41 @@ def paper_recheck_queue(
             continue
         label = record.symbol or record.name or record.mint_address[:16] or "unknown"
         console.print(f"  {label} hint={hint} blocker={record.primary_reason} holder={bucket} provider={provider}")
+    console.print("[yellow]WARNING: Paper results are simulated. Not real trading advice.[/yellow]")
+
+
+@app.command("paper-recheck-snapshot-readiness")
+def paper_recheck_snapshot_readiness(
+    limit: int = typer.Option(500, "--limit", "-n", help="Recent persisted decisions to inspect."),
+    db_path: str | None = typer.Option(None, help="Optional SQLite path override."),
+) -> None:
+    """Report bounded safe snapshot coverage for future display-only rechecks."""
+    runtime_db_path = resolve_db_path(db_path)
+    asyncio.run(init_db(runtime_db_path))
+    records = asyncio.run(get_recent_paper_decisions(runtime_db_path, limit=limit))
+    queued = covered = replayable = 0
+    blockers: Counter[str] = Counter()
+    for record in records:
+        if record.action_outcome == "traded":
+            continue
+        blockers[record.primary_reason or "unknown"] += 1
+        queued += 1
+        try:
+            diagnostics = json.loads(record.diagnostics_json)
+        except (TypeError, json.JSONDecodeError):
+            diagnostics = {}
+        snapshot = diagnostics.get("recheck_snapshot") if isinstance(diagnostics, dict) else None
+        if isinstance(snapshot, dict):
+            covered += 1
+            if snapshot.get("mint") and snapshot.get("source") and snapshot.get("rejection_reason"):
+                replayable += 1
+    console.print("[bold]Paper Recheck Snapshot Readiness[/bold]")
+    console.print("  Paper-only bounded normalized snapshots; not orders, trades, or acceptance inputs.")
+    console.print(f"  Queued rejected candidates: {queued}")
+    console.print(f"  Snapshot-covered: {covered}")
+    console.print(f"  Missing snapshots (legacy): {queued - covered}")
+    console.print(f"  Replayable normalized snapshots: {replayable}")
+    console.print(f"  Main blockers: {dict(blockers.most_common())}")
     console.print("[yellow]WARNING: Paper results are simulated. Not real trading advice.[/yellow]")
 
 
