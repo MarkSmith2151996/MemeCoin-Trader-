@@ -3543,19 +3543,47 @@ def paper_blockers(
     records = asyncio.run(get_recent_paper_decisions(runtime_db_path, limit=limit))
     strict: Counter[str] = Counter()
     unknown: Counter[str] = Counter()
+    holder_buckets: Counter[str] = Counter()
     examples: dict[str, str] = {}
     for record in records:
         reason = record.primary_reason or "unknown"
         bucket = unknown if reason.endswith("_unknown") else strict
         bucket[reason] += 1
         examples.setdefault(reason, record.symbol or record.mint_address[:16] or "unknown")
+        if reason == "top10_holder_check_failed":
+            try:
+                diagnostics = json.loads(record.diagnostics_json)
+            except (TypeError, json.JSONDecodeError):
+                diagnostics = {}
+            holder_buckets[_holder_risk_bucket(
+                diagnostics.get("top10_holder_pct") if isinstance(diagnostics, dict) else None,
+                diagnostics.get("top10_holder_threshold_pct") if isinstance(diagnostics, dict) else None,
+            )] += 1
     console.print("[bold]Paper Rejection Blockers[/bold]")
     console.print("  Paper-only diagnostic; strict approval is unchanged.")
     for title, counts in (("Strict risk failures", strict), ("Unknown-data blocks", unknown)):
         console.print(f"  [bold]{title}:[/bold]")
         for reason, count in counts.most_common():
             console.print(f"    {reason}: {count} (example: {examples[reason]})")
+    if holder_buckets:
+        console.print(f"  [bold]Holder-risk buckets (diagnostic only; not acceptance):[/bold] {dict(holder_buckets.most_common())}")
     console.print("[yellow]WARNING: Paper results are simulated. Not real trading advice.[/yellow]")
+
+
+def _holder_risk_bucket(value: object, threshold: object) -> str:
+    """Classify persisted concentration relative to the applied threshold only."""
+    pct = _coerce_numeric(value)
+    cap = _coerce_numeric(threshold)
+    if pct is None or cap is None or cap <= 0:
+        return "unknown"
+    if pct <= cap:
+        return "under_threshold"
+    ratio = pct / cap
+    if ratio <= 1.1:
+        return "near_threshold"
+    if ratio <= 1.5:
+        return "moderate_fail"
+    return "severe_fail"
 
 
 @app.command("paper-shadow-blockers")
