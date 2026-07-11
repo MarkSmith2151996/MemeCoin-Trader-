@@ -644,6 +644,24 @@ def _paper_decision_record(
     )
 
 
+def _paper_decision_edge_display(record: PaperDecisionRecord) -> str:
+    """Format persisted discovery edge telemetry for paper operator review only."""
+    try:
+        diagnostics = json.loads(record.diagnostics_json)
+    except (TypeError, json.JSONDecodeError):
+        return "edge=not-recorded"
+    if not isinstance(diagnostics, dict):
+        return "edge=not-recorded"
+
+    score = diagnostics.get("edge_score")
+    breakdown = diagnostics.get("edge_breakdown")
+    if not isinstance(score, (int, float)) or isinstance(score, bool):
+        return "edge=not-recorded"
+    if not isinstance(breakdown, str) or not breakdown.strip():
+        return f"edge={score:g} detail=not-recorded"
+    return f"edge={score:g} detail={breakdown.strip()}"
+
+
 def _extract_rejection_record(metadata: dict[str, object]) -> RejectionRecord | None:
     raw_record = metadata.get("rejection_record")
     if isinstance(raw_record, RejectionRecord):
@@ -3150,6 +3168,10 @@ def paper_decisions(
         console.print("[bold]Paper Decision Telemetry[/bold]")
         console.print(f"  Generated: {now_str}")
         console.print(f"  Mode: paper (simulated)")
+        console.print(
+            "  Discovery edge is an operator diagnostic only; it does not affect strict risk, "
+            "ranking, sizing, or execution."
+        )
         console.print("")
 
         if not decisions:
@@ -3178,7 +3200,10 @@ def paper_decisions(
             console.print(f"[bold]Accepted candidates ({len(accepted)})[/bold]")
             for d in accepted[:5]:
                 label = d.symbol or d.name or d.mint_address[:16] if d.mint_address else "unknown"
-                console.print(f"  {label}  source={d.source}  mode={d.candidate_mode}  score={d.attention_score}")
+                console.print(
+                    f"  {label}  source={d.source}  mode={d.candidate_mode}  "
+                    f"score={d.attention_score}  {_paper_decision_edge_display(d)}"
+                )
             if len(accepted) > 5:
                 console.print(f"  ... and {len(accepted) - 5} more")
             console.print("")
@@ -3187,7 +3212,10 @@ def paper_decisions(
             console.print(f"[bold]Recent rejected candidates ({len(rejected)})[/bold]")
             for d in rejected[:5]:
                 label = d.symbol or d.name or d.mint_address[:16] if d.mint_address else "unknown"
-                console.print(f"  {label}  reason={d.primary_reason}  source={d.source}  mode={d.candidate_mode}")
+                console.print(
+                    f"  {label}  reason={d.primary_reason}  source={d.source}  "
+                    f"mode={d.candidate_mode}  {_paper_decision_edge_display(d)}"
+                )
             if len(rejected) > 5:
                 console.print(f"  ... and {len(rejected) - 5} more")
 

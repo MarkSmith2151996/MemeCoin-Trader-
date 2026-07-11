@@ -1,4 +1,5 @@
 import asyncio
+import json
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
@@ -1919,6 +1920,73 @@ def test_paper_decisions_summary_counts(tmp_path: Path) -> None:
     assert "migration: 1" in result.stdout
     assert "Accepted candidates (1)" in result.stdout
     assert "Recent rejected candidates (4)" in result.stdout
+
+
+def test_paper_decisions_displays_persisted_discovery_edge_diagnostics(tmp_path: Path) -> None:
+    db = tmp_path / "decisions-edge-display.db"
+    asyncio.run(init_db(db))
+    diagnostics = {
+        "edge_score": 73,
+        "edge_breakdown": "src=2/comp=0.84 mode=launch attn=79/present weak=-0 warn=-3 approval=discovery_relaxed",
+    }
+    asyncio.run(
+        record_paper_decision(
+            db,
+            PaperDecisionRecord(
+                mint_address="edge-mint",
+                symbol="EDGE",
+                source="composite",
+                candidate_mode="launch",
+                action_outcome="rejected",
+                decision="rejected",
+                primary_reason="top10_holder_check_failed",
+                diagnostics_json=json.dumps(diagnostics),
+            ),
+        )
+    )
+
+    result = runner.invoke(cli_module.app, ["paper-decisions", "--db-path", str(db)])
+
+    assert result.exit_code == 0
+    assert "Discovery edge is an operator diagnostic only" in result.stdout
+    assert "edge=73" in result.stdout
+    assert "detail=src=2/comp=0.84 mode=launch" in result.stdout
+    assert "approval=discovery_relaxed" in result.stdout
+
+
+def test_paper_decisions_edge_fallback_preserves_strict_record_and_never_calls_live_buy(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    db = tmp_path / "decisions-edge-fallback.db"
+    asyncio.run(init_db(db))
+    record = PaperDecisionRecord(
+        mint_address="strict-mint",
+        source="pump_fun",
+        candidate_mode="launch",
+        action_outcome="rejected",
+        decision="rejected",
+        primary_reason="honeypot_check_unknown",
+        risk_profile="strict",
+    )
+    asyncio.run(record_paper_decision(db, record))
+    live_buy_calls: list[object] = []
+
+    async def unexpected_live_buy(*args, **kwargs):
+        live_buy_calls.append((args, kwargs))
+        raise AssertionError("paper-decisions must not execute live buys")
+
+    monkeypatch.setattr(cli_module, "execute_guarded_live_buy", unexpected_live_buy)
+
+    result = runner.invoke(cli_module.app, ["paper-decisions", "--db-path", str(db)])
+    stored = asyncio.run(get_recent_paper_decisions(db, limit=1))[0]
+
+    assert result.exit_code == 0
+    assert "edge=not-recorded" in result.stdout
+    assert stored.risk_profile == "strict"
+    assert stored.action_outcome == "rejected"
+    assert stored.primary_reason == "honeypot_check_unknown"
+    assert live_buy_calls == []
 
 
 def test_paper_decisions_outcome_filter(tmp_path: Path) -> None:
