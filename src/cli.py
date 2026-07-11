@@ -4233,6 +4233,7 @@ class RejectedCandidateOutcome:
     mark_reason: str
     return_multiple: float | None
     liquidity_sol: float | None
+    current_liquidity_usd: float | None = None
 
 
 def _outcome_snapshot(record: PaperDecisionRecord) -> dict[str, object] | None:
@@ -4295,6 +4296,7 @@ async def collect_rejected_candidate_outcomes(
                 mark_reason=mark.reason,
                 return_multiple=return_multiple,
                 liquidity_sol=liquidity if liquidity is not None and liquidity >= 0 else None,
+                current_liquidity_usd=mark.liquidity_usd,
             )
         )
     return outcomes, skipped_missing
@@ -4332,6 +4334,51 @@ def paper_rejected_outcomes(
             f"  mint={_short_mint(outcome.mint)} source={outcome.source} mode={outcome.mode} blocker={outcome.blocker} "
             f"age={age} baseline={baseline} current={current} return={multiple} liquidity_at_rejection={liquidity} mark_reason={outcome.mark_reason}"
         )
+    console.print("[yellow]WARNING: Paper results are simulated. Not real trading advice.[/yellow]")
+
+
+def _rejected_outcome_label(outcome: RejectedCandidateOutcome) -> str:
+    """Label only evidence with real baseline and later mark; otherwise remain inconclusive."""
+    if outcome.rejection_mark_sol is None or outcome.current_mark_sol is None or outcome.return_multiple is None:
+        return "inconclusive"
+    if outcome.current_liquidity_usd == 0:
+        return "good_block_liquidity_failed"
+    if outcome.return_multiple <= 0.5:
+        return "good_block_dumped"
+    if outcome.return_multiple >= 2.0:
+        if outcome.blocker.endswith("_unknown"):
+            return "data_issue_possible"
+        return "possible_too_strict_pumped"
+    return "inconclusive"
+
+
+@app.command("paper-rejected-outcome-labels")
+def paper_rejected_outcome_labels(
+    limit: int = typer.Option(25, "--limit", "-n", min=1, max=50, help="Maximum rejected snapshots to report."),
+    marks: str = typer.Option("unavailable", "--marks", help="Mark price source: 'unavailable' (default) or read-only 'live' DexScreener."),
+    db_path: str | None = typer.Option(None, help="Optional SQLite path override."),
+) -> None:
+    """Label measurable rejected-candidate outcomes without changing any trading behavior."""
+    if marks not in {"live", "unavailable"}:
+        raise typer.BadParameter("must be 'unavailable' or 'live'", param_hint="--marks")
+    runtime_db_path = resolve_db_path(db_path)
+    asyncio.run(init_db(runtime_db_path))
+    records = asyncio.run(get_recent_paper_decisions(runtime_db_path, limit=max(limit * 20, 500)))
+    provider: PriceProvider = DexScreenerPriceProvider() if marks == "live" else UnavailablePriceProvider()
+    outcomes, skipped_missing = asyncio.run(collect_rejected_candidate_outcomes(records, provider, limit=limit))
+    labels: Counter[str] = Counter()
+    breakdowns: Counter[tuple[str, str, str]] = Counter()
+    for outcome in outcomes:
+        label = _rejected_outcome_label(outcome)
+        labels[label] += 1
+        breakdowns[(label, outcome.blocker, outcome.source)] += 1
+    console.print("[bold]Paper Rejected Outcome Labels[/bold]")
+    console.print("  DIAGNOSTIC-ONLY. Labels are evidence review, not trade recommendations; they do not alter ranking, gates, acceptance, execution, PnL, attribution, or readiness.")
+    console.print(f"  Rejected snapshots labeled: {len(outcomes)}")
+    console.print(f"  Skipped missing snapshots: {skipped_missing}")
+    console.print(f"  Labels: {dict(labels.most_common())}")
+    for (label, blocker, source), count in breakdowns.most_common():
+        console.print(f"  label={label} blocker={blocker} source={source} count={count}")
     console.print("[yellow]WARNING: Paper results are simulated. Not real trading advice.[/yellow]")
 
 

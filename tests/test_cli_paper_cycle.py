@@ -2530,3 +2530,59 @@ def test_rejected_outcomes_cli_is_bounded_and_read_only(tmp_path: Path) -> None:
     assert "Unavailable current marks: 2" in result.stdout
     assert "missing_baseline" in result.stdout
     assert [record.model_dump_json() for record in after] == [record.model_dump_json() for record in before]
+
+
+def test_rejected_outcome_labels_require_marks_and_keep_source_reason_context(tmp_path: Path) -> None:
+    def outcome(
+        *,
+        blocker: str = "top10_holder_check",
+        multiple: float | None = 1.0,
+        liquidity_usd: float | None = None,
+    ) -> cli_module.RejectedCandidateOutcome:
+        return cli_module.RejectedCandidateOutcome(
+            mint="label-mint",
+            source="pump_fun",
+            mode="launch",
+            blocker=blocker,
+            age_hours=1.0,
+            rejection_mark_sol=0.00001 if multiple is not None else None,
+            current_mark_sol=0.00001 * multiple if multiple is not None else None,
+            mark_reason="live_dexscreener",
+            return_multiple=multiple,
+            liquidity_sol=None,
+            current_liquidity_usd=liquidity_usd,
+        )
+
+    assert cli_module._rejected_outcome_label(outcome(multiple=None)) == "inconclusive"
+    assert cli_module._rejected_outcome_label(outcome(multiple=0.4)) == "good_block_dumped"
+    assert cli_module._rejected_outcome_label(outcome(multiple=1.0, liquidity_usd=0)) == "good_block_liquidity_failed"
+    assert cli_module._rejected_outcome_label(outcome(multiple=2.1)) == "possible_too_strict_pumped"
+    assert cli_module._rejected_outcome_label(outcome(blocker="creator_holding_unknown", multiple=2.1)) == "data_issue_possible"
+
+    db = tmp_path / "rejected-outcome-labels.db"
+    asyncio.run(init_db(db))
+    snapshot = {
+        "mint": "inconclusive-mint",
+        "source": "pump_fun",
+        "candidate_mode": "launch",
+        "rejection_reason": "creator_holding_check_unknown",
+        "failed_check": "creator_holding_check_unknown",
+    }
+    asyncio.run(record_paper_decision(db, PaperDecisionRecord(
+        mint_address="inconclusive-mint",
+        source="manual",
+        action_outcome="rejected",
+        decision="rejected",
+        primary_reason="rejected",
+        diagnostics_json=json.dumps({"recheck_snapshot": snapshot}, sort_keys=True),
+    )))
+    before = asyncio.run(get_recent_paper_decisions(db, limit=10))
+    result = runner.invoke(cli_module.app, ["paper-rejected-outcome-labels", "--db-path", str(db)])
+    after = asyncio.run(get_recent_paper_decisions(db, limit=10))
+
+    assert result.exit_code == 0
+    assert "Labels: {'inconclusive': 1}" in result.stdout
+    assert "label=inconclusive blocker=creator_holding_check_unknown" in result.stdout
+    assert "source=pump_fun" in result.stdout
+    assert "count=1" in result.stdout
+    assert [record.model_dump_json() for record in after] == [record.model_dump_json() for record in before]

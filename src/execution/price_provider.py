@@ -17,6 +17,7 @@ WRAPPED_SOL_MINT = "So11111111111111111111111111111111111111112"
 class PriceResult:
     price_sol: float | None
     reason: str = "price_unavailable"
+    liquidity_usd: float | None = None
 
 
 class PriceProvider(ABC):
@@ -128,7 +129,8 @@ class DexScreenerPriceProvider(PriceProvider):
         if not math.isfinite(price) or price <= 0:
             return PriceResult(None, "invalid_price")
 
-        return PriceResult(price, "live_dexscreener")
+        liquidity_usd = _safe_float(best_pair.get("liquidity"), "usd", default=-1.0)
+        return PriceResult(price, "live_dexscreener", liquidity_usd=liquidity_usd if liquidity_usd >= 0 else None)
 
 
 def _safe_float(data: object, key: str, default: float = 0.0) -> float:

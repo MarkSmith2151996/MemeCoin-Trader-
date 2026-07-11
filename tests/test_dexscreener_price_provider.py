@@ -87,6 +87,7 @@ def test_provider_returns_sol_price_from_dexscreener() -> None:
         assert result.price_sol is not None
         assert result.price_sol == 0.000015
         assert result.reason == "live_dexscreener"
+        assert result.liquidity_usd == 50000
 
     asyncio.run(run())
 
