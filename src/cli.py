@@ -3488,5 +3488,45 @@ def paper_watchlist(
     console.print("[yellow]WARNING: Paper results are simulated. Not real profit or loss.[/yellow]")
 
 
+@app.command("paper-attribution-readiness")
+def paper_attribution_readiness(
+    db_path: str | None = typer.Option(None, help="Optional SQLite path override."),
+) -> None:
+    """Report whether exact verified paper attribution samples exist."""
+    async def collect() -> tuple[int, int, int, int]:
+        runtime_db_path = resolve_db_path(db_path)
+        await init_db(runtime_db_path)
+        decisions = await get_recent_paper_decisions(runtime_db_path, limit=500)
+        manager = PositionManager(runtime_db_path, load_settings())
+        positions = await manager.get_all_open(mode="paper")
+        trade_ids: set[str] = set()
+        rejected = 0
+        for record in decisions:
+            try:
+                diagnostics = json.loads(record.diagnostics_json)
+            except (TypeError, json.JSONDecodeError):
+                diagnostics = {}
+            trade_id = diagnostics.get("trade_id") if isinstance(diagnostics, dict) else None
+            if isinstance(trade_id, str) and trade_id:
+                trade_ids.add(trade_id)
+            if record.action_outcome != "traded":
+                rejected += 1
+        linked = sum(1 for position in positions if position.entry_trade_id in trade_ids)
+        return linked, len(positions) - linked, rejected, len(trade_ids)
+
+    linked, unlinked, rejected, telemetry_trade_ids = asyncio.run(collect())
+    console.print("[bold]Paper Attribution Readiness[/bold]")
+    console.print("  Paper-only diagnostic. Attribution uses exact trade_id/entry_trade_id matches only; never mint matching.")
+    console.print(f"  Verified linked open positions: {linked}")
+    console.print(f"  Unlinked legacy/open positions: {unlinked}")
+    console.print(f"  Rejected or non-traded telemetry rows: {rejected}")
+    console.print(f"  Accepted telemetry trade IDs recorded: {telemetry_trade_ids}")
+    if linked == 0:
+        console.print("  Attribution: BLOCKED - no verified linked paper position samples; unlinked PnL is not attributed.")
+    else:
+        console.print("  Attribution: READY for verified-only samples (interpret small samples conservatively).")
+    console.print("[yellow]WARNING: Paper results are simulated. Not real profit or loss.[/yellow]")
+
+
 if __name__ == "__main__":
     app()
