@@ -612,6 +612,7 @@ def _paper_decision_record(
         "creator_holding_source": diagnostic.get("creator_holding_source"),
         "liquidity_data_state": diagnostic.get("liquidity_data_state"),
         "liquidity_source": diagnostic.get("liquidity_source"),
+        "liquidity_unknown_reason": diagnostic.get("liquidity_unknown_reason"),
         "creator_policy_state": diagnostic.get("creator_policy_state"),
         "unique_buyers_policy_state": diagnostic.get("unique_buyers_policy_state"),
         "authority_policy_state": diagnostic.get("authority_policy_state"),
@@ -834,6 +835,7 @@ def _build_rejected_candidate_diagnostic(
         "creator_holding_source": creator_diagnostics.get("creator_holding_source", "unknown"),
         "liquidity_data_state": liquidity_diagnostics.get("liquidity_data_state", "unknown"),
         "liquidity_source": liquidity_diagnostics.get("liquidity_source", "unknown"),
+        "liquidity_unknown_reason": liquidity_diagnostics.get("liquidity_unknown_reason", "unknown"),
         "top10_holder_source": _top10_holder_source_hint(payload, record),
         "bonding_curve_addresses": tuple(holder_diagnostics.get("bonding_curve_addresses", ())),
         "local_holder_raw_account_count": holder_diagnostics.get("local_holder_raw_account_count", 0),
@@ -3581,7 +3583,7 @@ def paper_blockers(
                 diagnostics = json.loads(record.diagnostics_json)
             except (TypeError, json.JSONDecodeError):
                 diagnostics = {}
-            provenance = diagnostics.get("liquidity_data_state") if isinstance(diagnostics, dict) else None
+            provenance = diagnostics.get("liquidity_unknown_reason") if isinstance(diagnostics, dict) else None
             unknown_provenance[f"liquidity:{provenance or 'unknown'}"] += 1
     console.print("[bold]Paper Rejection Blockers[/bold]")
     console.print("  Paper-only diagnostic; strict approval is unchanged.")
