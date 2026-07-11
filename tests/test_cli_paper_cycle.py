@@ -2350,3 +2350,57 @@ def test_snapshot_source_quality_summarizes_rejections_without_trading_state_cha
     assert "holder_severity={'severe_fail': 1}" in result.stdout
     assert "holder_severity={'near_threshold': 1}" in result.stdout
     assert [record.model_dump_json() for record in after] == [record.model_dump_json() for record in before]
+
+
+def test_source_quality_bucket_is_deterministic_and_diagnostic_only() -> None:
+    assert cli_module._source_quality_bucket(0, severe_holders=0, unknown_data=0, near_threshold_holders=0) == "insufficient_data"
+    assert cli_module._source_quality_bucket(1, severe_holders=1, unknown_data=0, near_threshold_holders=0) == "sparse_sample"
+    assert cli_module._source_quality_bucket(10, severe_holders=5, unknown_data=0, near_threshold_holders=0) == "severe_holder_heavy"
+    assert cli_module._source_quality_bucket(10, severe_holders=0, unknown_data=5, near_threshold_holders=0) == "unknown_data_heavy"
+    assert cli_module._source_quality_bucket(10, severe_holders=0, unknown_data=0, near_threshold_holders=5) == "near_threshold_heavy"
+    assert cli_module._source_quality_bucket(10, severe_holders=1, unknown_data=1, near_threshold_holders=1) == "mixed_risk"
+
+
+def test_snapshot_source_buckets_are_read_only(tmp_path: Path) -> None:
+    db = tmp_path / "snapshot-source-buckets.db"
+    asyncio.run(init_db(db))
+    for mint, source, mode, blocker, holder_pct in (
+        ("whale-one", "whale_tracker", "unknown", "top10_holder_check", 95.0),
+        ("whale-two", "whale_tracker", "unknown", "top10_holder_check", 95.0),
+        ("whale-three", "whale_tracker", "unknown", "top10_holder_check", 95.0),
+        ("pump-one", "pump_fun", "launch", "creator_holding_check_unknown", None),
+        ("pump-two", "pump_fun", "launch", "creator_holding_check_unknown", None),
+        ("pump-three", "pump_fun", "launch", "creator_holding_check_unknown", None),
+    ):
+        snapshot = {
+            "mint": mint,
+            "source": source,
+            "candidate_mode": mode,
+            "rejection_reason": blocker,
+            "failed_check": blocker,
+            "top10_holder_pct": holder_pct,
+            "top10_holder_threshold_pct": 50.0,
+        }
+        asyncio.run(
+            record_paper_decision(
+                db,
+                PaperDecisionRecord(
+                    mint_address=mint,
+                    source="manual",
+                    action_outcome="rejected",
+                    decision="rejected",
+                    primary_reason="rejected",
+                    diagnostics_json=json.dumps({"recheck_snapshot": snapshot}, sort_keys=True),
+                ),
+            )
+        )
+
+    before = asyncio.run(get_recent_paper_decisions(db, limit=10))
+    result = runner.invoke(cli_module.app, ["paper-recheck-snapshot-source-buckets", "--db-path", str(db)])
+    after = asyncio.run(get_recent_paper_decisions(db, limit=10))
+
+    assert result.exit_code == 0
+    assert "DIAGNOSTIC-ONLY" in result.stdout
+    assert "source=whale_tracker mode=unknown bucket=severe_holder_heavy rejected=3" in result.stdout
+    assert "source=pump_fun mode=launch bucket=unknown_data_heavy rejected=3" in result.stdout
+    assert [record.model_dump_json() for record in after] == [record.model_dump_json() for record in before]

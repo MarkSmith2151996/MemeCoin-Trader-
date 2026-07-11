@@ -4045,5 +4045,94 @@ def paper_recheck_snapshot_source_quality(
     console.print("[yellow]WARNING: Paper results are simulated. Not real trading advice.[/yellow]")
 
 
+def _source_quality_bucket(
+    total: int,
+    *,
+    severe_holders: int,
+    unknown_data: int,
+    near_threshold_holders: int,
+) -> str:
+    """Classify persisted rejection evidence without changing any source behavior."""
+    if total <= 0:
+        return "insufficient_data"
+    if total < 3:
+        return "sparse_sample"
+    if severe_holders / total >= 0.5:
+        return "severe_holder_heavy"
+    if unknown_data / total >= 0.5:
+        return "unknown_data_heavy"
+    if near_threshold_holders / total >= 0.5:
+        return "near_threshold_heavy"
+    return "mixed_risk"
+
+
+@app.command("paper-recheck-snapshot-source-buckets")
+def paper_recheck_snapshot_source_buckets(
+    limit: int = typer.Option(500, "--limit", "-n", help="Recent persisted decisions to inspect."),
+    db_path: str | None = typer.Option(None, help="Optional SQLite path override."),
+) -> None:
+    """Bucket persisted rejected snapshot evidence by source/mode quality for research."""
+    runtime_db_path = resolve_db_path(db_path)
+    asyncio.run(init_db(runtime_db_path))
+    records = asyncio.run(get_recent_paper_decisions(runtime_db_path, limit=limit))
+    summaries: dict[tuple[str, str], dict[str, object]] = {}
+    replayable = skipped_missing = 0
+    for record in records:
+        if record.action_outcome == "traded":
+            continue
+        try:
+            diagnostics = json.loads(record.diagnostics_json)
+        except (TypeError, json.JSONDecodeError):
+            diagnostics = {}
+        snapshot = diagnostics.get("recheck_snapshot") if isinstance(diagnostics, dict) else None
+        if not isinstance(snapshot, dict) or not snapshot.get("mint") or not snapshot.get("source") or not snapshot.get("rejection_reason"):
+            skipped_missing += 1
+            continue
+        assessment = _snapshot_recheck_assessment(snapshot)
+        if assessment.all_checks_pass:
+            continue
+        replayable += 1
+        key = (str(snapshot.get("source") or "unknown"), str(snapshot.get("candidate_mode") or "unknown"))
+        summary = summaries.setdefault(
+            key,
+            {"blockers": Counter(), "holders": Counter(), "unknown_data": 0, "examples": []},
+        )
+        blocker = _snapshot_first_failing_check(snapshot, assessment)
+        summary["blockers"][blocker] += 1
+        if blocker.endswith("_unknown"):
+            summary["unknown_data"] += 1
+        holder_bucket = _holder_risk_bucket(
+            snapshot.get("top10_holder_pct"),
+            snapshot.get("top10_holder_threshold_pct"),
+        )
+        if blocker == "top10_holder_check":
+            summary["holders"][holder_bucket] += 1
+        examples = summary["examples"]
+        if len(examples) < 3:
+            examples.append(_short_mint(str(snapshot["mint"])))
+
+    console.print("[bold]Paper Snapshot Discovery Source Buckets[/bold]")
+    console.print("  DIAGNOSTIC-ONLY. Buckets describe persisted rejected evidence, not source quality for trading, and do not alter ranking, gates, sizing, acceptance, execution, or readiness.")
+    console.print(f"  Replayable rejected snapshots: {replayable}")
+    console.print(f"  Skipped missing snapshots: {skipped_missing}")
+    for (source, mode), summary in sorted(summaries.items()):
+        total = sum(summary["blockers"].values())
+        holders = summary["holders"]
+        bucket = _source_quality_bucket(
+            total,
+            severe_holders=holders["severe_fail"],
+            unknown_data=summary["unknown_data"],
+            near_threshold_holders=holders["near_threshold"],
+        )
+        primary_blocker = summary["blockers"].most_common(1)[0][0]
+        examples = ", ".join(summary["examples"]) or "none"
+        console.print(
+            f"  source={source} mode={mode} bucket={bucket} rejected={total} primary_blocker={primary_blocker} "
+            f"holder_severity={dict(holders.most_common()) or {'not_applicable': 0}} "
+            f"unknown_data={summary['unknown_data']} examples={examples}"
+        )
+    console.print("[yellow]WARNING: Paper results are simulated. Not real trading advice.[/yellow]")
+
+
 if __name__ == "__main__":
     app()
