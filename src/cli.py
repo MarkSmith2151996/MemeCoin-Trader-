@@ -697,6 +697,28 @@ def _paper_decision_narrative_display(record: PaperDecisionRecord) -> str:
     return f"narrative={category.strip()}" if isinstance(category, str) and category.strip() else "narrative=not-recorded"
 
 
+def _paper_decision_digest(records: list[PaperDecisionRecord]) -> tuple[Counter[str], Counter[str], Counter[str], list[float]]:
+    """Aggregate persisted operator diagnostics without participating in decisions."""
+    approvals: Counter[str] = Counter()
+    narratives: Counter[str] = Counter()
+    attention: Counter[str] = Counter()
+    edges: list[float] = []
+    for record in records:
+        try:
+            diagnostics = json.loads(record.diagnostics_json)
+        except (TypeError, json.JSONDecodeError):
+            diagnostics = {}
+        if not isinstance(diagnostics, dict):
+            diagnostics = {}
+        approvals[str(diagnostics.get("risk_approval_state") or "not-recorded")] += 1
+        narratives[str(diagnostics.get("narrative_category") or "not-recorded")] += 1
+        attention[str(diagnostics.get("attention_quality") or "not-recorded")] += 1
+        edge = diagnostics.get("edge_score")
+        if isinstance(edge, (int, float)) and not isinstance(edge, bool) and math.isfinite(edge):
+            edges.append(float(edge))
+    return approvals, narratives, attention, edges
+
+
 def _extract_rejection_record(metadata: dict[str, object]) -> RejectionRecord | None:
     raw_record = metadata.get("rejection_record")
     if isinstance(raw_record, RejectionRecord):
@@ -3303,6 +3325,17 @@ def paper_decisions(
         console.print("  [bold]By candidate mode:[/bold]")
         for mc, count in mode_counts.most_common():
             console.print(f"    {mc}: {count}")
+        console.print("")
+
+        approvals, narratives, attention, edges = _paper_decision_digest(decisions)
+        console.print("[bold]Operator Digest (paper-only; not a trading recommendation)[/bold]")
+        console.print(f"  Approval state: {dict(approvals.most_common())}")
+        console.print(f"  Narrative category: {dict(narratives.most_common())}")
+        console.print(f"  Attention quality: {dict(attention.most_common())}")
+        if edges:
+            console.print(f"  Edge score: avg={sum(edges) / len(edges):.1f} range={min(edges):g}-{max(edges):g}")
+        else:
+            console.print("  Edge score: not-recorded")
         console.print("")
 
         if accepted:
