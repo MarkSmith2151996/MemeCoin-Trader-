@@ -3454,5 +3454,38 @@ def paper_drilldown(
     console.print("[yellow]WARNING: Paper results are simulated. Not real profit or loss.[/yellow]")
 
 
+@app.command("paper-watchlist")
+def paper_watchlist(
+    limit: int = typer.Option(20, "--limit", "-n", help="Max persisted candidates to display."),
+    db_path: str | None = typer.Option(None, help="Optional SQLite path override."),
+) -> None:
+    """Group recent persisted paper telemetry into a read-only watchlist."""
+    runtime_db_path = resolve_db_path(db_path)
+    asyncio.run(init_db(runtime_db_path))
+    records = asyncio.run(get_recent_paper_decisions(runtime_db_path, limit=500))
+    grouped: dict[str, list[PaperDecisionRecord]] = {}
+    for record in records:
+        mint = str(record.mint_address or "").strip() or "unknown"
+        grouped.setdefault(mint, []).append(record)
+    console.print("[bold]Paper Candidate Watchlist[/bold]")
+    console.print("  Paper-only operator/research diagnostic; appearances are persisted-row counts, not a trading signal.")
+    for mint, rows in sorted(grouped.items(), key=lambda item: (len(item[1]), str(item[1][0].recorded_at)), reverse=True)[:limit]:
+        latest = rows[0]
+        label = latest.symbol or latest.name or mint[:16]
+        try:
+            diagnostics = json.loads(latest.diagnostics_json)
+        except (TypeError, json.JSONDecodeError):
+            diagnostics = {}
+        diagnostics = diagnostics if isinstance(diagnostics, dict) else {}
+        console.print(
+            f"  {label} appearances={len(rows)} latest={latest.recorded_at} source/mode={latest.source}/{latest.candidate_mode} "
+            f"approval={diagnostics.get('risk_approval_state', 'not-recorded')} reason={latest.primary_reason} "
+            f"{_paper_decision_edge_display(latest)} {_paper_decision_attention_display(latest)} {_paper_decision_narrative_display(latest)}"
+        )
+    if not grouped:
+        console.print("  [yellow]No paper decision telemetry found.[/yellow]")
+    console.print("[yellow]WARNING: Paper results are simulated. Not real profit or loss.[/yellow]")
+
+
 if __name__ == "__main__":
     app()
