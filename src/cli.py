@@ -4501,7 +4501,7 @@ def paper_rejected_baseline_coverage(
     runtime_db_path = resolve_db_path(db_path)
     asyncio.run(init_db(runtime_db_path))
     records = asyncio.run(get_recent_paper_decisions(runtime_db_path, limit=limit))
-    summaries: dict[str, Counter[str]] = {}
+    summaries: dict[tuple[str, str, str], Counter[str]] = {}
     replayable = skipped_missing = 0
     for record in records:
         if record.action_outcome == "traded":
@@ -4512,7 +4512,9 @@ def paper_rejected_baseline_coverage(
             continue
         replayable += 1
         source = str(snapshot.get("source") or "unknown")
-        counts = summaries.setdefault(source, Counter())
+        mode = str(snapshot.get("candidate_mode") or "unknown")
+        blocker = _snapshot_first_failing_check(snapshot, _snapshot_recheck_assessment(snapshot))
+        counts = summaries.setdefault((source, mode, blocker), Counter())
         counts["baseline_present" if _coerce_numeric(snapshot.get("rejection_mark_price_sol")) else "baseline_missing"] += 1
         reason = snapshot.get("rejection_mark_missing_reason")
         counts[f"missing_reason:{reason or 'none'}"] += 1
@@ -4528,9 +4530,9 @@ def paper_rejected_baseline_coverage(
     console.print("  DIAGNOSTIC-ONLY. Field presence is bounded schema metadata, not a signal, ranking input, or acceptance path.")
     console.print(f"  Replayable rejected snapshots: {replayable}")
     console.print(f"  Skipped missing snapshots: {skipped_missing}")
-    for source, counts in sorted(summaries.items()):
+    for (source, mode, blocker), counts in sorted(summaries.items()):
         print_counts = {key: value for key, value in sorted(counts.items())}
-        console.print(f"  source={source} coverage={print_counts}")
+        console.print(f"  source={source} mode={mode} blocker={blocker} coverage={print_counts}")
     console.print("[yellow]WARNING: Paper results are simulated. Not real trading advice.[/yellow]")
 
 

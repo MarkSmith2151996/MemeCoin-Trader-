@@ -2549,6 +2549,7 @@ def test_baseline_field_coverage_records_field_names_without_raw_values(tmp_path
         "mint": "coverage-mint",
         "source": "onchain",
         "rejection_reason": "creator_holding_check_unknown",
+        "failed_check": "creator_holding_check_unknown",
         "rejection_mark_price_sol": None,
         "rejection_mark_missing_reason": "source_price_missing",
         "rejection_baseline_payload_provider": "dexscreener",
@@ -2567,6 +2568,8 @@ def test_baseline_field_coverage_records_field_names_without_raw_values(tmp_path
     result = runner.invoke(cli_module.app, ["paper-rejected-baseline-coverage", "--db-path", str(db)])
     after = asyncio.run(get_recent_paper_decisions(db, limit=10))
     assert result.exit_code == 0
+    assert "source=onchain mode=unknown" in result.stdout
+    assert "blocker=creator_holding_check_unknown" in result.stdout
     assert "baseline_missing" in result.stdout
     assert "missing_reason:source_price_missing" in result.stdout
     assert "payload_provider:dexscreener" in result.stdout
