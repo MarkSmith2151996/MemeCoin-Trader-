@@ -69,6 +69,8 @@ class LedgerHistoricalImport(BaseModel):
 
     @model_validator(mode="after")
     def preserves_decision_evidence_links(self) -> "LedgerHistoricalImport":
+        if self.decision.outcome_status not in {"unknown", "inconclusive"}:
+            raise ValueError("Historical imports require an import-safe decision outcome status.")
         for observation in self.provider_observations:
             if observation.source_decision_id != self.decision.decision_id:
                 raise ValueError("Each provider observation must reference the imported decision ID.")

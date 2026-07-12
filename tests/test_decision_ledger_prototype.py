@@ -125,6 +125,16 @@ def test_historical_import_rejects_outcome_claims_and_unlinked_provider_evidence
             decision=decision,
             outcome_status="measurable",
         )
+    with pytest.raises(ValueError, match="import-safe"):
+        LedgerHistoricalImport(
+            import_id="historical-import",
+            provenance=provenance,
+            decision=LedgerDecisionEvidence(
+                decision_id="historical-decision",
+                mint_address="historical-mint",
+                outcome_status="measurable",
+            ),
+        )
     with pytest.raises(ValueError, match="reference"):
         LedgerHistoricalImport(
             import_id="historical-import",
