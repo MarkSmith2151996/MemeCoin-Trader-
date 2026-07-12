@@ -29,6 +29,46 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 MIGRATION = PROJECT_ROOT / "migrations" / "0001_memecoin_decision_diagnostic.sql"
 
 
+@pytest.fixture
+def historical_import_provenance() -> LedgerHistoricalProvenance:
+    """Provide explicit source facts for a disabled historical-import fixture."""
+
+    return LedgerHistoricalProvenance(
+        source_system="sqlite",
+        source_table="paper_decisions",
+        source_record_id="paper-decision-1",
+        source_observed_at="2026-07-12T00:00:00+00:00",
+        extraction_method="explicit_export",
+    )
+
+
+@pytest.fixture
+def historical_unknown_import(
+    historical_import_provenance: LedgerHistoricalProvenance,
+) -> LedgerHistoricalImport:
+    """Provide linked, unknown-preserving evidence without any outcome claim."""
+
+    return LedgerHistoricalImport(
+        import_id="historical-import",
+        provenance=historical_import_provenance,
+        decision=LedgerDecisionEvidence(
+            decision_id="historical-decision",
+            mint_address="historical-mint",
+            checks={"liquidity_check": CheckResult.UNKNOWN},
+        ),
+        provider_observations=[
+            LedgerProviderObservation(
+                snapshot_id="historical-snapshot",
+                mint_address="historical-mint",
+                provider_name="historical-provider",
+                provider_status="unknown",
+                observed_at="2026-07-12T00:00:00+00:00",
+                source_decision_id="historical-decision",
+            )
+        ],
+    )
+
+
 def test_migration_is_limited_to_diagnostic_core_tables() -> None:
     sql = MIGRATION.read_text()
 
@@ -73,62 +113,34 @@ def test_narrow_provider_and_read_contracts_remain_disabled() -> None:
             operation(request)
 
 
-def test_historical_import_requires_explicit_provenance_and_stays_disabled() -> None:
-    decision = LedgerDecisionEvidence(
-        decision_id="historical-decision",
-        mint_address="historical-mint",
-        checks={"liquidity_check": CheckResult.UNKNOWN},
-    )
-    import_request = LedgerHistoricalImport(
-        import_id="historical-import",
-        provenance=LedgerHistoricalProvenance(
-            source_system="sqlite",
-            source_table="paper_decisions",
-            source_record_id="paper-decision-1",
-            source_observed_at="2026-07-12T00:00:00+00:00",
-            extraction_method="explicit_export",
-        ),
-        decision=decision,
-        provider_observations=[
-            LedgerProviderObservation(
-                snapshot_id="historical-snapshot",
-                mint_address="historical-mint",
-                provider_name="historical-provider",
-                provider_status="unknown",
-                observed_at="2026-07-12T00:00:00+00:00",
-                source_decision_id="historical-decision",
-            )
-        ],
-    )
-
-    assert import_request.outcome_status == "unknown"
-    assert import_request.outcome_claim == "not_claimed"
-    assert import_request.decision.checks["liquidity_check"] is CheckResult.UNKNOWN
+def test_historical_import_requires_explicit_provenance_and_stays_disabled(
+    historical_unknown_import: LedgerHistoricalImport,
+) -> None:
+    assert historical_unknown_import.provenance.source_system == "sqlite"
+    assert historical_unknown_import.provenance.source_table == "paper_decisions"
+    assert historical_unknown_import.outcome_status == "unknown"
+    assert historical_unknown_import.outcome_claim == "not_claimed"
+    assert historical_unknown_import.decision.checks["liquidity_check"] is CheckResult.UNKNOWN
     with pytest.raises(LedgerPrototypeDisabledError, match="disabled"):
-        import_historical_ledger_evidence(import_request)
+        import_historical_ledger_evidence(historical_unknown_import)
 
 
-def test_historical_import_rejects_outcome_claims_and_unlinked_provider_evidence() -> None:
+def test_historical_import_rejects_outcome_claims_and_unlinked_provider_evidence(
+    historical_import_provenance: LedgerHistoricalProvenance,
+) -> None:
     decision = LedgerDecisionEvidence(decision_id="historical-decision", mint_address="historical-mint")
-    provenance = LedgerHistoricalProvenance(
-        source_system="sqlite",
-        source_table="paper_decisions",
-        source_record_id="paper-decision-1",
-        source_observed_at="2026-07-12T00:00:00+00:00",
-        extraction_method="explicit_export",
-    )
 
     with pytest.raises(ValueError):
         LedgerHistoricalImport(
             import_id="historical-import",
-            provenance=provenance,
+            provenance=historical_import_provenance,
             decision=decision,
             outcome_status="measurable",
         )
     with pytest.raises(ValueError, match="import-safe"):
         LedgerHistoricalImport(
             import_id="historical-import",
-            provenance=provenance,
+            provenance=historical_import_provenance,
             decision=LedgerDecisionEvidence(
                 decision_id="historical-decision",
                 mint_address="historical-mint",
@@ -138,7 +150,7 @@ def test_historical_import_rejects_outcome_claims_and_unlinked_provider_evidence
     with pytest.raises(ValueError, match="reference"):
         LedgerHistoricalImport(
             import_id="historical-import",
-            provenance=provenance,
+            provenance=historical_import_provenance,
             decision=decision,
             provider_observations=[
                 LedgerProviderObservation(
