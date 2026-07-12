@@ -85,6 +85,7 @@ Default execution mode: paper trading
 - `tests/test_signal_modes.py`: focused coverage for launch-vs-migration classification, safe unknown fallback on non-pump or malformed inputs, composite raw-data migration detection, and proof that classification is pure and does not mutate signal scoring fields.
 - `tests/test_cli_paper_cycle.py`: bounded paper-cycle coverage for accepted/rejected fake signals, aggregator integration, composite opportunities, non-fatal source degradation, paper-only enforcement, max-signal/timeout termination, SQLite persistence, visible launch/migration/unknown mode diagnostics, bounded pump.fun weak-identity ranking penalties, safe CLI summary output, and the bounded Grok prompt export.
 - `tests/test_cli_summary.py`: stable summary-table structure coverage for paper-cycle output, including mode-count-aware summary construction.
+- `tests/test_decision_ledger_prototype.py`: disabled ledger-contract coverage plus AST checks preventing runtime imports of the ledger prototype or synthetic test harness and runtime calls to the provider-coverage CLI command.
 - `tests/test_dynamic_exits.py`: focused helper and runtime-gate coverage for volume-decay timing, liquidity emergency calibration, early trail-start signaling, aggregate reason labels, and preservation of existing behavior while dynamic exits stay disabled by default.
 - `tests/test_market_regime.py`: focused coverage for deterministic `hot`, `risky`, `thin`, `unknown`, and `normal` classifications plus stable confidence, reason labels, adjustment hints, and no-runtime-side-effect guarantees.
 - `tests/test_position_sizing.py`: focused helper coverage for liquidity tier matching, unknown/invalid liquidity skips, and custom tier overrides.
@@ -101,6 +102,8 @@ Default execution mode: paper trading
 - `tests/test_monitoring.py`: focused coverage for dashboard DB-path resolution, health compatibility, and one-shot dashboard rendering.
 
 ## Last 10 Changes
+
+- 2026-07-12 Audited MT-277 runtime safety drift v2 across MT-257 through HEAD. The commit range changed only the diagnostic ledger prototype/migration, test-only harness and migration fixture, provider coverage CLI presentation, tests, and status; no `src/strategy`, `src/execution`, `src/risk`, `src/signals`, or `src/chain` file changed. Live source contains no decision-ledger or synthetic-harness reference, and provider coverage appears only as its CLI definition. Extended static AST coverage to fail if runtime code imports the ledger/harness or calls the provider-coverage command. Gates, ranking, sizing, execution, PnL, attribution, readiness, thresholds, live mode, keys, and real transaction paths remain unchanged. Validation: 77 focused tests and compileall pass; Ruff unavailable as `python3 -m ruff` is not installed.
 
 - 2026-07-12 Reviewed MT-275 provider evidence summary - PASS. The compact table is a display-only aggregation of persisted rejected-snapshot evidence; it preserves exact provider status detail in the existing breakdown and leaves `not_recorded` distinct from explicit failures. It does not call providers or feed runtime policy, PnL, attribution, readiness, gates, ranking, sizing, execution, source suppression, or thresholds. Validation from MT-274: 69 focused tests and compileall pass; Ruff unavailable.
 

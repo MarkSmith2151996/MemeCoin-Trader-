@@ -132,7 +132,7 @@ def test_boundary_has_no_sql_or_database_client() -> None:
     assert "SELECT " not in source
 
 
-def test_runtime_paths_do_not_import_or_call_ledger_boundary() -> None:
+def test_runtime_paths_do_not_import_or_call_diagnostic_boundaries() -> None:
     excluded = {PROJECT_ROOT / "src/core/decision_ledger.py"}
     for path in (PROJECT_ROOT / "src").rglob("*.py"):
         if path in excluded:
@@ -145,3 +145,10 @@ def test_runtime_paths_do_not_import_or_call_ledger_boundary() -> None:
         ]
         assert "src.core.decision_ledger" not in imported, path
         assert "write_memecoin_decision" not in path.read_text(), path
+        assert "ledger_harness" not in path.read_text(), path
+        runtime_calls = [
+            node.func.id
+            for node in ast.walk(tree)
+            if isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+        ]
+        assert "paper_rejected_provider_mark_coverage" not in runtime_calls, path
