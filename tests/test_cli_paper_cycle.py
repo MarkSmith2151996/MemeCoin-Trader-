@@ -2615,6 +2615,46 @@ def test_baseline_field_coverage_records_field_names_without_raw_values(tmp_path
     assert [record.model_dump_json() for record in after] == [record.model_dump_json() for record in before]
 
 
+def test_provider_mark_coverage_reports_status_and_later_eligibility_read_only(tmp_path: Path) -> None:
+    db = tmp_path / "provider-mark-coverage.db"
+    asyncio.run(init_db(db))
+    for mint, provider_price, status, baseline in (
+        ("provider-marked", 0.00002, "live_dexscreener", 0.00002),
+        ("provider-missing", None, "no_pairs", None),
+    ):
+        snapshot = {
+            "mint": mint,
+            "source": "whale_tracker",
+            "candidate_mode": "unknown",
+            "rejection_reason": "top10_holder_check_failed",
+            "failed_check": "top10_holder_check",
+            "rejection_mark_price_sol": baseline,
+            "rejection_provider_mark_price_sol": provider_price,
+            "rejection_provider_mark_provider": "live",
+            "rejection_provider_mark_status": status,
+        }
+        asyncio.run(record_paper_decision(db, PaperDecisionRecord(
+            mint_address=mint,
+            source="manual",
+            action_outcome="rejected",
+            decision="rejected",
+            primary_reason="rejected",
+            diagnostics_json=json.dumps({"recheck_snapshot": snapshot}, sort_keys=True),
+        )))
+
+    before = asyncio.run(get_recent_paper_decisions(db, limit=10))
+    result = runner.invoke(cli_module.app, ["paper-rejected-provider-mark-coverage", "--db-path", str(db)])
+    after = asyncio.run(get_recent_paper_decisions(db, limit=10))
+
+    assert result.exit_code == 0
+    assert "Provider-normalized marks available: 1" in result.stdout
+    assert "Later-outcome eligible baselines: 1" in result.stdout
+    assert "Provider status breakdown: {'live_dexscreener': 1, 'no_pairs': 1}" in result.stdout
+    assert "provider_mark_available" in result.stdout
+    assert "provider_mark_unavailable" in result.stdout
+    assert [record.model_dump_json() for record in after] == [record.model_dump_json() for record in before]
+
+
 def test_rejected_outcomes_cli_is_bounded_and_read_only(tmp_path: Path) -> None:
     db = tmp_path / "rejected-outcomes-cli.db"
     asyncio.run(init_db(db))

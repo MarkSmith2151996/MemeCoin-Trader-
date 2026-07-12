@@ -4594,5 +4594,61 @@ def paper_rejected_baseline_coverage(
     console.print("[yellow]WARNING: Paper results are simulated. Not real trading advice.[/yellow]")
 
 
+@app.command("paper-rejected-provider-mark-coverage")
+def paper_rejected_provider_mark_coverage(
+    limit: int = typer.Option(500, "--limit", "-n", min=1, max=500, help="Recent persisted decisions to inspect."),
+    db_path: str | None = typer.Option(None, help="Optional SQLite path override."),
+) -> None:
+    """Show bounded post-rejection provider-mark coverage from persisted snapshots."""
+    runtime_db_path = resolve_db_path(db_path)
+    asyncio.run(init_db(runtime_db_path))
+    records = asyncio.run(get_recent_paper_decisions(runtime_db_path, limit=limit))
+    summaries: dict[tuple[str, str, str], Counter[str]] = {}
+    provider_statuses: Counter[str] = Counter()
+    replayable = skipped_missing = provider_mark_available = later_outcome_eligible = 0
+    for record in records:
+        if record.action_outcome == "traded":
+            continue
+        snapshot = _outcome_snapshot(record)
+        if snapshot is None:
+            skipped_missing += 1
+            continue
+        replayable += 1
+        source = str(snapshot.get("source") or "unknown")
+        mode = str(snapshot.get("candidate_mode") or "unknown")
+        blocker = _snapshot_first_failing_check(snapshot, _snapshot_recheck_assessment(snapshot))
+        counts = summaries.setdefault((source, mode, blocker), Counter())
+        provider_price = _coerce_numeric(snapshot.get("rejection_provider_mark_price_sol"))
+        provider_status = str(snapshot.get("rejection_provider_mark_status") or "not_recorded")
+        provider = str(snapshot.get("rejection_provider_mark_provider") or "not_recorded")
+        provider_statuses[provider_status] += 1
+        counts[f"provider:{provider}"] += 1
+        counts[f"provider_status:{provider_status}"] += 1
+        if provider_price is not None and provider_price > 0:
+            provider_mark_available += 1
+            counts["provider_mark_available"] += 1
+        else:
+            counts["provider_mark_unavailable"] += 1
+        baseline = _coerce_numeric(snapshot.get("rejection_mark_price_sol"))
+        if baseline is not None and baseline > 0:
+            later_outcome_eligible += 1
+            counts["later_outcome_eligible"] += 1
+
+    console.print("[bold]Paper Rejected Provider Mark Coverage[/bold]")
+    console.print(
+        "  DIAGNOSTIC-ONLY. Provider marks are captured after rejection and do not alter ranking, gates, "
+        "acceptance, execution, PnL, attribution, or readiness."
+    )
+    console.print(f"  Replayable rejected snapshots: {replayable}")
+    console.print(f"  Skipped missing snapshots: {skipped_missing}")
+    console.print(f"  Provider-normalized marks available: {provider_mark_available}")
+    console.print(f"  Later-outcome eligible baselines: {later_outcome_eligible}")
+    console.print(f"  Provider status breakdown: {dict(sorted(provider_statuses.items()))}")
+    for (source, mode, blocker), counts in sorted(summaries.items()):
+        print_counts = {key: value for key, value in sorted(counts.items())}
+        console.print(f"  source={source} mode={mode} blocker={blocker} coverage={print_counts}")
+    console.print("[yellow]WARNING: Paper results are simulated. Not real trading advice.[/yellow]")
+
+
 if __name__ == "__main__":
     app()
