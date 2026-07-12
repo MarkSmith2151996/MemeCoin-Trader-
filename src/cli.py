@@ -19,6 +19,7 @@ import aiosqlite
 
 import typer
 from rich.console import Console
+from rich.table import Table
 
 from src.core.config import Settings, load_settings
 from src.core.database import get_recent_paper_decisions, get_recent_soak_runs, init_db, record_paper_decision, record_soak_run, record_trade
@@ -4606,6 +4607,7 @@ def paper_rejected_provider_mark_coverage(
     summaries: dict[tuple[str, str, str], Counter[str]] = {}
     provider_statuses: Counter[str] = Counter()
     replayable = skipped_missing = provider_mark_available = later_outcome_eligible = 0
+    explicit_provider_failures = not_recorded = 0
     for record in records:
         if record.action_outcome == "traded":
             continue
@@ -4629,6 +4631,10 @@ def paper_rejected_provider_mark_coverage(
             counts["provider_mark_available"] += 1
         else:
             counts["provider_mark_unavailable"] += 1
+            if provider_status == "not_recorded":
+                not_recorded += 1
+            else:
+                explicit_provider_failures += 1
         baseline = _coerce_numeric(snapshot.get("rejection_mark_price_sol"))
         if baseline is not None and baseline > 0:
             later_outcome_eligible += 1
@@ -4639,6 +4645,20 @@ def paper_rejected_provider_mark_coverage(
         "  DIAGNOSTIC-ONLY. Provider marks are captured after rejection and do not alter ranking, gates, "
         "acceptance, execution, PnL, attribution, or readiness."
     )
+    summary = Table(show_header=True, header_style="bold", title="Evidence Summary")
+    summary.add_column("Replayable")
+    summary.add_column("Provider Successes")
+    summary.add_column("Explicit Failures")
+    summary.add_column("Not Recorded")
+    summary.add_column("Later Eligible")
+    summary.add_row(
+        str(replayable),
+        str(provider_mark_available),
+        str(explicit_provider_failures),
+        str(not_recorded),
+        str(later_outcome_eligible),
+    )
+    console.print(summary)
     console.print(f"  Replayable rejected snapshots: {replayable}")
     console.print(f"  Skipped missing snapshots: {skipped_missing}")
     console.print(f"  Provider-normalized marks available: {provider_mark_available}")

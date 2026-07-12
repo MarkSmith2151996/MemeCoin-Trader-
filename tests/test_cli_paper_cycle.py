@@ -2647,6 +2647,9 @@ def test_provider_mark_coverage_reports_status_and_later_eligibility_read_only(t
     after = asyncio.run(get_recent_paper_decisions(db, limit=10))
 
     assert result.exit_code == 0
+    assert "Evidence Summary" in result.stdout
+    for header in ("Provider", "Successes", "Explicit", "Failures", "Not", "Recorded", "Later", "Eligible"):
+        assert header in result.stdout
     assert "Provider-normalized marks available: 1" in result.stdout
     assert "Later-outcome eligible baselines: 1" in result.stdout
     assert "Provider status breakdown: {'live_dexscreener': 1, 'no_pairs': 1}" in result.stdout
