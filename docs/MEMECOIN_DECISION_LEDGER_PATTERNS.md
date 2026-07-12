@@ -57,6 +57,40 @@ Future writers should be limited to narrow, validated operations:
 
 Writers must not modify risk configuration, candidate score, ranking, acceptance, position size, execution state, fill data, PnL, attribution status, guardrails, circuit-breaker state, or live readiness. They must not store private keys, RPC URLs, authorization headers, serialized transactions, raw provider payloads, or secrets.
 
+## Historical Import Enablement Gate
+
+`import_historical_ledger_evidence` is intentionally disabled. This section does
+not authorize its implementation or operation. A separately reviewed task must
+approve every item below before that state can change.
+
+- Preserve explicit provenance for every imported record: source system, fixed
+  source table, source record ID, source observation time, and extraction
+  method. Imports with absent, inferred, or arbitrary provenance are rejected.
+- Preserve unknown evidence exactly. Risk checks and provider observations keep
+  their explicit unknown or unavailable states; missing source fields cannot be
+  fabricated, coerced to failure, or treated as success.
+- Preserve the import-safe outcome boundary. The import record and its nested
+  decision evidence may be only `unknown` or `inconclusive`, and the import
+  outcome claim remains `not_claimed`. A measurable outcome requires separate,
+  linked baseline and later-mark evidence under a later approved contract.
+- Preserve linked provider evidence. Every imported provider observation must
+  reference the imported decision and retain only the existing allowlisted,
+  redacted fields.
+- Keep the fixture harness passing. It must construct a provenance-bearing
+  unknown/not-claimed record, reject nested measurable outcomes, reject
+  unlinked provider observations, and prove the importer still fails closed.
+- Keep the import path outside runtime, planner, execution, and SQLite write
+  paths. Any future diagnostic writer must not block SQLite persistence or
+  alter gates, ranking, sizing, execution, readiness, or live behavior.
+- Do not import or claim PnL, attribution, performance, or outcome labels in
+  this path. PnL and attribution remain unavailable unless separately linked
+  to verified evidence; outcome labels require valid baseline and later marks.
+
+Passing this checklist only permits a future design review to consider a
+separate diagnostic-only implementation. It does not permit broad SQL access,
+credentials in tools, a database client in runtime code, SQLite dual writes,
+or trading behavior changes.
+
 ## Out Of Scope
 
 The future ledger must not:
