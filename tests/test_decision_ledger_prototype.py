@@ -19,6 +19,7 @@ from src.core.decision_ledger import (
     write_memecoin_decision,
 )
 from src.core.models import CheckResult
+from tests.ledger_harness import SyntheticLedgerAdapter
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -74,6 +75,52 @@ def test_search_requires_a_narrow_filter_and_bounded_limit() -> None:
         LedgerDecisionSearch()
     with pytest.raises(ValueError):
         LedgerDecisionSearch(source="pump_fun", limit=101)
+
+
+def test_synthetic_harness_is_process_local_and_applies_contract_filters() -> None:
+    adapter = SyntheticLedgerAdapter()
+    accepted = LedgerDecisionEvidence(
+        decision_id="accepted-decision",
+        mint_address="mint-a",
+        source="pump_fun",
+        outcome_status="accepted",
+    )
+    rejected = LedgerDecisionEvidence(
+        decision_id="rejected-decision",
+        mint_address="mint-b",
+        source="whale_tracker",
+        outcome_status="rejected",
+    )
+    adapter.record_decision(accepted)
+    adapter.record_decision(rejected)
+
+    assert adapter.read_decision(LedgerDecisionLookup(decision_id="accepted-decision")) == accepted
+    assert adapter.search_decisions(LedgerDecisionSearch(source="pump_fun")) == [accepted]
+    assert SyntheticLedgerAdapter().read_decision(LedgerDecisionLookup(decision_id="accepted-decision")) is None
+
+
+def test_synthetic_harness_rejects_duplicate_ids_and_has_no_sql_surface() -> None:
+    adapter = SyntheticLedgerAdapter()
+    evidence = LedgerDecisionEvidence(decision_id="decision", mint_address="mint")
+    observation = LedgerProviderObservation(
+        snapshot_id="snapshot",
+        mint_address="mint",
+        provider_name="provider",
+        provider_status="unavailable",
+        observed_at="2026-07-12T00:00:00+00:00",
+    )
+    adapter.record_decision(evidence)
+    adapter.record_provider_observation(observation)
+
+    with pytest.raises(ValueError, match="unique"):
+        adapter.record_decision(evidence)
+    with pytest.raises(ValueError, match="unique"):
+        adapter.record_provider_observation(observation)
+
+    source = (PROJECT_ROOT / "tests/ledger_harness.py").read_text()
+    assert "sqlite" not in source
+    assert "psycopg" not in source
+    assert ".execute(" not in source
 
 
 def test_boundary_has_no_sql_or_database_client() -> None:
