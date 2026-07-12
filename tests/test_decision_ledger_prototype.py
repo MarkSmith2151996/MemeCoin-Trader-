@@ -11,8 +11,11 @@ from src.core.decision_ledger import (
     LedgerDecisionLookup,
     LedgerDecisionSearch,
     LedgerDecisionEvidence,
+    LedgerHistoricalImport,
+    LedgerHistoricalProvenance,
     LedgerProviderObservation,
     LedgerPrototypeDisabledError,
+    import_historical_ledger_evidence,
     read_memecoin_decision,
     record_provider_observation,
     search_memecoin_decisions,
@@ -68,6 +71,75 @@ def test_narrow_provider_and_read_contracts_remain_disabled() -> None:
     ):
         with pytest.raises(LedgerPrototypeDisabledError, match="disabled"):
             operation(request)
+
+
+def test_historical_import_requires_explicit_provenance_and_stays_disabled() -> None:
+    decision = LedgerDecisionEvidence(
+        decision_id="historical-decision",
+        mint_address="historical-mint",
+        checks={"liquidity_check": CheckResult.UNKNOWN},
+    )
+    import_request = LedgerHistoricalImport(
+        import_id="historical-import",
+        provenance=LedgerHistoricalProvenance(
+            source_system="sqlite",
+            source_table="paper_decisions",
+            source_record_id="paper-decision-1",
+            source_observed_at="2026-07-12T00:00:00+00:00",
+            extraction_method="explicit_export",
+        ),
+        decision=decision,
+        provider_observations=[
+            LedgerProviderObservation(
+                snapshot_id="historical-snapshot",
+                mint_address="historical-mint",
+                provider_name="historical-provider",
+                provider_status="unknown",
+                observed_at="2026-07-12T00:00:00+00:00",
+                source_decision_id="historical-decision",
+            )
+        ],
+    )
+
+    assert import_request.outcome_status == "unknown"
+    assert import_request.outcome_claim == "not_claimed"
+    assert import_request.decision.checks["liquidity_check"] is CheckResult.UNKNOWN
+    with pytest.raises(LedgerPrototypeDisabledError, match="disabled"):
+        import_historical_ledger_evidence(import_request)
+
+
+def test_historical_import_rejects_outcome_claims_and_unlinked_provider_evidence() -> None:
+    decision = LedgerDecisionEvidence(decision_id="historical-decision", mint_address="historical-mint")
+    provenance = LedgerHistoricalProvenance(
+        source_system="sqlite",
+        source_table="paper_decisions",
+        source_record_id="paper-decision-1",
+        source_observed_at="2026-07-12T00:00:00+00:00",
+        extraction_method="explicit_export",
+    )
+
+    with pytest.raises(ValueError):
+        LedgerHistoricalImport(
+            import_id="historical-import",
+            provenance=provenance,
+            decision=decision,
+            outcome_status="measurable",
+        )
+    with pytest.raises(ValueError, match="reference"):
+        LedgerHistoricalImport(
+            import_id="historical-import",
+            provenance=provenance,
+            decision=decision,
+            provider_observations=[
+                LedgerProviderObservation(
+                    snapshot_id="historical-snapshot",
+                    mint_address="historical-mint",
+                    provider_name="historical-provider",
+                    provider_status="unknown",
+                    observed_at="2026-07-12T00:00:00+00:00",
+                )
+            ],
+        )
 
 
 def test_search_requires_a_narrow_filter_and_bounded_limit() -> None:

@@ -43,6 +43,38 @@ class LedgerProviderObservation(BaseModel):
     source_decision_id: str | None = None
 
 
+class LedgerHistoricalProvenance(BaseModel):
+    """Preserved origin for one explicitly exported SQLite decision record."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    source_system: Literal["sqlite"]
+    source_table: Literal["paper_decisions"]
+    source_record_id: str
+    source_observed_at: str
+    extraction_method: Literal["explicit_export"]
+
+
+class LedgerHistoricalImport(BaseModel):
+    """Disabled import contract for historical diagnostic evidence only."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    import_id: str
+    provenance: LedgerHistoricalProvenance
+    decision: LedgerDecisionEvidence
+    provider_observations: list[LedgerProviderObservation] = Field(default_factory=list)
+    outcome_status: Literal["unknown", "inconclusive"] = "unknown"
+    outcome_claim: Literal["not_claimed"] = "not_claimed"
+
+    @model_validator(mode="after")
+    def preserves_decision_evidence_links(self) -> "LedgerHistoricalImport":
+        for observation in self.provider_observations:
+            if observation.source_decision_id != self.decision.decision_id:
+                raise ValueError("Each provider observation must reference the imported decision ID.")
+        return self
+
+
 class LedgerDecisionLookup(BaseModel):
     """Bounded request for one diagnostic decision by its immutable ID."""
 
@@ -84,6 +116,13 @@ def record_provider_observation(observation: LedgerProviderObservation) -> None:
 
     del observation
     raise LedgerPrototypeDisabledError("Decision ledger writes are disabled in this diagnostic prototype.")
+
+
+def import_historical_ledger_evidence(import_request: LedgerHistoricalImport) -> None:
+    """Reserve a provenance-preserving import without enabling persistence."""
+
+    del import_request
+    raise LedgerPrototypeDisabledError("Historical ledger imports are disabled in this diagnostic prototype.")
 
 
 def read_memecoin_decision(lookup: LedgerDecisionLookup) -> None:
