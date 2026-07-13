@@ -24,7 +24,15 @@ from rich.console import Console
 from rich.table import Table
 
 from src.core.config import Settings, load_settings
-from src.core.database import get_recent_paper_decisions, get_recent_soak_runs, init_db, record_paper_decision, record_soak_run, record_trade
+from src.core.database import (
+    get_recent_paper_decisions,
+    get_recent_soak_runs,
+    init_db,
+    record_candidate_observation,
+    record_paper_decision,
+    record_soak_run,
+    record_trade,
+)
 from src.core.models import CheckResult, PaperDecisionRecord, PaperFillQuality, Position, PositionStatus, RiskAssessment, Signal, SoakRunRecord
 from src.execution.base import ExecutionAdapter
 from src.execution.live_buy import execute_guarded_live_buy
@@ -297,7 +305,7 @@ def build_signal_sources() -> list[SignalSource]:
 
 @dataclass(frozen=True, slots=True)
 class PaperMinimumDryRunSummary:
-    """Bounded no-persistence result for the paper-only evidence gate."""
+    """Bounded paper-only evidence-gate result with optional observation telemetry."""
 
     signals_collected: int
     unique_mints: int
@@ -307,6 +315,10 @@ class PaperMinimumDryRunSummary:
     source_failures: dict[str, int]
     blocked_labels: dict[str, int]
     deferred_labels: dict[str, int]
+    observations_recorded: int = 0
+    new_mints: int = 0
+    repeat_mints: int = 0
+    observation_labels: tuple[tuple[str, str], ...] = ()
 
     def safe_lines(self) -> list[str]:
         lines = [
@@ -315,11 +327,16 @@ class PaperMinimumDryRunSummary:
             f"unique_mints={self.unique_mints}",
             f"strict_passes={self.strict_passes}",
             f"paper_minimum_eligible={self.paper_minimum_eligible}",
+            f"observations_recorded={self.observations_recorded}",
+            f"new_mints={self.new_mints}",
+            f"repeat_mints={self.repeat_mints}",
         ]
         for label, count in self.blocked_labels.items():
             lines.append(f"blocked_{label}={count}")
         for label, count in self.deferred_labels.items():
             lines.append(f"deferred_{label}={count}")
+        for mint_address, label in self.observation_labels:
+            lines.append(f"observation_mint={_short_mint(mint_address)} label={label}")
         return lines
 
 
@@ -328,8 +345,10 @@ async def run_paper_minimum_dry_run(
     *,
     sources: Iterable[SignalSource] | None = None,
     assessor: Callable[[Signal], Awaitable[RiskAssessment]] | None = None,
+    record_observations: bool = False,
+    db_path: str | Path | None = None,
 ) -> PaperMinimumDryRunSummary:
-    """Collect and evaluate launch candidates without trades, persistence, or execution."""
+    """Collect and evaluate candidates without trades, optionally recording sanitized observations."""
 
     bounded_max = max(1, min(max_candidates, 25))
     signal_sources = list(sources) if sources is not None else [
@@ -337,7 +356,13 @@ async def run_paper_minimum_dry_run(
         OnChainMonitor(timeout_s=5.0, profile_limit=min(bounded_max, 5)),
     ]
     if assessor is not None:
-        return await _run_paper_minimum_dry_run(signal_sources, bounded_max, assessor)
+        return await _run_paper_minimum_dry_run(
+            signal_sources,
+            bounded_max,
+            assessor,
+            record_observations=record_observations,
+            db_path=db_path,
+        )
 
     settings = load_settings()
     async with httpx.AsyncClient(timeout=5.0) as liquidity_client:
@@ -351,13 +376,22 @@ async def run_paper_minimum_dry_run(
             enable_holder_lookup=True,
             enable_funding_analysis=False,
         )
-        return await _run_paper_minimum_dry_run(signal_sources, bounded_max, scorer.assess_signal)
+        return await _run_paper_minimum_dry_run(
+            signal_sources,
+            bounded_max,
+            scorer.assess_signal,
+            record_observations=record_observations,
+            db_path=db_path,
+        )
 
 
 async def _run_paper_minimum_dry_run(
     sources: list[SignalSource],
     max_candidates: int,
     assessor: Callable[[Signal], Awaitable[RiskAssessment]],
+    *,
+    record_observations: bool = False,
+    db_path: str | Path | None = None,
 ) -> PaperMinimumDryRunSummary:
     source_signal_counts: Counter[str] = Counter()
     source_failures: Counter[str] = Counter()
@@ -384,8 +418,16 @@ async def _run_paper_minimum_dry_run(
 
     strict_passes = 0
     eligible = 0
+    observations_recorded = 0
+    new_mints = 0
+    repeat_mints = 0
+    observation_labels: list[tuple[str, str]] = []
     blocked_labels: Counter[str] = Counter()
     deferred_labels: Counter[str] = Counter()
+    observation_db_path = resolve_db_path(db_path) if record_observations else None
+    observation_run_id = str(uuid4()) if record_observations else None
+    if observation_db_path is not None:
+        await init_db(observation_db_path)
     for signal in unique_signals:
         try:
             assessment = await assessor(signal)
@@ -397,6 +439,30 @@ async def _run_paper_minimum_dry_run(
         result = evaluate_paper_minimum_evidence(signal, assessment, research_mode=research_mode)
         _record_paper_minimum_labels(result, blocked_labels, deferred_labels)
         eligible += int(result.eligible)
+        if observation_db_path is not None and observation_run_id is not None:
+            observation = await record_candidate_observation(
+                observation_db_path,
+                run_id=observation_run_id,
+                mint_address=signal.mint_address,
+                source_names=(signal.source.value.lower(),),
+                source_event_types=(signal.type.value.lower(),),
+                candidate_mode=classify_candidate_mode(signal).value,
+                symbol=_signal_observation_text(signal, "symbol"),
+                name=_signal_observation_text(signal, "name"),
+                metadata_completeness_state=_signal_observation_metadata_state(signal),
+                strict_result="passed" if assessment.all_checks_pass else "rejected",
+                strict_labels=_assessment_observation_labels(assessment),
+                paper_minimum_result="eligible" if result.eligible else "blocked",
+                paper_minimum_labels=result.reason_labels,
+                blocker_labels=tuple(
+                    label for label in result.reason_labels if label.startswith("paper_minimum_blocked_")
+                ),
+                observed_at=signal.observed_at,
+            )
+            observations_recorded += 1
+            new_mints += int(observation.is_new_mint)
+            repeat_mints += int(not observation.is_new_mint)
+            observation_labels.append((signal.mint_address, observation.repeat_label))
 
     return PaperMinimumDryRunSummary(
         signals_collected=len(collected),
@@ -407,6 +473,10 @@ async def _run_paper_minimum_dry_run(
         source_failures=dict(source_failures),
         blocked_labels=dict(blocked_labels),
         deferred_labels=dict(deferred_labels),
+        observations_recorded=observations_recorded,
+        new_mints=new_mints,
+        repeat_mints=repeat_mints,
+        observation_labels=tuple(observation_labels),
     )
 
 
@@ -430,9 +500,41 @@ def write_paper_minimum_dry_run_report(summary: PaperMinimumDryRunSummary, path:
         "",
         *[f"- {line}" for line in summary.safe_lines()],
         "",
-        "This report is read-only: no paper trade, simulated trade, database write, or execution path ran.",
+        (
+            "This report recorded sanitized candidate observations only; no paper trade, simulated trade, or execution path ran."
+            if summary.observations_recorded
+            else "This report is read-only: no paper trade, simulated trade, database write, or execution path ran."
+        ),
     ]
     path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+
+def _signal_observation_text(signal: Signal, field_name: str) -> str | None:
+    value = signal.payload.get(field_name) if isinstance(signal.payload, dict) else None
+    return value if isinstance(value, str) else None
+
+
+def _signal_observation_metadata_state(signal: Signal) -> str | None:
+    payload = signal.payload if isinstance(signal.payload, dict) else {}
+    diagnostics = payload.get("attention_diagnostics")
+    if not isinstance(diagnostics, dict):
+        return None
+    value = diagnostics.get("metadata_completeness_state")
+    return value if isinstance(value, str) else None
+
+
+def _assessment_observation_labels(assessment: RiskAssessment) -> tuple[str, ...]:
+    check_names = (
+        "liquidity_check",
+        "top10_holder_check",
+        "creator_holding_check",
+        "age_check",
+        "unique_buyers_check",
+        "mint_authority_check",
+        "freeze_authority_check",
+        "honeypot_check",
+    )
+    return tuple(f"{name}_{getattr(assessment, name).value.lower()}" for name in check_names)
 
 
 def build_signal_aggregator(sources: list[SignalSource], db_path: Path) -> SignalAggregator:
@@ -2615,10 +2717,22 @@ def paper_cycle(
 def paper_minimum_dry_run(
     max_candidates: int = typer.Option(15, min=1, max=25, help="Maximum unique launch mints to assess."),
     report_path: str | None = typer.Option(None, help="Optional explicit markdown report path."),
+    record_observations: bool = typer.Option(
+        False,
+        "--record-observations",
+        help="Persist sanitized candidate novelty observations; never creates paper trades.",
+    ),
+    db_path: str | None = typer.Option(None, help="Optional SQLite path for observation persistence."),
 ) -> None:
-    """Run the paper-only evidence gate without trades or persistence."""
+    """Run the paper-only evidence gate without trades; persistence is explicit."""
 
-    summary = asyncio.run(run_paper_minimum_dry_run(max_candidates=max_candidates))
+    summary = asyncio.run(
+        run_paper_minimum_dry_run(
+            max_candidates=max_candidates,
+            record_observations=record_observations,
+            db_path=db_path,
+        )
+    )
     if report_path:
         write_paper_minimum_dry_run_report(summary, Path(report_path))
     for line in summary.safe_lines():
