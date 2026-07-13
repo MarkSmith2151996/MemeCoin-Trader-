@@ -115,6 +115,8 @@ Default execution mode: paper trading
 
 ## Last 10 Changes
 
+- 2026-07-13 Executed MT-370 as skipped/no-op. MT-369 had no current mark because MT-368 created no non-null quoted paper position, so no priced and marked paper position existed to close. Report: `/mnt/c/Users/Big A/custodian-shared/memecoin-trader/paper-trade-reports/paper_close_lifecycle_v2.md`. No close request, persistence, simulated PnL, paper trade, live path, real swap, wallet/key action, config/risk/provider change, or secret/raw payload output occurred.
+
 - 2026-07-13 Executed MT-369 as skipped/no-op. MT-368 created no non-null quoted paper position, so no qualifying priced paper position existed to mark. Report: `/mnt/c/Users/Big A/custodian-shared/memecoin-trader/paper-trade-reports/priced_paper_mark_snapshot.md`. No mark request, persistence, paper trade, PnL, live path, real swap, wallet/key action, config/risk/provider change, or secret/raw payload output occurred.
 
 - 2026-07-13 Executed MT-365 live scan observation wiring. `paper-minimum-dry-run` keeps zero-write default behavior and now supports explicit `--record-observations` plus optional `--db-path`; opt-in runs persist sanitized candidate evidence only and report observation/new/repeat counts with a short mint label per candidate. Added focused default/opt-in/repeat/sanitization tests. Report: `/mnt/c/Users/Big A/custodian-shared/memecoin-trader/dataset-table-reports/live_scan_observation_wiring_report.md`. Validation: 11 focused tests and `python3 -m compileall` passed; Ruff unavailable. No trade/live/provider/config/risk/wallet/raw-payload/secret change occurred.
