@@ -7,16 +7,22 @@ from collections.abc import Mapping, Sequence
 from src.core.config import RiskConfig
 from src.core.models import CheckResult, TokenInfo
 
+SYSTEM_PROGRAM_ADDRESS = "11111111111111111111111111111111"
+INCINERATOR_ADDRESS = "1nc1nerator11111111111111111111111111111111"
+RAYDIUM_AMM_PROGRAM_ADDRESS = "675kPX9MHTjS2zt1qfr1NYHuzeLXfQM9H24wFSUt1Mp8"
+RAYDIUM_AMM_AUTHORITY_ADDRESS = "5Q544fKrFoe6tsEbD7S8EmxGTJYAKtTVhAW5Q5pge4j1"
+
 KNOWN_NON_PERSON_OWNERS = {
-    "675kPX9MHTjS2zt1qfr1NYHuzeLXfQM9H24wFSUt1Mp8",  # Raydium AMM
+    RAYDIUM_AMM_PROGRAM_ADDRESS,
+    RAYDIUM_AMM_AUTHORITY_ADDRESS,
     "whirLbMiicVdio4qvUfM5KAg6Ct8VwpYzGff3uctyCc",  # Orca Whirlpool
-    "5Q544fKrFoe6tsEbD7S8EmxGTJYAKtTVhAW5Q5pge4j1",  # Raydium authority
-    "11111111111111111111111111111111",  # System program
-    "1nc1nerator11111111111111111111111111111111",  # Incinerator
+    SYSTEM_PROGRAM_ADDRESS,
+    INCINERATOR_ADDRESS,
 }
 
-KNOWN_NON_PERSON_ADDRESSES = {
-    "1nc1nerator11111111111111111111111111111111",
+KNOWN_RAYDIUM_IDENTITIES = {
+    RAYDIUM_AMM_PROGRAM_ADDRESS,
+    RAYDIUM_AMM_AUTHORITY_ADDRESS,
 }
 
 
@@ -31,16 +37,25 @@ def _extract_string(account: Mapping[str, object], *keys: str) -> str | None:
 def is_non_person_holder(account: Mapping[str, object]) -> bool:
     """Return True when a largest-account entry is clearly protocol-owned or burned."""
 
-    address = _extract_string(account, "address", "account", "pubkey")
-    owner = _extract_string(account, "owner", "ownerAddress", "accountOwner")
+    return classify_holder_account(account) != "retained"
 
-    if address in KNOWN_NON_PERSON_ADDRESSES:
+
+def _is_raydium_pool_or_pda(account: Mapping[str, object]) -> bool:
+    program_identity = _extract_string(
+        account,
+        "programId",
+        "program_id",
+        "ownerProgram",
+        "owner_program",
+    )
+    if program_identity not in KNOWN_RAYDIUM_IDENTITIES:
+        return False
+
+    if account.get("isPda") is True or account.get("is_pda") is True:
         return True
-    if owner in KNOWN_NON_PERSON_OWNERS:
-        return True
-    if address in KNOWN_NON_PERSON_OWNERS:
-        return True
-    return False
+
+    account_type = _extract_string(account, "accountType", "account_type", "type", "kind")
+    return account_type is not None and account_type.lower() in {"pool", "lp_pool", "vault", "amm_pool"}
 
 
 def classify_holder_account(
@@ -50,8 +65,14 @@ def classify_holder_account(
 ) -> str:
     address = _extract_string(account, "address", "account", "pubkey")
     owner = _extract_string(account, "owner", "ownerAddress", "accountOwner")
-    if address in KNOWN_NON_PERSON_ADDRESSES:
+    if address == INCINERATOR_ADDRESS:
         return "burn_address"
+    if address == SYSTEM_PROGRAM_ADDRESS:
+        return "null_or_system_address"
+    if owner == SYSTEM_PROGRAM_ADDRESS:
+        return "system_program_owner"
+    if _is_raydium_pool_or_pda(account):
+        return "raydium_pool_or_pda"
     if owner in KNOWN_NON_PERSON_OWNERS:
         return "known_program_owner"
     if address in KNOWN_NON_PERSON_OWNERS:
