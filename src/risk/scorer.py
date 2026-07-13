@@ -1903,9 +1903,28 @@ def _created_at_from_signal(signal: Signal, candidates: list[Mapping[str, object
     parsed = _coerce_datetime(raw_created_at)
     if parsed is not None:
         return parsed
+    pair_created_at = _dexscreener_pair_created_at(signal.payload)
+    if pair_created_at is not None:
+        return pair_created_at
     if signal.source == SignalSource.PUMP_FUN and signal.type == SignalType.NEW_POOL:
         return signal.observed_at
     return None
+
+
+def _dexscreener_pair_created_at(payload: Mapping[str, object]) -> datetime | None:
+    """Return valid DexScreener pair creation time as conservative age provenance."""
+
+    if payload.get("provider") != "dexscreener":
+        return None
+    raw_pair_created_at = payload.get("pair_created_at")
+    if isinstance(raw_pair_created_at, bool):
+        return None
+    if isinstance(raw_pair_created_at, (int, float)) and raw_pair_created_at <= 0:
+        return None
+    parsed = _coerce_datetime(raw_pair_created_at)
+    if parsed is None or parsed > datetime.now(UTC):
+        return None
+    return parsed
 
 
 def _first_value(candidates: list[Mapping[str, object]], *field_names: str) -> object | None:

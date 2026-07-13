@@ -84,6 +84,31 @@ def test_onchain_monitor_provider_failures_degrade_gracefully() -> None:
     assert asyncio.run(FailingMonitor().poll()) == []
 
 
+def test_onchain_monitor_preserves_valid_pair_age_provenance() -> None:
+    monitor = OnChainMonitor()
+    snapshot = _snapshot(
+        volume_m5=500.0,
+        volume_h1=1_000.0,
+        buys_m5=3.0,
+        sells_m5=1.0,
+        liquidity_usd=10_000.0,
+        created_minutes_ago=10,
+    )
+
+    signal = monitor._build_signal(snapshot, previous=None)
+
+    assert signal is not None
+    assert signal.payload["provider"] == "dexscreener"
+    assert signal.payload["pair_created_at"] == snapshot.pair_created_at.isoformat()
+
+
+def test_onchain_monitor_rejects_zero_and_negative_pair_timestamps() -> None:
+    monitor = OnChainMonitor()
+
+    assert monitor._extract_timestamp(0) is None
+    assert monitor._extract_timestamp(-1) is None
+
+
 def test_onchain_monitor_deduplicates_by_mint_within_poll_window() -> None:
     class StubOnChainMonitor(OnChainMonitor):
         def __init__(self) -> None:

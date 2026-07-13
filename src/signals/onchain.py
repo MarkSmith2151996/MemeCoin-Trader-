@@ -186,6 +186,7 @@ class OnChainMonitor(SignalSource):
         payload = {
             "provider": "dexscreener",
             "pair_address": snapshot.pair_address,
+            "pair_created_at": snapshot.pair_created_at.isoformat() if snapshot.pair_created_at is not None else None,
             "dex_id": snapshot.dex_id,
             "symbol": snapshot.symbol,
             "metrics": {
@@ -344,4 +345,9 @@ class OnChainMonitor(SignalSource):
             timestamp_ms = float(value)
         except (TypeError, ValueError):
             return None
-        return datetime.fromtimestamp(timestamp_ms / 1000, tz=UTC)
+        if timestamp_ms <= 0:
+            return None
+        try:
+            return datetime.fromtimestamp(timestamp_ms / 1000, tz=UTC)
+        except (OverflowError, OSError, ValueError):
+            return None

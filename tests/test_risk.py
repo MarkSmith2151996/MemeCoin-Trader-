@@ -1831,6 +1831,52 @@ def test_missing_age_remains_unknown_with_age_policy_unknown() -> None:
     assert signal.payload["age_policy"]["age_policy_state"] == "age_unknown"
 
 
+def test_dexscreener_pair_age_passes_configured_minimum_as_conservative_provenance() -> None:
+    signal = Signal(
+        source=SignalSource.ONCHAIN,
+        type=SignalType.NEW_POOL,
+        mint_address="pair-age-pass-mint",
+        payload={
+            "provider": "dexscreener",
+            "pair_created_at": (datetime.now(UTC) - timedelta(minutes=6)).isoformat(),
+        },
+    )
+
+    assessment = assess_signal(signal, RiskConfig(min_age_minutes=5))
+
+    assert assessment.age_check == CheckResult.PASS
+
+
+def test_dexscreener_pair_age_below_configured_minimum_fails() -> None:
+    signal = Signal(
+        source=SignalSource.ONCHAIN,
+        type=SignalType.NEW_POOL,
+        mint_address="pair-age-fail-mint",
+        payload={
+            "provider": "dexscreener",
+            "pair_created_at": (datetime.now(UTC) - timedelta(minutes=4)).isoformat(),
+        },
+    )
+
+    assessment = assess_signal(signal, RiskConfig(min_age_minutes=5))
+
+    assert assessment.age_check == CheckResult.FAIL
+
+
+def test_missing_or_invalid_dexscreener_pair_age_remains_unknown() -> None:
+    for pair_created_at in (None, 0, -1, datetime.now(UTC) + timedelta(minutes=1)):
+        signal = Signal(
+            source=SignalSource.ONCHAIN,
+            type=SignalType.NEW_POOL,
+            mint_address=f"pair-age-unknown-{pair_created_at}",
+            payload={"provider": "dexscreener", "pair_created_at": pair_created_at},
+        )
+
+        assessment = assess_signal(signal, RiskConfig(min_age_minutes=5))
+
+        assert assessment.age_check == CheckResult.UNKNOWN
+
+
 def test_discovery_age_warning_does_not_override_holder_fail() -> None:
     mint_address = "So11111111111111111111111111111111111111112"
     signal = Signal(
