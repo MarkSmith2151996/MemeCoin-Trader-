@@ -115,6 +115,8 @@ Default execution mode: paper trading
 
 ## Last 10 Changes
 
+- 2026-07-13 Executed MT-358 as skipped/no-op. MT-357 had no current mark because no priced position exists after MT-356, so MT-358's close-smoke precondition failed. Report: `/mnt/c/Users/Big A/custodian-shared/memecoin-trader/paper-trade-reports/paper_close_lifecycle_smoke.md`. No close, simulated sell, PnL calculation, DB write, config, live path, wallet action, or secret output occurred.
+
 - 2026-07-13 Executed MT-357 as skipped/no-op. MT-356's immediate quote failure meant no priced paper position existed, so MT-357's required precondition failed. Report: `/mnt/c/Users/Big A/custodian-shared/memecoin-trader/paper-trade-reports/paper_position_mark_snapshot.md`. No mark request, persistence, trade, DB write, config, live path, wallet action, or secret output occurred.
 
 - 2026-07-13 Executed MT-356 second priced paper buy attempt. MT-355 pricing availability and paper-minimum eligibility were revalidated, but the immediate safe quote was unavailable at the selected candidate's execution point. Per task boundary, no priced trade or position was created and no additional paper state was written. Report: `/mnt/c/Users/Big A/custodian-shared/memecoin-trader/paper-trade-reports/second_priced_paper_buy_report.md`. This fails MT-357's priced-position precondition, so later mark/close tasks must skip. No live path, key, wallet action, config/filter change, or secret/raw provider output occurred.
