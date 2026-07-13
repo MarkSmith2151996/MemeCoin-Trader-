@@ -141,17 +141,21 @@ class RugCheckClient:
         if revoked is not None:
             return revoked
 
-        enabled = self._extract_bool(
-            payload,
-            [
-                f"tokenMeta.{authority_name}Authority",
-                f"token.{authority_name}Authority",
-                f"authorities.{authority_name}Authority",
-                f"{authority_name}Authority",
-            ],
-        )
-        if enabled is not None:
-            return not enabled
+        for path in (
+            f"tokenMeta.{authority_name}Authority",
+            f"token.{authority_name}Authority",
+            f"authorities.{authority_name}Authority",
+            f"{authority_name}Authority",
+        ):
+            present, value = self._extract_value_with_presence(payload, path)
+            if not present:
+                continue
+            # RugCheck represents a missing mint/freeze authority with a present null field.
+            if value is None:
+                return True
+            enabled = self._coerce_bool(value)
+            if enabled is not None:
+                return not enabled
         return None
 
     def _extract_top_holder_pct(self, payload: Mapping[str, object]) -> float | None:
@@ -186,16 +190,22 @@ class RugCheckClient:
     def _extract_bool(self, payload: Mapping[str, object], paths: Sequence[str]) -> bool | None:
         for path in paths:
             value = self._extract_value(payload, path)
-            if isinstance(value, bool):
-                return value
-            if isinstance(value, (int, float)) and value in (0, 1):
-                return bool(value)
-            if isinstance(value, str):
-                lowered = value.strip().lower()
-                if lowered in {"true", "yes", "locked", "revoked"}:
-                    return True
-                if lowered in {"false", "no", "unlocked", "active"}:
-                    return False
+            parsed = self._coerce_bool(value)
+            if parsed is not None:
+                return parsed
+        return None
+
+    def _coerce_bool(self, value: object) -> bool | None:
+        if isinstance(value, bool):
+            return value
+        if isinstance(value, (int, float)) and value in (0, 1):
+            return bool(value)
+        if isinstance(value, str):
+            lowered = value.strip().lower()
+            if lowered in {"true", "yes", "locked", "revoked"}:
+                return True
+            if lowered in {"false", "no", "unlocked", "active"}:
+                return False
         return None
 
     def _extract_float(self, payload: Mapping[str, object], paths: Sequence[str]) -> float | None:
@@ -220,6 +230,14 @@ class RugCheckClient:
                 return None
             current = current.get(segment)
         return current
+
+    def _extract_value_with_presence(self, payload: Mapping[str, object], path: str) -> tuple[bool, object]:
+        current: object = payload
+        for segment in path.split("."):
+            if not isinstance(current, Mapping) or segment not in current:
+                return False, None
+            current = current[segment]
+        return True, current
 
     def _coerce_float(self, value: object) -> float | None:
         if isinstance(value, bool) or value is None:

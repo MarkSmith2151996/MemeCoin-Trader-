@@ -76,6 +76,53 @@ def test_rugcheck_missing_optional_fields_degrade_to_unknowns() -> None:
     assert result.risk_level is None
 
 
+def test_rugcheck_present_null_mint_and_freeze_authorities_are_revoked() -> None:
+    payload = {
+        "token": {
+            "mintAuthority": None,
+            "freezeAuthority": None,
+        },
+        "tokenMeta": {
+            "updateAuthority": "unrelated-authority",
+        },
+    }
+
+    async def fake_fetcher(_client: httpx.AsyncClient, _mint_address: str) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json=payload,
+            request=httpx.Request("GET", "https://example.test/mint"),
+        )
+
+    result = asyncio.run(RugCheckClient(fetcher=fake_fetcher).fetch_report("mint-null-authorities"))
+
+    assert result.mint_authority_revoked is True
+    assert result.freeze_authority_revoked is True
+
+
+def test_rugcheck_unrelated_authorities_do_not_imply_mint_or_freeze_state() -> None:
+    payload = {
+        "tokenMeta": {
+            "updateAuthority": "unrelated-authority",
+        },
+        "token_extensions": {
+            "metadataPointer": {"authority": "unrelated-authority"},
+        },
+    }
+
+    async def fake_fetcher(_client: httpx.AsyncClient, _mint_address: str) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json=payload,
+            request=httpx.Request("GET", "https://example.test/mint"),
+        )
+
+    result = asyncio.run(RugCheckClient(fetcher=fake_fetcher).fetch_report("mint-unrelated-authorities"))
+
+    assert result.mint_authority_revoked is None
+    assert result.freeze_authority_revoked is None
+
+
 def test_rugcheck_non_200_response_degrades_gracefully() -> None:
     async def fake_fetcher(_client: httpx.AsyncClient, _mint_address: str) -> httpx.Response:
         return httpx.Response(
