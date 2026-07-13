@@ -33,7 +33,7 @@ from src.core.database import (
     record_soak_run,
     record_trade,
 )
-from src.core.models import CheckResult, PaperDecisionRecord, PaperFillQuality, Position, PositionStatus, RiskAssessment, Signal, SoakRunRecord
+from src.core.models import CheckResult, PaperDecisionRecord, PaperFillQuality, Position, PositionStatus, RiskAssessment, Side, Signal, SoakRunRecord
 from src.execution.base import ExecutionAdapter
 from src.execution.live_buy import execute_guarded_live_buy
 from src.execution.live_circuit_breaker import LiveCircuitBreaker
@@ -340,6 +340,45 @@ class PaperMinimumDryRunSummary:
         return lines
 
 
+@dataclass(frozen=True, slots=True)
+class MigrationPaperLifecycleSummary:
+    """Bounded paper-only result for one migration candidate lifecycle."""
+
+    candidates_seen: int
+    migration_candidates: int
+    paper_minimum_eligible: int
+    quote_available: int
+    execution_mode: str
+    outcome: str
+    selected_mint: str | None = None
+    entry_price_sol: float | None = None
+    mark_price_sol: float | None = None
+    realized_pnl_sol: float | None = None
+    reason: str | None = None
+
+    def safe_lines(self) -> list[str]:
+        lines = [
+            "mode=paper_migration_lifecycle",
+            f"execution_mode={self.execution_mode}",
+            f"candidates_seen={self.candidates_seen}",
+            f"migration_candidates={self.migration_candidates}",
+            f"paper_minimum_eligible={self.paper_minimum_eligible}",
+            f"quote_available={self.quote_available}",
+            f"outcome={self.outcome}",
+        ]
+        if self.selected_mint:
+            lines.append(f"selected_mint={_short_mint(self.selected_mint)}")
+        if self.entry_price_sol is not None:
+            lines.append(f"entry_price_sol={self.entry_price_sol:.12f}")
+        if self.mark_price_sol is not None:
+            lines.append(f"mark_price_sol={self.mark_price_sol:.12f}")
+        if self.realized_pnl_sol is not None:
+            lines.append(f"realized_pnl_sol={self.realized_pnl_sol:.9f}")
+        if self.reason:
+            lines.append(f"reason={self.reason}")
+        return lines
+
+
 async def run_paper_minimum_dry_run(
     max_candidates: int = 15,
     *,
@@ -490,6 +529,273 @@ def _record_paper_minimum_labels(
             blocked_labels[label] += 1
         elif label.startswith("paper_minimum_deferred_"):
             deferred_labels[label] += 1
+
+
+async def run_migration_paper_lifecycle(
+    *,
+    max_candidates: int = 5,
+    timeout_seconds: float = 30.0,
+    amount_sol: float = 0.01,
+    confirm: bool = False,
+    db_path: str | Path | None = None,
+    source: SignalSource | None = None,
+    assessor: Callable[[Signal], Awaitable[RiskAssessment]] | None = None,
+    price_provider: PriceProvider | None = None,
+    settings: Settings | None = None,
+) -> MigrationPaperLifecycleSummary:
+    """Run one bounded migration candidate through a quoted paper entry/mark/close lifecycle."""
+
+    bounded_max = max(1, min(max_candidates, 25))
+    runtime_settings = force_paper_settings(settings or load_settings())
+    runtime_db_path = resolve_db_path(db_path)
+    runtime_source = source or PumpFunMonitor(http_urls=(), http_timeout_s=5.0)
+    provider = price_provider or DexScreenerPriceProvider()
+
+    if assessor is not None:
+        return await _run_migration_paper_lifecycle(
+            runtime_source,
+            assessor,
+            provider,
+            runtime_settings,
+            runtime_db_path,
+            bounded_max=bounded_max,
+            timeout_seconds=timeout_seconds,
+            amount_sol=amount_sol,
+            confirm=confirm,
+        )
+
+    async with httpx.AsyncClient(timeout=5.0) as liquidity_client:
+        scorer = DiscoveryRiskScorer(
+            runtime_settings.risk,
+            holder_lookup=ReadOnlyHolderLookup(timeout_s=5.0),
+            rugcheck_client=RugCheckClient(timeout_s=5.0),
+            funding_provider=HeliusFundingProvider(api_key=""),
+            liquidity_probe=LiquidityProbe(timeout_s=5.0, client=liquidity_client),
+            holder_policy_mode="strict",
+            enable_holder_lookup=True,
+            enable_funding_analysis=False,
+        )
+        return await _run_migration_paper_lifecycle(
+            runtime_source,
+            scorer.assess_signal,
+            provider,
+            runtime_settings,
+            runtime_db_path,
+            bounded_max=bounded_max,
+            timeout_seconds=timeout_seconds,
+            amount_sol=amount_sol,
+            confirm=confirm,
+        )
+
+
+async def _run_migration_paper_lifecycle(
+    source: SignalSource,
+    assessor: Callable[[Signal], Awaitable[RiskAssessment]],
+    price_provider: PriceProvider,
+    settings: Settings,
+    db_path: Path,
+    *,
+    bounded_max: int,
+    timeout_seconds: float,
+    amount_sol: float,
+    confirm: bool,
+) -> MigrationPaperLifecycleSummary:
+    """Select a migration with a current wSOL quote, then optionally simulate its full lifecycle."""
+
+    if not _is_valid_price(amount_sol) or amount_sol > settings.position.max_single_position_sol:
+        return MigrationPaperLifecycleSummary(
+            candidates_seen=0,
+            migration_candidates=0,
+            paper_minimum_eligible=0,
+            quote_available=0,
+            execution_mode="paper",
+            outcome="invalid_amount",
+            reason="amount_exceeds_paper_position_cap",
+        )
+
+    await init_db(db_path)
+    manager = PositionManager(db_path, settings)
+    start_at = monotonic()
+    seen_mints: set[str] = set()
+    candidates_seen = 0
+    migration_candidates = 0
+    paper_minimum_eligible = 0
+    quote_available = 0
+    last_reason = "no_migration_candidate"
+
+    await source.start()
+    try:
+        while migration_candidates < bounded_max and monotonic() - start_at < timeout_seconds:
+            try:
+                batch = await source.poll()
+            except Exception:
+                last_reason = "source_failed"
+                break
+
+            for signal in batch:
+                mint_address = signal.mint_address.strip()
+                if not mint_address or mint_address in seen_mints:
+                    continue
+                seen_mints.add(mint_address)
+                candidates_seen += 1
+                if classify_candidate_mode(signal) != CandidateMode.MIGRATION:
+                    continue
+
+                migration_candidates += 1
+                try:
+                    assessment = await assessor(signal)
+                except Exception:
+                    last_reason = "assessment_failed"
+                    continue
+                evidence = evaluate_paper_minimum_evidence(signal, assessment)
+                if not evidence.eligible:
+                    last_reason = next(
+                        (label for label in evidence.reason_labels if label.startswith("paper_minimum_blocked_")),
+                        "paper_minimum_ineligible",
+                    )
+                    continue
+                paper_minimum_eligible += 1
+
+                quote = await price_provider.get_price_with_diagnostic(mint_address)
+                if not _is_valid_price(quote.price_sol):
+                    last_reason = quote.reason
+                    continue
+                quote_available += 1
+
+                if not confirm:
+                    return MigrationPaperLifecycleSummary(
+                        candidates_seen=candidates_seen,
+                        migration_candidates=migration_candidates,
+                        paper_minimum_eligible=paper_minimum_eligible,
+                        quote_available=quote_available,
+                        execution_mode="paper",
+                        outcome="quote_ready_confirmation_required",
+                        selected_mint=mint_address,
+                        entry_price_sol=quote.price_sol,
+                        reason=quote.reason,
+                    )
+
+                existing = await manager.get_position(mint_address, mode="paper")
+                if existing is not None:
+                    return MigrationPaperLifecycleSummary(
+                        candidates_seen=candidates_seen,
+                        migration_candidates=migration_candidates,
+                        paper_minimum_eligible=paper_minimum_eligible,
+                        quote_available=quote_available,
+                        execution_mode="paper",
+                        outcome="entry_blocked",
+                        selected_mint=mint_address,
+                        entry_price_sol=quote.price_sol,
+                        reason="open_position_exists",
+                    )
+
+                open_positions = await manager.get_all_open(mode="paper")
+                if len(open_positions) >= settings.position.max_open_positions:
+                    return MigrationPaperLifecycleSummary(
+                        candidates_seen=candidates_seen,
+                        migration_candidates=migration_candidates,
+                        paper_minimum_eligible=paper_minimum_eligible,
+                        quote_available=quote_available,
+                        execution_mode="paper",
+                        outcome="entry_blocked",
+                        selected_mint=mint_address,
+                        entry_price_sol=quote.price_sol,
+                        reason="max_open_positions_reached",
+                    )
+                if await manager.total_exposure_sol(mode="paper") + amount_sol > settings.position.max_portfolio_sol:
+                    return MigrationPaperLifecycleSummary(
+                        candidates_seen=candidates_seen,
+                        migration_candidates=migration_candidates,
+                        paper_minimum_eligible=paper_minimum_eligible,
+                        quote_available=quote_available,
+                        execution_mode="paper",
+                        outcome="entry_blocked",
+                        selected_mint=mint_address,
+                        entry_price_sol=quote.price_sol,
+                        reason="max_portfolio_exposure_reached",
+                    )
+
+                execution = PaperExecutionAdapter(price_lookup={mint_address: quote.price_sol})
+                try:
+                    trade = await execution.execute_swap(
+                        mint_address,
+                        Side.BUY,
+                        amount_sol,
+                        slippage_bps=settings.position.default_slippage_bps,
+                    )
+                finally:
+                    await execution.close()
+                trade = trade.model_copy(
+                    update={
+                        "metadata": {
+                            **trade.metadata,
+                            "lifecycle": "migration_dexscreener_quote",
+                            "candidate_mode": CandidateMode.MIGRATION.value,
+                            "entry_quote_provider": quote.reason,
+                            "entry_quote_liquidity_usd": quote.liquidity_usd,
+                        }
+                    }
+                )
+                await record_trade(db_path, trade)
+                await manager.open_position(trade, signal)
+
+                mark = await price_provider.get_price_with_diagnostic(mint_address)
+                if not _is_valid_price(mark.price_sol):
+                    return MigrationPaperLifecycleSummary(
+                        candidates_seen=candidates_seen,
+                        migration_candidates=migration_candidates,
+                        paper_minimum_eligible=paper_minimum_eligible,
+                        quote_available=quote_available,
+                        execution_mode="paper",
+                        outcome="mark_unavailable_position_open",
+                        selected_mint=mint_address,
+                        entry_price_sol=quote.price_sol,
+                        reason=mark.reason,
+                    )
+
+                closed = await manager.close_position(mint_address, exit_price_sol=mark.price_sol, mode="paper")
+                return MigrationPaperLifecycleSummary(
+                    candidates_seen=candidates_seen,
+                    migration_candidates=migration_candidates,
+                    paper_minimum_eligible=paper_minimum_eligible,
+                    quote_available=quote_available,
+                    execution_mode="paper",
+                    outcome="closed",
+                    selected_mint=mint_address,
+                    entry_price_sol=quote.price_sol,
+                    mark_price_sol=mark.price_sol,
+                    realized_pnl_sol=closed.realized_pnl_sol if closed is not None else None,
+                    reason=mark.reason,
+                )
+
+            if migration_candidates >= bounded_max:
+                break
+            await asyncio.sleep(min(0.25, max(timeout_seconds - (monotonic() - start_at), 0.0)))
+    finally:
+        await source.stop()
+
+    return MigrationPaperLifecycleSummary(
+        candidates_seen=candidates_seen,
+        migration_candidates=migration_candidates,
+        paper_minimum_eligible=paper_minimum_eligible,
+        quote_available=quote_available,
+        execution_mode="paper",
+        outcome="no_entry",
+        reason=last_reason,
+    )
+
+
+def write_migration_paper_lifecycle_report(summary: MigrationPaperLifecycleSummary, path: Path) -> None:
+    """Write a sanitized lifecycle review report without raw provider data."""
+
+    lines = [
+        "# Migration DexScreener Paper Lifecycle Review",
+        "",
+        *[f"- {line}" for line in summary.safe_lines()],
+        "",
+        "This workflow is paper-only. It does not use a wallet, submit a swap, or claim real profit or loss.",
+    ]
+    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 
 def write_paper_minimum_dry_run_report(summary: PaperMinimumDryRunSummary, path: Path) -> None:
@@ -2735,6 +3041,36 @@ def paper_minimum_dry_run(
     )
     if report_path:
         write_paper_minimum_dry_run_report(summary, Path(report_path))
+    for line in summary.safe_lines():
+        console.print(line)
+
+
+@app.command("paper-migration-lifecycle")
+def paper_migration_lifecycle(
+    max_candidates: int = typer.Option(5, min=1, max=25, help="Maximum migration candidates to assess."),
+    timeout_seconds: float = typer.Option(30.0, min=0.0, help="Maximum migration-feed wait time."),
+    amount_sol: float = typer.Option(0.01, min=0.000001, help="Single simulated paper entry size in SOL."),
+    confirm: bool = typer.Option(
+        False,
+        "--confirm",
+        help="Required to create one simulated entry and immediately close it at a fresh mark.",
+    ),
+    report_path: str | None = typer.Option(None, help="Optional explicit markdown review report path."),
+    db_path: str | None = typer.Option(None, help="Optional SQLite path override."),
+) -> None:
+    """Select one quoted migration candidate and run a paper-only entry/mark/close lifecycle."""
+
+    summary = asyncio.run(
+        run_migration_paper_lifecycle(
+            max_candidates=max_candidates,
+            timeout_seconds=timeout_seconds,
+            amount_sol=amount_sol,
+            confirm=confirm,
+            db_path=db_path,
+        )
+    )
+    if report_path:
+        write_migration_paper_lifecycle_report(summary, Path(report_path))
     for line in summary.safe_lines():
         console.print(line)
 
