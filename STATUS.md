@@ -115,6 +115,8 @@ Default execution mode: paper trading
 
 ## Last 10 Changes
 
+- 2026-07-13 Reviewed MT-355 through MT-358 paper lifecycle chain - PASS WITH NOTES. Review: `/mnt/c/Users/Big A/custodian-shared/memecoin-trader/paper-lifecycle-reviews/paper_lifecycle_review.md`. The chain stayed paper-only: MT-355 used existing safe pricing audit, MT-356 stopped before persistence when immediate quote was unavailable, and MT-357/MT-358 correctly skipped mark/close after their preconditions failed. No live/wallet/key/config/risk-threshold/provider/schema scope expansion occurred. `data/trades.db` contains only the earlier MT-353 normal paper buy/position, documented as unpriced; no mark, close, PnL, or measurable complete lifecycle exists. Required follow-up is a bounded read-only quote-availability/stability diagnostic before any new priced entry attempt, not a risk or live-path change.
+
 - 2026-07-13 Executed MT-358 as skipped/no-op. MT-357 had no current mark because no priced position exists after MT-356, so MT-358's close-smoke precondition failed. Report: `/mnt/c/Users/Big A/custodian-shared/memecoin-trader/paper-trade-reports/paper_close_lifecycle_smoke.md`. No close, simulated sell, PnL calculation, DB write, config, live path, wallet action, or secret output occurred.
 
 - 2026-07-13 Executed MT-357 as skipped/no-op. MT-356's immediate quote failure meant no priced paper position existed, so MT-357's required precondition failed. Report: `/mnt/c/Users/Big A/custodian-shared/memecoin-trader/paper-trade-reports/paper_position_mark_snapshot.md`. No mark request, persistence, trade, DB write, config, live path, wallet action, or secret output occurred.
