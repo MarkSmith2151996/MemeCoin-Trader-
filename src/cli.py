@@ -8,6 +8,7 @@ import logging
 import math
 import sqlite3
 from collections import Counter
+from collections.abc import Awaitable, Callable, Iterable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -16,6 +17,7 @@ from typing import Any
 from uuid import uuid4
 
 import aiosqlite
+import httpx
 
 import typer
 from rich.console import Console
@@ -23,7 +25,7 @@ from rich.table import Table
 
 from src.core.config import Settings, load_settings
 from src.core.database import get_recent_paper_decisions, get_recent_soak_runs, init_db, record_paper_decision, record_soak_run, record_trade
-from src.core.models import CheckResult, PaperDecisionRecord, PaperFillQuality, Position, PositionStatus, RiskAssessment, SoakRunRecord
+from src.core.models import CheckResult, PaperDecisionRecord, PaperFillQuality, Position, PositionStatus, RiskAssessment, Signal, SoakRunRecord
 from src.execution.base import ExecutionAdapter
 from src.execution.live_buy import execute_guarded_live_buy
 from src.execution.live_circuit_breaker import LiveCircuitBreaker
@@ -44,11 +46,15 @@ from src.execution.price_provider import DexScreenerPriceProvider, PriceProvider
 from src.monitoring.dashboard import resolve_db_path
 from src.monitoring.health import check_health
 from src.risk.rugcheck import RugCheckClient
-from src.risk.scorer import DiscoveryRiskScorer
+from src.risk.funding_provider import HeliusFundingProvider
+from src.risk.liquidity import LiquidityProbe
+from src.risk.paper_minimum import PAPER_LAUNCH_RESEARCH_MODE, PaperMinimumEvidenceResult, evaluate_paper_minimum_evidence
+from src.risk.scorer import DiscoveryRiskScorer, ReadOnlyHolderLookup
 from src.signals.aggregator import SignalAggregator
 from src.signals.base import SignalSource
+from src.signals.modes import CandidateMode, classify_candidate_mode
 from src.signals.onchain import OnChainMonitor
-from src.signals.pump_fun import build_monitor_from_env
+from src.signals.pump_fun import PumpFunMonitor, build_monitor_from_env
 from src.signals.twitter import TwitterMonitor
 from src.signals.whale_tracker import WhaleWalletTracker
 from src.strategy.decision_engine import DecisionEngine, RejectionRecord
@@ -60,6 +66,10 @@ logger = logging.getLogger(__name__)
 SUPPORTED_RISK_PROFILES = {"strict", "discovery"}
 MT038_REPORT_PATH = Path(
     "/mnt/c/Users/Big A/custodian-shared/memecoin-trader/diagnostic-reports/mt038-per-token-rejection-diagnostics.txt"
+)
+PAPER_MINIMUM_PUMP_URLS = (
+    "https://frontend-api-v3.pump.fun/coins?offset=0&limit=10&includeNsfw=true",
+    "https://frontend-api-v3.pump.fun/coins/currently-live?offset=0&limit=10&includeNsfw=true",
 )
 
 
@@ -283,6 +293,146 @@ def build_signal_sources() -> list[SignalSource]:
         OnChainMonitor(),
         TwitterMonitor(),
     ]
+
+
+@dataclass(frozen=True, slots=True)
+class PaperMinimumDryRunSummary:
+    """Bounded no-persistence result for the paper-only evidence gate."""
+
+    signals_collected: int
+    unique_mints: int
+    strict_passes: int
+    paper_minimum_eligible: int
+    source_signal_counts: dict[str, int]
+    source_failures: dict[str, int]
+    blocked_labels: dict[str, int]
+    deferred_labels: dict[str, int]
+
+    def safe_lines(self) -> list[str]:
+        lines = [
+            "mode=paper_minimum_dry_run",
+            f"signals_collected={self.signals_collected}",
+            f"unique_mints={self.unique_mints}",
+            f"strict_passes={self.strict_passes}",
+            f"paper_minimum_eligible={self.paper_minimum_eligible}",
+        ]
+        for label, count in self.blocked_labels.items():
+            lines.append(f"blocked_{label}={count}")
+        for label, count in self.deferred_labels.items():
+            lines.append(f"deferred_{label}={count}")
+        return lines
+
+
+async def run_paper_minimum_dry_run(
+    max_candidates: int = 15,
+    *,
+    sources: Iterable[SignalSource] | None = None,
+    assessor: Callable[[Signal], Awaitable[RiskAssessment]] | None = None,
+) -> PaperMinimumDryRunSummary:
+    """Collect and evaluate launch candidates without trades, persistence, or execution."""
+
+    bounded_max = max(1, min(max_candidates, 25))
+    signal_sources = list(sources) if sources is not None else [
+        PumpFunMonitor(http_urls=PAPER_MINIMUM_PUMP_URLS, websocket_url="", http_timeout_s=5.0),
+        OnChainMonitor(timeout_s=5.0, profile_limit=min(bounded_max, 5)),
+    ]
+    if assessor is not None:
+        return await _run_paper_minimum_dry_run(signal_sources, bounded_max, assessor)
+
+    settings = load_settings()
+    async with httpx.AsyncClient(timeout=5.0) as liquidity_client:
+        scorer = DiscoveryRiskScorer(
+            settings.risk,
+            holder_lookup=ReadOnlyHolderLookup(timeout_s=5.0),
+            rugcheck_client=RugCheckClient(timeout_s=5.0),
+            funding_provider=HeliusFundingProvider(api_key=""),
+            liquidity_probe=LiquidityProbe(timeout_s=5.0, client=liquidity_client),
+            holder_policy_mode="strict",
+            enable_holder_lookup=True,
+            enable_funding_analysis=False,
+        )
+        return await _run_paper_minimum_dry_run(signal_sources, bounded_max, scorer.assess_signal)
+
+
+async def _run_paper_minimum_dry_run(
+    sources: list[SignalSource],
+    max_candidates: int,
+    assessor: Callable[[Signal], Awaitable[RiskAssessment]],
+) -> PaperMinimumDryRunSummary:
+    source_signal_counts: Counter[str] = Counter()
+    source_failures: Counter[str] = Counter()
+    collected: list[Signal] = []
+    for source in sources:
+        try:
+            await source.start()
+            batch = await source.poll()
+            source_signal_counts[source.name] += len(batch)
+            collected.extend(batch)
+        except Exception:
+            source_failures[source.name] += 1
+        finally:
+            await source.stop()
+
+    unique_signals: list[Signal] = []
+    seen_mints: set[str] = set()
+    for signal in collected:
+        mint_address = signal.mint_address.strip()
+        if not mint_address or mint_address in seen_mints or len(unique_signals) >= max_candidates:
+            continue
+        seen_mints.add(mint_address)
+        unique_signals.append(signal)
+
+    strict_passes = 0
+    eligible = 0
+    blocked_labels: Counter[str] = Counter()
+    deferred_labels: Counter[str] = Counter()
+    for signal in unique_signals:
+        try:
+            assessment = await assessor(signal)
+        except Exception:
+            blocked_labels["paper_minimum_blocked_assessment"] += 1
+            continue
+        strict_passes += int(assessment.all_checks_pass)
+        research_mode = PAPER_LAUNCH_RESEARCH_MODE if classify_candidate_mode(signal) == CandidateMode.LAUNCH else None
+        result = evaluate_paper_minimum_evidence(signal, assessment, research_mode=research_mode)
+        _record_paper_minimum_labels(result, blocked_labels, deferred_labels)
+        eligible += int(result.eligible)
+
+    return PaperMinimumDryRunSummary(
+        signals_collected=len(collected),
+        unique_mints=len(unique_signals),
+        strict_passes=strict_passes,
+        paper_minimum_eligible=eligible,
+        source_signal_counts=dict(source_signal_counts),
+        source_failures=dict(source_failures),
+        blocked_labels=dict(blocked_labels),
+        deferred_labels=dict(deferred_labels),
+    )
+
+
+def _record_paper_minimum_labels(
+    result: PaperMinimumEvidenceResult,
+    blocked_labels: Counter[str],
+    deferred_labels: Counter[str],
+) -> None:
+    for label in result.reason_labels:
+        if label.startswith("paper_minimum_blocked_"):
+            blocked_labels[label] += 1
+        elif label.startswith("paper_minimum_deferred_"):
+            deferred_labels[label] += 1
+
+
+def write_paper_minimum_dry_run_report(summary: PaperMinimumDryRunSummary, path: Path) -> None:
+    """Write a sanitized dry-run report to an explicit caller-supplied path."""
+
+    lines = [
+        "# Paper-Minimum CLI Dry Run",
+        "",
+        *[f"- {line}" for line in summary.safe_lines()],
+        "",
+        "This report is read-only: no paper trade, simulated trade, database write, or execution path ran.",
+    ]
+    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 
 def build_signal_aggregator(sources: list[SignalSource], db_path: Path) -> SignalAggregator:
@@ -2457,6 +2607,20 @@ def paper_cycle(
     if not MT038_REPORT_PATH.parent.is_dir():
         raise RuntimeError(f"Shared diagnostic directory missing: {MT038_REPORT_PATH.parent}")
     write_rejection_diagnostic_report(summary, MT038_REPORT_PATH)
+    for line in summary.safe_lines():
+        console.print(line)
+
+
+@app.command("paper-minimum-dry-run")
+def paper_minimum_dry_run(
+    max_candidates: int = typer.Option(15, min=1, max=25, help="Maximum unique launch mints to assess."),
+    report_path: str | None = typer.Option(None, help="Optional explicit markdown report path."),
+) -> None:
+    """Run the paper-only evidence gate without trades or persistence."""
+
+    summary = asyncio.run(run_paper_minimum_dry_run(max_candidates=max_candidates))
+    if report_path:
+        write_paper_minimum_dry_run_report(summary, Path(report_path))
     for line in summary.safe_lines():
         console.print(line)
 
