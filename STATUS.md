@@ -115,6 +115,8 @@ Default execution mode: paper trading
 
 ## Last 10 Changes
 
+- 2026-07-13 Executed MT-369 as skipped/no-op. MT-368 created no non-null quoted paper position, so no qualifying priced paper position existed to mark. Report: `/mnt/c/Users/Big A/custodian-shared/memecoin-trader/paper-trade-reports/priced_paper_mark_snapshot.md`. No mark request, persistence, paper trade, PnL, live path, real swap, wallet/key action, config/risk/provider change, or secret/raw payload output occurred.
+
 - 2026-07-13 Executed MT-365 live scan observation wiring. `paper-minimum-dry-run` keeps zero-write default behavior and now supports explicit `--record-observations` plus optional `--db-path`; opt-in runs persist sanitized candidate evidence only and report observation/new/repeat counts with a short mint label per candidate. Added focused default/opt-in/repeat/sanitization tests. Report: `/mnt/c/Users/Big A/custodian-shared/memecoin-trader/dataset-table-reports/live_scan_observation_wiring_report.md`. Validation: 11 focused tests and `python3 -m compileall` passed; Ruff unavailable. No trade/live/provider/config/risk/wallet/raw-payload/secret change occurred.
 
 - 2026-07-13 Executed MT-368 quote-gated paper entry v2 as skipped. A bounded current scan found 5/11 paper-minimum eligible candidates, but the selected redacted candidate's immediate requested-mint/wSOL DexScreener quote was unavailable (`no_pairs`), so no paper trade, priced position, fill, or DB write occurred. Report: `/mnt/c/Users/Big A/custodian-shared/memecoin-trader/paper-trade-reports/quote_gated_paper_entry.md`. MT-369 and MT-370 are ineligible; proceed directly to MT-371. No live path, real swap, key/wallet action, config/risk/provider change, raw payload, PnL, or performance claim occurred.
