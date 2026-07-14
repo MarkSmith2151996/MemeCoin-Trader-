@@ -148,6 +148,24 @@ SCHEMA = (
     CREATE UNIQUE INDEX IF NOT EXISTS uq_live_candidate_observations_trade
     ON live_candidate_observations (trade_id) WHERE trade_id IS NOT NULL
     """,
+    """
+    CREATE TABLE IF NOT EXISTS price_snapshots (
+      id TEXT PRIMARY KEY,
+      mint_address TEXT NOT NULL,
+      price_sol REAL,
+      price_usd REAL,
+      volume_h24 REAL,
+      liquidity_usd REAL,
+      fdv_usd REAL,
+      pair_address TEXT,
+      dex_id TEXT,
+      observed_at TEXT NOT NULL
+    )
+    """,
+    """
+    CREATE INDEX IF NOT EXISTS idx_price_snapshots_mint_observed
+    ON price_snapshots (mint_address, observed_at)
+    """,
 )
 
 
@@ -544,3 +562,60 @@ async def get_recent_soak_runs(path: str | Path, limit: int = 5) -> list[SoakRun
         row_dict["health_ok"] = bool(row_dict["health_ok"])
         results.append(SoakRunRecord(**row_dict))
     return results
+
+
+async def record_price_snapshot(
+    path: str | Path,
+    *,
+    mint_address: str,
+    price_sol: float | None,
+    price_usd: float | None,
+    volume_h24: float | None,
+    liquidity_usd: float | None,
+    fdv_usd: float | None,
+    pair_address: str | None,
+    dex_id: str | None,
+) -> None:
+    from uuid import uuid4
+
+    async with aiosqlite.connect(path) as db:
+        await db.execute(
+            """
+            INSERT INTO price_snapshots (id, mint_address, price_sol, price_usd,
+                                         volume_h24, liquidity_usd, fdv_usd,
+                                         pair_address, dex_id, observed_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                str(uuid4()),
+                mint_address,
+                price_sol,
+                price_usd,
+                volume_h24,
+                liquidity_usd,
+                fdv_usd,
+                pair_address,
+                dex_id,
+                datetime.now(UTC).isoformat(),
+            ),
+        )
+        await db.commit()
+
+
+async def get_distinct_mints(path: str | Path) -> list[str]:
+    async with aiosqlite.connect(path) as db:
+        cursor = await db.execute(
+            """
+            SELECT DISTINCT mint_address FROM (
+                SELECT mint_address FROM trades
+                UNION
+                SELECT mint_address FROM positions
+                UNION
+                SELECT mint_address FROM paper_decisions
+                UNION
+                SELECT mint_address FROM live_candidate_observations
+            ) ORDER BY mint_address
+            """
+        )
+        rows = await cursor.fetchall()
+    return [row[0] for row in rows]
