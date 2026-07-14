@@ -27,9 +27,9 @@ from src.strategy.position_manager import PositionManager
 
 
 CAPTURE_PATH = Path("/mnt/c/Users/Big A/custodian-shared/memecoin-trader/paper-trade-reports/mt436_new_pairs_ui_capture.json")
-REPORT_PATH = Path("/mnt/c/Users/Big A/custodian-shared/memecoin-trader/paper-trade-reports/momentum_gate_lifecycle_batch.md")
-CSV_PATH = Path("/mnt/c/Users/Big A/custodian-shared/memecoin-trader/paper-trade-reports/momentum_gate_trade_log.csv")
-HOLD_SECONDS = 30 * 60
+REPORT_PATH = Path("/mnt/c/Users/Big A/custodian-shared/memecoin-trader/paper-trade-reports/momentum_tuned_v2_batch.md")
+CSV_PATH = Path("/mnt/c/Users/Big A/custodian-shared/memecoin-trader/paper-trade-reports/momentum_tuned_v2_trade_log.csv")
+HOLD_SECONDS = 10 * 60
 MARK_INTERVAL_SECONDS = 60
 AMOUNT_SOL = 0.01
 MAX_ENTRIES = 3
@@ -156,12 +156,14 @@ def _write_outputs(rows, signals, repeats, fallback_count, passes, quotes, block
     wins = sum(1 for record in closed if (record.get("pnl") or 0.0) > 0)
     losses = sum(1 for record in closed if (record.get("pnl") or 0.0) < 0)
     lines = [
-        "# Momentum Trailing-Exit Paper Batch",
+        "# Momentum Tuned V2 Paper Batch",
         "",
         f"- Run timestamp: {datetime.now(UTC).isoformat()}",
         f"- Source: `{DEXSCREENER_NEW_PAIRS_UI_URL}`",
         "- Filter state: Solana, Last hour, Newest/pair-age ascending, age <=60m, liquidity >$1K, market cap $5K-$100K, no 1H/24H volume minimum.",
         f"- Candidates rendered/resolved/novel/repeated: {len(rows)}/{len(signals)}/{len(signals) - repeats}/{repeats}",
+        f"- Tuned exit parameters: hard stop -25%; activation +10%; standard trail 10%; tightened trail +50%/7%; max hold 10m.",
+        "- MT-438 replay: the hard-stop loss and trailing-stop exit occur at the same observed marks; the max-hold winner was already flat at its 10-minute mark, so the exact recorded replay is unchanged.",
         f"- UI-age fallbacks/gate passes/quotes/entries: {fallback_count}/{passes}/{quotes}/{len(records)}",
         f"- Blockers: {blocked}",
         "",
