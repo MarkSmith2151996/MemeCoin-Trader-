@@ -1,0 +1,16 @@
+{
+  "task": "MT-440",
+  "timestamp": "2026-07-14T05:17:54.718109+00:00",
+  "api_key_prefix": "fX0fLd",
+  "queries_tested": 3,
+  "queries_succeeded": 0,
+  "results": [],
+  "verdict": "NOT FEASIBLE",
+  "recommendation": "Dune did not return trading-useful data on the queries tested. Free-tier constraints (rate limits, deprecated queries) severely limit what's accessible. Consider: (a) upgrading to a paid Dune plan for query execution + custom queries, (b) using Helius webhooks for real-time data, or (c) Jupiter/DexScreener API feeds.",
+  "constraints": [
+    "Free plan rate-limited to ~1 request/minute for query execution",
+    "Many public Solana DEX queries use deprecated engine (400 error)",
+    "Some queries reference tables that no longer exist in public schema",
+    "Only cached results are freely accessible; execution costs credits"
+  ]
+}
