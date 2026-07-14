@@ -57,11 +57,20 @@ from src.risk.rugcheck import RugCheckClient
 from src.risk.funding_provider import HeliusFundingProvider
 from src.risk.liquidity import LiquidityProbe
 from src.risk.paper_minimum import PAPER_LAUNCH_RESEARCH_MODE, PaperMinimumEvidenceResult, evaluate_paper_minimum_evidence
+from src.risk.paper_momentum import (
+    PAPER_NEW_PAIRS_MOMENTUM_MAX_TOP10_HOLDER_PCT,
+    evaluate_paper_new_pairs_momentum_evidence,
+)
 from src.risk.scorer import DiscoveryRiskScorer, ReadOnlyHolderLookup
 from src.signals.aggregator import SignalAggregator
 from src.signals.base import SignalSource
 from src.signals.modes import CandidateMode, classify_candidate_mode
 from src.signals.onchain import OnChainMonitor
+from src.signals.dexscreener_new_pairs import (
+    DEXSCREENER_NEW_PAIRS_UI_URL,
+    load_new_pairs_ui_rows,
+    resolve_new_pairs_ui_rows,
+)
 from src.signals.pump_fun import PumpFunMonitor, build_monitor_from_env
 from src.signals.twitter import TwitterMonitor
 from src.signals.whale_tracker import WhaleWalletTracker
@@ -376,6 +385,56 @@ class MigrationPaperLifecycleSummary:
             lines.append(f"realized_pnl_sol={self.realized_pnl_sol:.9f}")
         if self.reason:
             lines.append(f"reason={self.reason}")
+        return lines
+
+
+@dataclass(frozen=True, slots=True)
+class NewPairsMomentumTradeResult:
+    mint_address: str
+    pair_address: str | None
+    entry_price_sol: float
+    close_price_sol: float
+    realized_pnl_sol: float | None
+    result: str
+
+
+@dataclass(frozen=True, slots=True)
+class NewPairsMomentumLifecycleSummary:
+    """Bounded paper-only New Pairs lifecycle using the isolated momentum gate."""
+
+    ui_rows: int
+    resolved_candidates: int
+    repeat_exclusions: int
+    novel_candidates: int
+    ui_age_fallbacks: int
+    momentum_passes: int
+    quote_available: int
+    entries: int
+    closes: int
+    blocked_labels: dict[str, int]
+    trades: tuple[NewPairsMomentumTradeResult, ...]
+    outcome: str
+
+    @property
+    def net_realized_pnl_sol(self) -> float:
+        return sum(result.realized_pnl_sol or 0.0 for result in self.trades)
+
+    def safe_lines(self) -> list[str]:
+        lines = [
+            "mode=paper_new_pairs_momentum",
+            f"ui_rows={self.ui_rows}",
+            f"resolved_candidates={self.resolved_candidates}",
+            f"repeat_exclusions={self.repeat_exclusions}",
+            f"novel_candidates={self.novel_candidates}",
+            f"ui_age_fallbacks={self.ui_age_fallbacks}",
+            f"momentum_passes={self.momentum_passes}",
+            f"quote_available={self.quote_available}",
+            f"entries={self.entries}",
+            f"closes={self.closes}",
+            f"outcome={self.outcome}",
+            f"net_realized_pnl_sol={self.net_realized_pnl_sol:.9f}",
+        ]
+        lines.extend(f"blocked_{label}={count}" for label, count in sorted(self.blocked_labels.items()))
         return lines
 
 
@@ -783,6 +842,269 @@ async def _run_migration_paper_lifecycle(
         outcome="no_entry",
         reason=last_reason,
     )
+
+
+async def run_new_pairs_momentum_lifecycle(
+    signals: Iterable[Signal],
+    *,
+    ui_rows: int,
+    amount_sol: float = 0.01,
+    max_entries: int = 3,
+    confirm: bool = False,
+    db_path: str | Path | None = None,
+    assessor: Callable[[Signal], Awaitable[RiskAssessment]] | None = None,
+    price_provider: PriceProvider | None = None,
+    settings: Settings | None = None,
+) -> NewPairsMomentumLifecycleSummary:
+    """Run explicit UI-captured New Pairs rows through the 90% paper-only lane."""
+
+    bounded_entries = max(1, min(max_entries, 3))
+    runtime_settings = force_paper_settings(settings or load_settings())
+    runtime_db_path = resolve_db_path(db_path)
+    provider = price_provider or DexScreenerPriceProvider()
+    if assessor is not None:
+        return await _run_new_pairs_momentum_lifecycle(
+            list(signals),
+            ui_rows=ui_rows,
+            amount_sol=amount_sol,
+            max_entries=bounded_entries,
+            confirm=confirm,
+            db_path=runtime_db_path,
+            assessor=assessor,
+            price_provider=provider,
+            settings=runtime_settings,
+        )
+
+    async with httpx.AsyncClient(timeout=5.0) as liquidity_client:
+        scorer = DiscoveryRiskScorer(
+            runtime_settings.risk,
+            holder_lookup=ReadOnlyHolderLookup(timeout_s=5.0),
+            rugcheck_client=RugCheckClient(timeout_s=5.0),
+            funding_provider=HeliusFundingProvider(api_key=""),
+            liquidity_probe=LiquidityProbe(timeout_s=5.0, client=liquidity_client),
+            holder_policy_mode="strict",
+            enable_holder_lookup=True,
+            enable_funding_analysis=False,
+        )
+        return await _run_new_pairs_momentum_lifecycle(
+            list(signals),
+            ui_rows=ui_rows,
+            amount_sol=amount_sol,
+            max_entries=bounded_entries,
+            confirm=confirm,
+            db_path=runtime_db_path,
+            assessor=scorer.assess_signal,
+            price_provider=provider,
+            settings=runtime_settings,
+        )
+
+
+async def _run_new_pairs_momentum_lifecycle(
+    signals: list[Signal],
+    *,
+    ui_rows: int,
+    amount_sol: float,
+    max_entries: int,
+    confirm: bool,
+    db_path: Path,
+    assessor: Callable[[Signal], Awaitable[RiskAssessment]],
+    price_provider: PriceProvider,
+    settings: Settings,
+) -> NewPairsMomentumLifecycleSummary:
+    """Evaluate resolved UI rows, quote only eligible rows, and close confirmed paper entries."""
+
+    if not _is_valid_price(amount_sol) or amount_sol > settings.position.max_single_position_sol:
+        return NewPairsMomentumLifecycleSummary(
+            ui_rows=ui_rows,
+            resolved_candidates=len(signals),
+            repeat_exclusions=0,
+            novel_candidates=0,
+            ui_age_fallbacks=0,
+            momentum_passes=0,
+            quote_available=0,
+            entries=0,
+            closes=0,
+            blocked_labels={},
+            trades=(),
+            outcome="invalid_amount",
+        )
+
+    await init_db(db_path)
+    manager = PositionManager(db_path, settings)
+    seen_mints: set[str] = set()
+    repeat_exclusions = 0
+    novel_candidates = 0
+    ui_age_fallbacks = 0
+    momentum_passes = 0
+    quote_available = 0
+    entries = 0
+    closes = 0
+    blocked_labels: Counter[str] = Counter()
+    trades: list[NewPairsMomentumTradeResult] = []
+
+    for signal in signals:
+        mint_address = signal.mint_address.strip()
+        if not mint_address:
+            continue
+        if mint_address in seen_mints:
+            repeat_exclusions += 1
+            continue
+        seen_mints.add(mint_address)
+        novel_candidates += 1
+        try:
+            assessment = await assessor(signal)
+        except Exception:
+            blocked_labels["paper_momentum_blocked_assessment"] += 1
+            continue
+
+        evidence = evaluate_paper_new_pairs_momentum_evidence(
+            signal,
+            assessment,
+            top10_holder_pct=assessment.token.top10_holder_pct if assessment.token is not None else None,
+            ui_age_minutes=_payload_float(signal.payload, "ui_age_minutes"),
+            ui_max_age_minutes=_payload_float(signal.payload, "ui_max_age_minutes"),
+        )
+        for label in evidence.reason_labels:
+            if label.startswith("paper_momentum_blocked_"):
+                blocked_labels[label] += 1
+        if "paper_momentum_age_ui_observed_fresh" in evidence.reason_labels:
+            ui_age_fallbacks += 1
+        if not evidence.eligible:
+            continue
+        momentum_passes += 1
+
+        quote = await price_provider.get_price_with_diagnostic(mint_address)
+        if not _is_valid_price(quote.price_sol):
+            blocked_labels[f"paper_momentum_quote_{quote.reason}"] += 1
+            continue
+        quote_available += 1
+        if not confirm:
+            continue
+        if entries >= max_entries:
+            break
+
+        existing = await manager.get_position(mint_address, mode="paper")
+        if existing is not None:
+            blocked_labels["paper_momentum_open_position_exists"] += 1
+            continue
+        if await manager.total_exposure_sol(mode="paper") + amount_sol > settings.position.max_portfolio_sol:
+            blocked_labels["paper_momentum_max_portfolio_exposure_reached"] += 1
+            continue
+
+        execution = PaperExecutionAdapter(price_lookup={mint_address: quote.price_sol})
+        try:
+            trade = await execution.execute_swap(
+                mint_address,
+                Side.BUY,
+                amount_sol,
+                slippage_bps=settings.position.default_slippage_bps,
+            )
+        finally:
+            await execution.close()
+        trade = trade.model_copy(
+            update={
+                "metadata": {
+                    **trade.metadata,
+                    "lifecycle": "new_pairs_momentum_dexscreener_quote",
+                    "candidate_mode": CandidateMode.LAUNCH.value,
+                    "momentum_profile": "paper_new_pairs_momentum",
+                    "momentum_top10_holder_threshold_pct": PAPER_NEW_PAIRS_MOMENTUM_MAX_TOP10_HOLDER_PCT,
+                    "ui_age": signal.payload.get("ui_age"),
+                    "ui_age_source": signal.payload.get("ui_age_source"),
+                    "entry_quote_provider": quote.reason,
+                    "entry_quote_liquidity_usd": quote.liquidity_usd,
+                }
+            }
+        )
+        await record_trade(db_path, trade)
+        await manager.open_position(trade, signal)
+        entries += 1
+
+        mark = await price_provider.get_price_with_diagnostic(mint_address)
+        if not _is_valid_price(mark.price_sol):
+            blocked_labels[f"paper_momentum_mark_{mark.reason}"] += 1
+            continue
+        closed = await manager.close_position(mint_address, exit_price_sol=mark.price_sol, mode="paper")
+        closes += 1
+        pair_address = signal.payload.get("pair_address")
+        trades.append(
+            NewPairsMomentumTradeResult(
+                mint_address=mint_address,
+                pair_address=pair_address if isinstance(pair_address, str) else None,
+                entry_price_sol=quote.price_sol,
+                close_price_sol=mark.price_sol,
+                realized_pnl_sol=closed.realized_pnl_sol if closed is not None else None,
+                result="closed",
+            )
+        )
+
+    outcome = "closed" if closes else "no_entry"
+    if entries and closes != entries:
+        outcome = "mark_unavailable_position_open"
+    if quote_available and not confirm:
+        outcome = "quote_ready_confirmation_required"
+    return NewPairsMomentumLifecycleSummary(
+        ui_rows=ui_rows,
+        resolved_candidates=len(signals),
+        repeat_exclusions=repeat_exclusions,
+        novel_candidates=novel_candidates,
+        ui_age_fallbacks=ui_age_fallbacks,
+        momentum_passes=momentum_passes,
+        quote_available=quote_available,
+        entries=entries,
+        closes=closes,
+        blocked_labels=dict(blocked_labels),
+        trades=tuple(trades),
+        outcome=outcome,
+    )
+
+
+def write_new_pairs_momentum_lifecycle_report(summary: NewPairsMomentumLifecycleSummary, path: Path) -> None:
+    """Write the bounded momentum lifecycle report without raw provider payloads."""
+
+    lines = [
+        "# New Pairs Momentum Gate Lifecycle Batch",
+        "",
+        f"- Source: DexScreener New Pairs UI `{DEXSCREENER_NEW_PAIRS_UI_URL}`.",
+        "- Filter state: Solana, Last hour, Newest/pair-age ascending, age <=60m, liquidity >$1K, market cap $5K-$100K, no 1H or 24H volume minimum.",
+        "- Gate: `paper_new_pairs_momentum`; holder concentration <=90%; strict/default/live/paper-minimum remain unchanged.",
+        "- Safety: paper-only; no wallet, key, live swap, or real transaction was used.",
+        "",
+        "## Summary",
+        "",
+        *[f"- {line}" for line in summary.safe_lines()],
+        "",
+        "## Trades",
+        "",
+    ]
+    if summary.trades:
+        lines.extend(
+            f"- mint `{trade.mint_address}`; pair `{trade.pair_address or 'not recorded'}`; entry {trade.entry_price_sol:.12f} SOL; close {trade.close_price_sol:.12f} SOL; PnL {(trade.realized_pnl_sol or 0.0):+.9f} SOL; result {trade.result}."
+            for trade in summary.trades
+        )
+    else:
+        lines.append("No confirmed quoted paper entry was created.")
+    lines.extend(
+        [
+            "",
+            "## Before/After Age Blockers",
+            "",
+            "- Before MT-435: MT-434 reported 9 direct `paper_momentum_blocked_age_unknown` near-misses among 16 novel rows.",
+            f"- After: this run used the UI-age fallback for {summary.ui_age_fallbacks} candidate(s) and recorded {summary.blocked_labels.get('paper_momentum_blocked_age_unknown', 0)} direct age-unknown blocker(s).",
+        ]
+    )
+    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+
+def _payload_float(payload: dict[str, object], key: str) -> float | None:
+    value = payload.get(key)
+    if isinstance(value, bool):
+        return None
+    try:
+        parsed = float(value) if value is not None else None
+    except (TypeError, ValueError):
+        return None
+    return parsed if parsed is not None and math.isfinite(parsed) else None
 
 
 def write_migration_paper_lifecycle_report(summary: MigrationPaperLifecycleSummary, path: Path) -> None:
@@ -3071,6 +3393,43 @@ def paper_migration_lifecycle(
     )
     if report_path:
         write_migration_paper_lifecycle_report(summary, Path(report_path))
+    for line in summary.safe_lines():
+        console.print(line)
+
+
+@app.command("paper-new-pairs-momentum")
+def paper_new_pairs_momentum(
+    ui_capture_path: str = typer.Option(..., help="JSON array of explicitly captured DexScreener New Pairs UI rows."),
+    amount_sol: float = typer.Option(0.01, min=0.000001, help="Single simulated paper entry size in SOL."),
+    max_entries: int = typer.Option(3, min=1, max=3, help="Maximum quoted paper entries to create and close."),
+    confirm: bool = typer.Option(False, "--confirm", help="Required to create and immediately close paper entries."),
+    report_path: str = typer.Option(
+        "/mnt/c/Users/Big A/custodian-shared/memecoin-trader/paper-trade-reports/momentum_gate_lifecycle_batch.md",
+        help="Explicit markdown lifecycle report path.",
+    ),
+    db_path: str | None = typer.Option(None, help="Optional SQLite path override."),
+) -> None:
+    """Resolve a captured New Pairs board into the isolated 90% paper-only momentum lane."""
+
+    try:
+        rows = load_new_pairs_ui_rows(ui_capture_path)
+    except (OSError, ValueError, json.JSONDecodeError) as exc:
+        raise typer.BadParameter(str(exc), param_hint="--ui-capture-path") from exc
+    signals = asyncio.run(resolve_new_pairs_ui_rows(rows, max_age_minutes=60.0))
+    summary = asyncio.run(
+        run_new_pairs_momentum_lifecycle(
+            signals,
+            ui_rows=len(rows),
+            amount_sol=amount_sol,
+            max_entries=max_entries,
+            confirm=confirm,
+            db_path=db_path,
+        )
+    )
+    output_path = Path(report_path)
+    if not output_path.parent.is_dir():
+        raise RuntimeError(f"Report directory missing: {output_path.parent}")
+    write_new_pairs_momentum_lifecycle_report(summary, output_path)
     for line in summary.safe_lines():
         console.print(line)
 

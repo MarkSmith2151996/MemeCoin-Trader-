@@ -19,6 +19,8 @@ def evaluate_paper_new_pairs_momentum_evidence(
     *,
     top10_holder_pct: float | None,
     research_mode: str | None = PAPER_LAUNCH_RESEARCH_MODE,
+    ui_age_minutes: float | None = None,
+    ui_max_age_minutes: float | None = None,
 ) -> PaperMinimumEvidenceResult:
     """Evaluate the explicit 90% paper-only lane without altering strict evidence."""
 
@@ -42,7 +44,9 @@ def evaluate_paper_new_pairs_momentum_evidence(
             return PaperMinimumEvidenceResult(False, ("paper_momentum_blocked_age",))
         deferred.append("paper_momentum_deferred_age_launch_research")
     elif assessment.age_check == CheckResult.UNKNOWN:
-        return PaperMinimumEvidenceResult(False, ("paper_momentum_blocked_age_unknown",))
+        if not _is_ui_age_observed_fresh(ui_age_minutes, ui_max_age_minutes):
+            return PaperMinimumEvidenceResult(False, ("paper_momentum_blocked_age_unknown",))
+        deferred.append("paper_momentum_age_ui_observed_fresh")
 
     return PaperMinimumEvidenceResult(True, ("paper_momentum_pass", *deferred))
 
@@ -52,6 +56,17 @@ def _is_accepted_holder_concentration(value: float | None) -> bool:
         value is not None
         and math.isfinite(value)
         and 0.0 <= value <= PAPER_NEW_PAIRS_MOMENTUM_MAX_TOP10_HOLDER_PCT
+    )
+
+
+def _is_ui_age_observed_fresh(value: float | None, maximum: float | None) -> bool:
+    return (
+        value is not None
+        and maximum is not None
+        and math.isfinite(value)
+        and math.isfinite(maximum)
+        and 0.0 <= value <= maximum
+        and maximum > 0.0
     )
 
 
