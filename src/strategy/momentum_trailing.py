@@ -5,11 +5,11 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 
-HARD_STOP_PCT = -0.25
+HARD_STOP_PCT = -0.20
 TRAIL_ACTIVATION_PCT = 0.10
-TIGHTENED_TRAIL_ACTIVATION_PCT = 0.50
-STANDARD_TRAIL_PCT = 0.10
-TIGHTENED_TRAIL_PCT = 0.07
+TIGHTENED_TRAIL_ACTIVATION_PCT = 0.25
+STANDARD_TRAIL_PCT = 0.08
+TIGHTENED_TRAIL_PCT = 0.05
 
 
 @dataclass(frozen=True, slots=True)

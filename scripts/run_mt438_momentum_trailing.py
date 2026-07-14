@@ -26,10 +26,10 @@ from src.strategy.momentum_trailing import MomentumTrailState, evaluate_momentum
 from src.strategy.position_manager import PositionManager
 
 
-CAPTURE_PATH = Path("/mnt/c/Users/Big A/custodian-shared/memecoin-trader/paper-trade-reports/mt436_new_pairs_ui_capture.json")
+CAPTURE_PATH = Path("/mnt/c/Users/Big A/custodian-shared/memecoin-trader/paper-trade-reports/mt439_new_pairs_ui_capture.json")
 REPORT_PATH = Path("/mnt/c/Users/Big A/custodian-shared/memecoin-trader/paper-trade-reports/momentum_tuned_v2_batch.md")
 CSV_PATH = Path("/mnt/c/Users/Big A/custodian-shared/memecoin-trader/paper-trade-reports/momentum_tuned_v2_trade_log.csv")
-HOLD_SECONDS = 10 * 60
+HOLD_SECONDS = 30 * 60
 MARK_INTERVAL_SECONDS = 60
 AMOUNT_SOL = 0.01
 MAX_ENTRIES = 3
@@ -104,24 +104,28 @@ async def main() -> None:
             records.append(record)
 
     started = datetime.now(UTC)
-    while active and (datetime.now(UTC) - started).total_seconds() < HOLD_SECONDS:
-        await asyncio.sleep(MARK_INTERVAL_SECONDS)
-        for record in list(active):
-            now = datetime.now(UTC)
-            result = await provider.get_price_with_diagnostic(str(record["mint"]))
-            if not _is_valid_price(result.price_sol):
-                record["marks"].append((now, None, result.reason))
-                continue
-            price = float(result.price_sol)
-            decision = evaluate_momentum_trail(record["state"], price)
-            record["state"] = decision.state
-            record["marks"].append((now, price, decision.exit_reason or "mark"))
-            if decision.exit_reason:
-                closed = await manager.close_position(str(record["mint"]), exit_price_sol=price, mode="paper")
-                record["exit_reason"] = decision.exit_reason
-                record["close"] = price
-                record["pnl"] = closed.realized_pnl_sol if closed else None
-                active.remove(record)
+    try:
+        while active and (datetime.now(UTC) - started).total_seconds() < HOLD_SECONDS:
+            await asyncio.sleep(MARK_INTERVAL_SECONDS)
+            for record in list(active):
+                now = datetime.now(UTC)
+                result = await provider.get_price_with_diagnostic(str(record["mint"]))
+                if not _is_valid_price(result.price_sol):
+                    record["marks"].append((now, None, result.reason))
+                    continue
+                price = float(result.price_sol)
+                decision = evaluate_momentum_trail(record["state"], price)
+                record["state"] = decision.state
+                record["marks"].append((now, price, decision.exit_reason or "mark"))
+                if decision.exit_reason:
+                    closed = await manager.close_position(str(record["mint"]), exit_price_sol=price, mode="paper")
+                    record["exit_reason"] = decision.exit_reason
+                    record["close"] = price
+                    record["pnl"] = closed.realized_pnl_sol if closed else None
+                    active.remove(record)
+    except Exception:
+        import traceback
+        traceback.print_exc()
 
     for record in list(active):
         now = datetime.now(UTC)
@@ -162,8 +166,7 @@ def _write_outputs(rows, signals, repeats, fallback_count, passes, quotes, block
         f"- Source: `{DEXSCREENER_NEW_PAIRS_UI_URL}`",
         "- Filter state: Solana, Last hour, Newest/pair-age ascending, age <=60m, liquidity >$1K, market cap $5K-$100K, no 1H/24H volume minimum.",
         f"- Candidates rendered/resolved/novel/repeated: {len(rows)}/{len(signals)}/{len(signals) - repeats}/{repeats}",
-        f"- Tuned exit parameters: hard stop -25%; activation +10%; standard trail 10%; tightened trail +50%/7%; max hold 10m.",
-        "- MT-438 replay: the hard-stop loss and trailing-stop exit occur at the same observed marks; the max-hold winner was already flat at its 10-minute mark, so the exact recorded replay is unchanged.",
+        f"- Tuned exit parameters: hard stop -20%; activation +10%; standard trail 8%; tightened trail +25%/5%; max hold 30m.",
         f"- UI-age fallbacks/gate passes/quotes/entries: {fallback_count}/{passes}/{quotes}/{len(records)}",
         f"- Blockers: {blocked}",
         "",
