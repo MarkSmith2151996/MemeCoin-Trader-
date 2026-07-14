@@ -43,6 +43,7 @@ Default execution mode: paper trading
 - `scripts/run_mt438_momentum_trailing.py`: detached paper-only momentum collector that resolves an explicit New Pairs UI capture, creates up to three momentum-lane paper entries, records 60-second marks, and closes by hard stop, activated trailing stop, or 30-minute max hold before writing the lifecycle markdown and CSV log. Holds tuned exit parameters from MT-439: hard stop -20%; standard trail 8%; tightened trail +25%/5%.
 - `scripts/run_mt444_momentum_trailing.py`: MT-444 variant with 15s marks (vs 60s) for faster-cadence comparison — same capture, exits, and sizing.
 - `research/mt444_output/RESULTS.md`: MT-444 results summary comparing 15s vs 60s mark intervals.
+- `research/mt449_output/RESULTS.md`: MT-449 high-liquidity 5s comparison report — zero candidates qualified from 44 checked.
 - `scripts/backfill_price_snapshots.py`: detached script that queries all distinct mints from trades/positions/paper_decisions/live_candidate_observations, fetches DexScreener `/latest/dex/tokens/{mint}` for each in concurrent batches, and persists current price/volume/liquidity/FDV snapshots to the `price_snapshots` table.
 - `src/chain/jito.py`: pre-live Jito block-engine scaffold that normalizes serialized transactions into bundle payloads and carries optional tip metadata. Its public `submit_bundle()` path now fails closed; only the guarded Jupiter live adapter calls the private injectable HTTP transport path after safety checks.
 - `src/core/config.py`: YAML settings loader and Pydantic config models for risk, position, exit, execution, monitoring, and conservative live-guardrail defaults plus env overrides for tiny live caps.
@@ -123,6 +124,8 @@ Default execution mode: paper trading
 - `tests/test_monitoring.py`: focused coverage for dashboard DB-path resolution, health compatibility, and one-shot dashboard rendering.
 
 ## Last 10 Changes
+
+- 2026-07-14 Executed MT-449 high-liquidity 5s paper comparison — CANCELLED (empty candidate pool). Searched 44 valid SOL/wSOL pairs from 3 DexScreener API sources (token-profiles, token-boosts top, token-boosts latest). Zero candidates met the combined board filter (age <=1h, liq >$50K, vol >$1K, cap >$7K). Nearest miss: CAT at 556s old, $20K liquidity ($30K below threshold). Per task boundary: stopped without reusing stale candidates. Report: `research/mt449_output/RESULTS.md`. No trades, marks, PnL, or code/config change occurred.
 
 - 2026-07-14 Executed MT-444 momentum tuned v3 paper batch with 15s marks. Created `scripts/run_mt444_momentum_trailing.py` (copied from MT-438 runner, changed MARK_INTERVAL_SECONDS 60→15, updated paths). Ran 30-min paper session with same 12 candidates as MT-439 using tuned exits. 3 entries, 1 win (trailing_stop_tight +37.44%), 2 losses (hard_stop_loss -22.84%, -25.07%), net -0.001048 SOL. 15s marks provided better peak-capture and stop-fill precision vs 60s but did not materially change outcome. Reports: `momentum_tuned_v3_batch.md`, `momentum_tuned_v3_trade_log.csv`. No live path, wallet/key action, real swap, filter/gate/schema change occurred.
 
