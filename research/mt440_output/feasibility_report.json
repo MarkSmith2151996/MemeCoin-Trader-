@@ -1,0 +1,42 @@
+{
+  "task": "MT-440",
+  "timestamp": "2026-07-14T05:16:44.408392+00:00",
+  "api_key_valid": true,
+  "api_key_prefix": "fX0fLd...",
+  "queries_tried": 7,
+  "queries_succeeded": 1,
+  "assessments": [
+    {
+      "query_label": "Solana Token Creation & Trading",
+      "total_rows": 104,
+      "columns": [
+        "address",
+        "name"
+      ],
+      "has_mint_address": false,
+      "has_price": false,
+      "has_volume": false,
+      "has_timestamp": false,
+      "has_dex_info": false,
+      "has_trader_info": false,
+      "sample_rows": [
+        {
+          "address": "0xc47ec74a753acb09e4679979afc428cde0209639",
+          "name": "Safe_test: Safe_v1_3_0"
+        },
+        {
+          "address": "0xb812d0944f8f581dfaa3a93dda0d22ecef51a9cf",
+          "name": "Gnosis_safe: GnosisSafev1.3.0"
+        },
+        {
+          "address": "0x635ef0056a597d13863b73825cca297236578595",
+          "name": "Curve: CurveStableSwapNG"
+        }
+      ],
+      "useful_for_memecoin": false,
+      "usefulness_score": 1
+    }
+  ],
+  "verdict": "NOT FEASIBLE",
+  "recommendation": "Dune did not return relevant data for our test queries. Consider: (a) trying custom queries on Dune, (b) using Helius webhooks for real-time data instead, or (c) building from DexScreener/Jupiter API feeds."
+}
