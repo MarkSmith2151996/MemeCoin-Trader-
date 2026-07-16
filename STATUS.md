@@ -130,6 +130,7 @@ Default execution mode: paper trading
 
 ## Last 10 Changes
 
+- 2026-07-16 Executed MT-472 — fixed `paper_results.py` exit reason display (nested `metadata.close_reason` path) + tightened Strategy A age filter to 0-1h (`scripts/run_paper_loop.py`). Validation: `compileall` passed, `paper_results.py` shows correct reasons.
 - 2026-07-16 Executed MT-470 — fixed Signal construction in `try_enter` (`scripts/run_paper_loop.py`). Replaced incorrect field names `signal_type`/`strength` with `type`/`confidence` to match the `Signal` Pydantic model definition. Validation: `compileall` passed.
 - 2026-07-15 Executed MT-469 — swapped Jupiter for DexScreener entry pricing in `scripts/run_paper_loop.py`. Removed `JupiterClient` import and instantiation. `try_enter` now takes `mark_provider: DexScreenerPriceProvider` and uses `get_current_price()` instead of `jupiter.get_quote()`. `scan_loop` signature updated to match. `JupiterPriceProvider` in `src/execution/price_provider.py` left in place for future live trading. Validation: `compileall` passed.
 - 2026-07-16 Executed MT-468 — upgraded all failure paths in `try_enter` (`scripts/run_paper_loop.py`) from `log.debug` to `log.warning` with descriptive SKIP messages. Wrapped previously unprotected calls (`execute_swap`, `record_trade`, `open_position`) in try/except with warnings. Added `log.warning` for existing-position skip. Added success `log.info` in `resolve_mint`. No src/, tests, or schema changes. Validation: `compileall` passed.

@@ -78,7 +78,8 @@ async def get_closed_today(db_path: Path) -> list[dict]:
             if trade_row:
                 try:
                     meta = json.loads(trade_row[0])
-                    reason = meta.get("close_reason", "unknown")
+                    nested_meta = meta.get("metadata", {})
+                    reason = nested_meta.get("close_reason", "unknown")
                 except (json.JSONDecodeError, TypeError):
                     pass
             results.append({

@@ -38,7 +38,7 @@ CAPTURE_URL = (
     "rankBy=trendingScoreH6&order=desc"
     "&dexIds=pumpswap,raydium"
     "&minLiq=50000&minMarketCap=100000&maxMarketCap=10000000"
-    "&minAge=1&maxAge=4"
+    "&minAge=0&maxAge=1"
     "&min24HTxns=500&min24HBuys=300&min24HVol=500000"
     "&min1HChg=20&profile=0"
 )
