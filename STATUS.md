@@ -129,6 +129,7 @@ Default execution mode: paper trading
 
 ## Last 10 Changes
 
+- 2026-07-15 Executed MT-466 — fixed trailing stop in `scripts/run_paper_loop.py` by tracking peak price per position in a module-level `peak_prices` dict. The trailing stop now correctly triggers at -8% from peak rather than -8% from entry. Validation: compileall, 5/5 focused tests passed.
 - 2026-07-15 Executed MT-465 — split paper loop into concurrent scan cycle (3min) and monitor cycle (30s) using `asyncio.gather`. `seen_mints` moved to module level for cross-loop sharing. Validation: compileall, 5/5 focused, 647/647 full-suite passed.
 - 2026-07-15 Executed MT-464 — wired three-layer paper trading loop: `JupiterPriceProvider` in `src/execution/price_provider.py`, self-contained `scripts/run_paper_loop.py` (browser-pc scan → DexScreener search → Jupiter quote → paper entry with trailing/time stops), and 5 fake-transport `resolve_mint` tests in `tests/test_paper_loop.py`. Validation: 5/5 focused tests passed, 647/647 full-suite passed (1 skipped), compileall passed. No changes to risk filters, live execution paths, or CLI commands.
 

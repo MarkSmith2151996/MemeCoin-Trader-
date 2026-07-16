@@ -179,8 +179,11 @@ async def monitor_positions(
             continue
 
         age_min = (datetime.now(UTC) - pos.opened_at).total_seconds() / 60
-        entry = pos.entry_price_sol if pos.entry_price_sol > 0 else None
-        peak = getattr(pos, "highest_price_sol", entry) or entry
+        entry = pos.entry_price_sol if pos.entry_price_sol > 0 else current_price
+
+        prev_peak = peak_prices.get(pos.mint_address, entry)
+        peak = max(prev_peak, current_price)
+        peak_prices[pos.mint_address] = peak
 
         close_reason = None
         close_price = current_price
@@ -189,18 +192,19 @@ async def monitor_positions(
             if drop_from_entry >= HARD_STOP_PCT:
                 close_reason = "hard_stop"
                 close_price = current_price
-            elif peak and (peak - current_price) / peak >= TRAILING_STOP_PCT:
+            elif (peak - current_price) / peak >= TRAILING_STOP_PCT:
                 close_reason = "trailing_stop"
                 close_price = current_price
         if age_min >= TIME_STOP_MINUTES and close_reason is None:
             close_reason = "time_stop"
 
         if close_reason:
+            peak_prices.pop(pos.mint_address, None)
             trade = await _adapter_close(pos, current_price, close_reason, db_path)
             await manager.close_position(pos.mint_address, current_price, mode="paper")
             log.info(
-                "CLOSE [%s]: mint=%s entry=%.8f close=%.8f",
-                close_reason, pos.mint_address[:16], pos.entry_price_sol, current_price,
+                "CLOSE [%s]: mint=%s entry=%.8f peak=%.8f close=%.8f",
+                close_reason, pos.mint_address[:16], pos.entry_price_sol, peak, current_price,
             )
 
 
@@ -228,6 +232,7 @@ async def _adapter_close(pos, close_price: float, reason: str, db_path: Path) ->
 
 
 seen_mints: set[str] = set()
+peak_prices: dict[str, float] = {}  # mint -> highest price seen
 
 
 async def scan_loop(
