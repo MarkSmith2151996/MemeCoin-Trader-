@@ -129,6 +129,7 @@ Default execution mode: paper trading
 
 ## Last 10 Changes
 
+- 2026-07-15 Executed MT-465 — split paper loop into concurrent scan cycle (3min) and monitor cycle (30s) using `asyncio.gather`. `seen_mints` moved to module level for cross-loop sharing. Validation: compileall, 5/5 focused, 647/647 full-suite passed.
 - 2026-07-15 Executed MT-464 — wired three-layer paper trading loop: `JupiterPriceProvider` in `src/execution/price_provider.py`, self-contained `scripts/run_paper_loop.py` (browser-pc scan → DexScreener search → Jupiter quote → paper entry with trailing/time stops), and 5 fake-transport `resolve_mint` tests in `tests/test_paper_loop.py`. Validation: 5/5 focused tests passed, 647/647 full-suite passed (1 skipped), compileall passed. No changes to risk filters, live execution paths, or CLI commands.
 
 - 2026-07-15 Executed MT-463 — implemented `JupiterClient.get_quote()` with Solana RPC `getTokenSupply` decimals caching, BUY/SELL price conversion, and 6 fake-transport tests in `tests/test_jupiter_client.py`. Replaced the `NotImplementedError` stub with a working Jupiter v6 quote API integration using `httpx.MockTransport` throughout. Validation: 6/6 focused tests passed, 642 full-suite passed (1 skipped), compileall passed. No wiring into paper execution adapter or CLI — follow-on task.

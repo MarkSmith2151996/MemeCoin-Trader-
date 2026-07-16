@@ -1,11 +1,13 @@
-"""Three-layer paper trading loop.
+"""Three-layer paper trading loop with split cycles.
 
-Every 3 minutes:
+Scan cycle (every 3 min):
   1. browser-pc  → scan Profile B DexScreener URL → coin names
   2. DexScreener search API → name → mint address
   3. JupiterClient.get_quote() → entry price
   4. Record paper entry (max 3 open positions, 0.01 SOL each)
-  5. Re-mark and close open positions (trailing stop / time stop)
+
+Monitor cycle (every 30s):
+  5. Re-mark and close open positions (trailing stop / hard stop / time stop)
 
 Run: python scripts/run_paper_loop.py
 """
@@ -44,7 +46,8 @@ CAPTURE_URL = (
 DEXSCREENER_SEARCH_URL = "https://api.dexscreener.com/latest/dex/search"
 WRAPPED_SOL_MINT = "So11111111111111111111111111111111111111112"
 
-CYCLE_INTERVAL_S = 180
+SCAN_INTERVAL_S = 180
+MONITOR_INTERVAL_S = 30
 MAX_OPEN_POSITIONS = 3
 PAPER_SIZE_SOL = 0.01
 TRAILING_STOP_PCT = 0.08
@@ -224,6 +227,57 @@ async def _adapter_close(pos, close_price: float, reason: str, db_path: Path) ->
     return trade
 
 
+seen_mints: set[str] = set()
+
+
+async def scan_loop(
+    jupiter: JupiterClient,
+    adapter: PaperExecutionAdapter,
+    manager: PositionManager,
+    db_path: Path,
+) -> None:
+    """Discover and enter new candidates every 3 minutes."""
+    global seen_mints
+    async with httpx.AsyncClient() as http:
+        while True:
+            cycle_start = time.monotonic()
+            log.info("--- Scan cycle ---")
+            open_positions = await manager.get_all_open(mode="paper")
+            slots_available = MAX_OPEN_POSITIONS - len(open_positions)
+            log.info("Open positions: %d / %d", len(open_positions), MAX_OPEN_POSITIONS)
+
+            if slots_available > 0:
+                names = scan_candidates()
+                log.info("Candidates from browser-pc: %s", names)
+                entered = 0
+                for name in names:
+                    if entered >= slots_available:
+                        break
+                    mint = await resolve_mint(name, http)
+                    if mint is None or mint in seen_mints:
+                        continue
+                    seen_mints.add(mint)
+                    ok = await try_enter(mint, jupiter, adapter, manager, db_path)
+                    if ok:
+                        entered += 1
+
+            elapsed = time.monotonic() - cycle_start
+            await asyncio.sleep(max(0.0, SCAN_INTERVAL_S - elapsed))
+
+
+async def monitor_loop(
+    manager: PositionManager,
+    mark_provider: DexScreenerPriceProvider,
+    db_path: Path,
+) -> None:
+    """Check open positions for stops every 30 seconds."""
+    while True:
+        cycle_start = time.monotonic()
+        await monitor_positions(manager, mark_provider, db_path)
+        elapsed = time.monotonic() - cycle_start
+        await asyncio.sleep(max(0.0, MONITOR_INTERVAL_S - elapsed))
+
+
 async def main() -> None:
     settings = load_settings()
     db_path = DB_PATH
@@ -234,44 +288,11 @@ async def main() -> None:
     adapter = PaperExecutionAdapter(price_provider=mark_provider)
     manager = PositionManager(db_path, settings)
 
-    seen_mints: set[str] = set()
-    log.info("Paper loop started. Cycle every %ds. Max positions: %d", CYCLE_INTERVAL_S, MAX_OPEN_POSITIONS)
-
-    async with httpx.AsyncClient() as http:
-        while True:
-            cycle_start = time.monotonic()
-            log.info("--- Cycle start ---")
-
-            await monitor_positions(manager, mark_provider, db_path)
-
-            open_positions = await manager.get_all_open(mode="paper")
-            slots_available = MAX_OPEN_POSITIONS - len(open_positions)
-            log.info("Open positions: %d / %d", len(open_positions), MAX_OPEN_POSITIONS)
-
-            if slots_available > 0:
-                names = scan_candidates()
-                log.info("Candidates from browser-pc: %s", names)
-
-                entered = 0
-                for name in names:
-                    if entered >= slots_available:
-                        break
-                    mint = await resolve_mint(name, http)
-                    if mint is None:
-                        log.debug("Could not resolve mint for: %s", name)
-                        continue
-                    if mint in seen_mints:
-                        log.debug("Already seen mint: %s", mint)
-                        continue
-                    seen_mints.add(mint)
-                    ok = await try_enter(mint, jupiter, adapter, manager, db_path)
-                    if ok:
-                        entered += 1
-
-            elapsed = time.monotonic() - cycle_start
-            sleep_s = max(0.0, CYCLE_INTERVAL_S - elapsed)
-            log.info("Cycle done in %.1fs. Sleeping %.1fs.", elapsed, sleep_s)
-            await asyncio.sleep(sleep_s)
+    log.info("Paper loop started. Scan every %ds, monitor every %ds.", SCAN_INTERVAL_S, MONITOR_INTERVAL_S)
+    await asyncio.gather(
+        scan_loop(jupiter, adapter, manager, db_path),
+        monitor_loop(manager, mark_provider, db_path),
+    )
 
 
 if __name__ == "__main__":
