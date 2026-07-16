@@ -28,7 +28,6 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 from src.core.config import load_settings
 from src.core.database import init_db, record_trade
 from src.core.models import Side, Trade
-from src.chain.jupiter import JupiterClient
 from src.execution.price_provider import DexScreenerPriceProvider
 from src.execution.paper import PaperExecutionAdapter
 from src.strategy.position_manager import PositionManager
@@ -126,25 +125,20 @@ async def resolve_mint(name: str, client: httpx.AsyncClient) -> str | None:
 
 async def try_enter(
     mint: str,
-    jupiter: JupiterClient,
+    mark_provider: DexScreenerPriceProvider,
     adapter: PaperExecutionAdapter,
     manager: PositionManager,
     db_path: Path,
 ) -> bool:
-    """Quote via Jupiter and record a paper entry. Returns True if entry recorded."""
+    """Price via DexScreener and record a paper entry. Returns True if entry recorded."""
     existing = await manager.get_position(mint, mode="paper")
     if existing is not None:
         log.warning("SKIP %s — position already open", mint)
         return False
 
-    try:
-        quote = await jupiter.get_quote(mint, Side.BUY, PAPER_SIZE_SOL)
-    except Exception as exc:
-        log.warning("SKIP %s — Jupiter quote failed: %s", mint, exc)
-        return False
-
-    if quote.price_sol is None or quote.price_sol <= 0:
-        log.warning("SKIP %s — no valid Jupiter price (price_sol=%s)", mint, quote.price_sol)
+    price = await mark_provider.get_current_price(mint)
+    if price is None or price <= 0:
+        log.warning("SKIP %s — no valid DexScreener price", mint)
         return False
 
     try:
@@ -177,7 +171,7 @@ async def try_enter(
         log.warning("SKIP %s — open_position failed: %s", mint, exc)
         return False
 
-    log.info("ENTRY: mint=%s price=%.8f SOL", mint, quote.price_sol)
+    log.info("ENTRY: mint=%s price=%.8f SOL", mint, price)
     return True
 
 
@@ -253,7 +247,7 @@ peak_prices: dict[str, float] = {}  # mint -> highest price seen
 
 
 async def scan_loop(
-    jupiter: JupiterClient,
+    mark_provider: DexScreenerPriceProvider,
     adapter: PaperExecutionAdapter,
     manager: PositionManager,
     db_path: Path,
@@ -279,7 +273,7 @@ async def scan_loop(
                     if mint is None or mint in seen_mints:
                         continue
                     seen_mints.add(mint)
-                    ok = await try_enter(mint, jupiter, adapter, manager, db_path)
+                    ok = await try_enter(mint, mark_provider, adapter, manager, db_path)
                     if ok:
                         entered += 1
 
@@ -305,14 +299,13 @@ async def main() -> None:
     db_path = DB_PATH
     await init_db(db_path)
 
-    jupiter = JupiterClient()
     mark_provider = DexScreenerPriceProvider()
     adapter = PaperExecutionAdapter(price_provider=mark_provider)
     manager = PositionManager(db_path, settings)
 
     log.info("Paper loop started. Scan every %ds, monitor every %ds.", SCAN_INTERVAL_S, MONITOR_INTERVAL_S)
     await asyncio.gather(
-        scan_loop(jupiter, adapter, manager, db_path),
+        scan_loop(mark_provider, adapter, manager, db_path),
         monitor_loop(manager, mark_provider, db_path),
     )
 
