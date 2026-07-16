@@ -162,9 +162,9 @@ async def try_enter(
 
         dummy_signal = Signal(
             source=SignalSource.MANUAL,
+            type=SignalType.NEW_POOL,
             mint_address=mint,
-            signal_type=SignalType.NEW_POOL,
-            strength=1.0,
+            confidence=1.0,
         )
         await manager.open_position(trade, dummy_signal)
     except Exception as exc:
