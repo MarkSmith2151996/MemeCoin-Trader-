@@ -27,7 +27,7 @@ import requests
 sys.path.insert(0, str(Path(__file__).parent.parent))
 from src.core.config import load_settings
 from src.core.database import init_db, record_trade
-from src.core.models import Side, Signal, SignalSource, SignalType, Trade
+from src.core.models import Side, Trade
 from src.chain.jupiter import JupiterClient
 from src.execution.price_provider import DexScreenerPriceProvider
 from src.execution.paper import PaperExecutionAdapter
@@ -119,6 +119,7 @@ async def resolve_mint(name: str, client: httpx.AsyncClient) -> str | None:
             continue
         mint = (pair.get("baseToken") or {}).get("address")
         if mint and isinstance(mint, str):
+            log.info("RESOLVED %s → %s", name, mint)
             return mint
     return None
 
@@ -133,34 +134,50 @@ async def try_enter(
     """Quote via Jupiter and record a paper entry. Returns True if entry recorded."""
     existing = await manager.get_position(mint, mode="paper")
     if existing is not None:
+        log.warning("SKIP %s — position already open", mint)
         return False
 
     try:
         quote = await jupiter.get_quote(mint, Side.BUY, PAPER_SIZE_SOL)
     except Exception as exc:
-        log.debug("Jupiter quote failed for %s: %s", mint, exc)
+        log.warning("SKIP %s — Jupiter quote failed: %s", mint, exc)
         return False
 
     if quote.price_sol is None or quote.price_sol <= 0:
-        log.debug("No valid Jupiter price for %s", mint)
+        log.warning("SKIP %s — no valid Jupiter price (price_sol=%s)", mint, quote.price_sol)
         return False
 
-    trade = await adapter.execute_swap(mint, Side.BUY, PAPER_SIZE_SOL)
+    try:
+        trade = await adapter.execute_swap(mint, Side.BUY, PAPER_SIZE_SOL)
+    except Exception as exc:
+        log.warning("SKIP %s — execute_swap failed: %s", mint, exc)
+        return False
+
     if trade is None:
+        log.warning("SKIP %s — execute_swap returned None", mint)
         return False
 
-    await record_trade(db_path, trade)
-    dummy_signal = Signal(
-        source=SignalSource.MANUAL,
-        type=SignalType.NEW_POOL,
-        mint_address=mint,
-        confidence=1.0,
-    )
-    position = await manager.open_position(trade, dummy_signal)
-    log.info(
-        "ENTRY: mint=%s price=%.8f SOL tokens=%.2f",
-        mint, quote.price_sol, quote.estimated_out_amount,
-    )
+    try:
+        await record_trade(db_path, trade)
+    except Exception as exc:
+        log.warning("SKIP %s — record_trade failed: %s", mint, exc)
+        return False
+
+    try:
+        from src.core.models import Signal, SignalSource, SignalType
+
+        dummy_signal = Signal(
+            source=SignalSource.MANUAL,
+            mint_address=mint,
+            signal_type=SignalType.NEW_POOL,
+            strength=1.0,
+        )
+        await manager.open_position(trade, dummy_signal)
+    except Exception as exc:
+        log.warning("SKIP %s — open_position failed: %s", mint, exc)
+        return False
+
+    log.info("ENTRY: mint=%s price=%.8f SOL", mint, quote.price_sol)
     return True
 
 
