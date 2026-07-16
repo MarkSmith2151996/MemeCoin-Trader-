@@ -1,0 +1,142 @@
+[
+  {
+    "ticker": "CXMT",
+    "mint": "0xcd2BF84d6A21998eb11CE127D8Fb8Ec9574b504f",
+    "launch_date": "2026-07-15",
+    "price_change_24h": 54.63,
+    "day1_mentions": 7
+  },
+  {
+    "ticker": "Claude",
+    "mint": "0x28CE689E12d8D9Ff18651E8684AAc88f1334Fb07",
+    "launch_date": "2026-07-06",
+    "price_change_24h": 0.0,
+    "day1_mentions": 1
+  },
+  {
+    "ticker": "OpenAI",
+    "mint": "0x5E1760831750DD0Be92d115e90CfEEF207c68B07",
+    "launch_date": "2026-07-10",
+    "price_change_24h": 99955.0,
+    "day1_mentions": 5
+  },
+  {
+    "ticker": "BoLe",
+    "mint": "0x5e4538460E07A12ea756fe1B774bf5C006797777",
+    "launch_date": "2026-07-15",
+    "price_change_24h": 18406.0,
+    "day1_mentions": 4
+  },
+  {
+    "ticker": "MST",
+    "mint": "0x52d551b9dB4A4db3Ee2BF145f1f833F479eF7847",
+    "launch_date": "2026-07-15",
+    "price_change_24h": 16460.0,
+    "day1_mentions": 2
+  },
+  {
+    "ticker": "CXMT",
+    "mint": "0xcd2BF84d6A21998eb11CE127D8Fb8Ec9574b504f",
+    "launch_date": "2026-07-15",
+    "price_change_24h": 15612.0,
+    "day1_mentions": 7
+  },
+  {
+    "ticker": "CLIX",
+    "mint": "0x8DC2C13bE754f2845c767a4d6964FeF7CA5E5DC8",
+    "launch_date": "2026-07-15",
+    "price_change_24h": 8738.0,
+    "day1_mentions": 3
+  },
+  {
+    "ticker": "VORF",
+    "mint": "GGPf1WfLcGiMwECDnZeKmXBp5U54sx6QRBmdWU7hCjdD",
+    "launch_date": "2026-06-20",
+    "price_change_24h": 1134.0,
+    "day1_mentions": 1
+  },
+  {
+    "ticker": "HOOD",
+    "mint": "0x47a780FACdb343EDC7a962FeC9Bf3e2D19DF3032",
+    "launch_date": "2026-03-06",
+    "price_change_24h": 1059.0,
+    "day1_mentions": 10
+  },
+  {
+    "ticker": "SQUEEZE",
+    "mint": "0xF444F3C77C77a33F7c8d8fcab8a1E88aFb843dA5",
+    "launch_date": "2026-07-12",
+    "price_change_24h": 420.0,
+    "day1_mentions": 2
+  },
+  {
+    "ticker": "TENDIES",
+    "mint": "0x45242320DBB855EeA8Fd36804C6487E10E97FCF9",
+    "launch_date": "2026-06-18",
+    "price_change_24h": 268.0,
+    "day1_mentions": 2
+  },
+  {
+    "ticker": "CODEFORMER",
+    "mint": "0xADFA25Cb0F21E83a23c07D29a7bf30ab731D1918",
+    "launch_date": "2026-03-10",
+    "price_change_24h": 142.0,
+    "day1_mentions": 0
+  },
+  {
+    "ticker": "TEMPO",
+    "mint": "7jqt9VH5VQ9dQU1QVchkev2piNGQRXNpxtkALd7dgqQA",
+    "launch_date": "2026-07-14",
+    "price_change_24h": 133.0,
+    "day1_mentions": 0
+  },
+  {
+    "ticker": "HOODIO",
+    "mint": "0xB9FE2aDf7C25ebe4081A2E228b02BE05Ebdf7410",
+    "launch_date": "2026-07-11",
+    "price_change_24h": 119.0,
+    "day1_mentions": null
+  },
+  {
+    "ticker": "AKE",
+    "mint": "Fy6AUgKwrY1k57jPSsx8V83XZ3FyDKiQPhskDm48DuJ9",
+    "launch_date": "2025-09-27",
+    "price_change_24h": 116.0,
+    "day1_mentions": null
+  },
+  {
+    "ticker": "jesse",
+    "mint": "0x50F88fe97f72CD3E75b9Eb4f747F59BcEBA80d59",
+    "launch_date": "2025-11-20",
+    "price_change_24h": 107.0,
+    "day1_mentions": 4
+  },
+  {
+    "ticker": "US",
+    "mint": "0xee962a61432231c2ede6946515beb02290cb516ad087bb06a731e922b2a5f57a::us::US",
+    "launch_date": "2025-12-10",
+    "price_change_24h": 58.18,
+    "day1_mentions": 6
+  },
+  {
+    "ticker": "RIBBIT",
+    "mint": "0xA226863d47479d6FA29DC93DBD2CC64363d8202a",
+    "launch_date": "2026-07-12",
+    "price_change_24h": 53.79,
+    "day1_mentions": null
+  },
+  {
+    "ticker": "DOHO",
+    "mint": "0x7331991062f3B1E4eb0FD0506bF1ff0779e08b91",
+    "launch_date": "2026-07-14",
+    "price_change_24h": 51.65,
+    "day1_mentions": null
+  },
+  {
+    "ticker": "pTGC",
+    "mint": "0x94534EeEe131840b1c0F61847c572228bdfDDE93",
+    "launch_date": "2023-10-11",
+    "price_change_24h": 51.2,
+    "day1_mentions": null
+  }
+]
