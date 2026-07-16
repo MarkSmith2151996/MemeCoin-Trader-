@@ -31,6 +31,7 @@ from src.core.models import Side, Trade
 from src.execution.price_provider import DexScreenerPriceProvider
 from src.execution.paper import PaperExecutionAdapter
 from src.strategy.position_manager import PositionManager
+from src.risk.rugcheck import RugCheckClient
 
 BROWSER_PC_URL = "http://172.21.32.1:8099"
 CAPTURE_URL = (
@@ -46,12 +47,13 @@ DEXSCREENER_SEARCH_URL = "https://api.dexscreener.com/latest/dex/search"
 WRAPPED_SOL_MINT = "So11111111111111111111111111111111111111112"
 
 SCAN_INTERVAL_S = 180
-MONITOR_INTERVAL_S = 30
+MONITOR_INTERVAL_S = 10
 MAX_OPEN_POSITIONS = 3
 PAPER_SIZE_SOL = 0.01
 TRAILING_STOP_PCT = 0.08
 HARD_STOP_PCT = 0.20
 TIME_STOP_MINUTES = 30
+RUGCHECK_ENABLED = True
 
 DB_PATH = Path("data/trades.db")
 
@@ -136,6 +138,30 @@ async def try_enter(
         log.warning("SKIP %s — position already open", mint)
         return False
 
+    if RUGCHECK_ENABLED:
+        result = await _rugcheck.fetch_report(mint)
+        if result.provider_status != "ok":
+            log.warning("SKIP %s — RugCheck unavailable for %s — skipping", mint, mint)
+            return False
+        if result.mint_authority_revoked is not True:
+            log.warning("SKIP %s — mint authority not revoked", mint)
+            return False
+        if result.freeze_authority_revoked is not True:
+            log.warning("SKIP %s — freeze authority not revoked", mint)
+            return False
+        if result.is_honeypot is True:
+            log.warning("SKIP %s — flagged as honeypot", mint)
+            return False
+        if result.is_honeypot is None:
+            log.warning("SKIP %s — honeypot status unknown, allowing through", mint)
+        if result.liquidity_locked is False:
+            log.warning("SKIP %s — liquidity not locked", mint)
+        elif result.liquidity_locked is None:
+            log.warning("SKIP %s — liquidity lock status unknown (soft warn)", mint)
+        if result.top_holder_pct is not None and result.top_holder_pct >= 80:
+            log.warning("SKIP %s — top 10 holder concentration %.1f%% >= 80%%", mint, result.top_holder_pct)
+            return False
+
     price = await mark_provider.get_current_price(mint)
     if price is None or price <= 0:
         log.warning("SKIP %s — no valid DexScreener price", mint)
@@ -187,6 +213,13 @@ async def monitor_positions(
     for pos in positions:
         current_price = await mark_provider.get_current_price(pos.mint_address)
         if current_price is None:
+            age_min = (datetime.now(UTC) - pos.opened_at).total_seconds() / 60
+            if age_min >= TIME_STOP_MINUTES:
+                log.warning("CLOSE [price_unavailable]: mint=%s age=%.1fmin — force closing stale position", pos.mint_address[:16], age_min)
+                await manager.close_position(pos.mint_address, 0.0, mode="paper")
+                peak_prices.pop(pos.mint_address, None)
+            else:
+                log.warning("SKIP mark: mint=%s — DexScreener returned None (age=%.1fmin)", pos.mint_address[:16], age_min)
             continue
 
         age_min = (datetime.now(UTC) - pos.opened_at).total_seconds() / 60
@@ -196,8 +229,15 @@ async def monitor_positions(
         peak = max(prev_peak, current_price)
         peak_prices[pos.mint_address] = peak
 
-        close_reason = None
-        close_price = current_price
+        pct_from_entry = (current_price - entry) / entry
+        if pct_from_entry <= -0.75:
+            log.warning("CLOSE [rug_detected]: mint=%s entry=%.8f current=%.8f drop=%.1f%%",
+                        pos.mint_address[:16], entry, current_price, pct_from_entry * 100)
+            close_reason = "rug_detected"
+            close_price = current_price
+        else:
+            close_reason = None
+            close_price = current_price
         if entry:
             drop_from_entry = (entry - current_price) / entry
             if drop_from_entry >= HARD_STOP_PCT:
@@ -242,6 +282,8 @@ async def _adapter_close(pos, close_price: float, reason: str, db_path: Path) ->
     return trade
 
 
+_rugcheck = RugCheckClient()
+
 seen_mints: set[str] = set()
 peak_prices: dict[str, float] = {}  # mint -> highest price seen
 
@@ -271,6 +313,8 @@ async def scan_loop(
                         break
                     mint = await resolve_mint(name, http)
                     if mint is None or mint in seen_mints:
+                        if mint in seen_mints:
+                            log.debug("SKIP %s — already seen this session", name)
                         continue
                     seen_mints.add(mint)
                     ok = await try_enter(mint, mark_provider, adapter, manager, db_path)

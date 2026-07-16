@@ -1,21 +1,21 @@
-"""Scrape DexScreener gainers, get launch dates, query Grok for day-1 mention counts."""
+"""Scrape DexScreener gainers, get launch timestamps, query Grok for temporal mention data."""
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import os
-import re
 import time
 from datetime import datetime, timezone
 
 import httpx
 from dotenv import load_dotenv
 
+from src.signals.grok_xsearch import get_mentions_with_timestamps
+
 load_dotenv()
 
-GROK_API_KEY = os.getenv("GROK_API_KEY")
-GROK_API_URL = "https://api.x.ai/v1/responses"
 BROWSER_PC_URL = "http://172.21.32.1:8099/capture"
 DEXSCREENER_SEARCH_URL = "https://api.dexscreener.com/latest/dex/search"
 DEXSCREENER_TOKEN_URL = "https://api.dexscreener.com/latest/dex/tokens"
@@ -30,7 +30,8 @@ GAINERS_URL = (
     "&min24HVol=100000"
 )
 
-OUTPUT_PATH = "research/mt473_output/winners_mentions.json"
+OUTPUT_PATH = "research/mt477_output/winners_mentions.json"
+COIN_TARGET = 50
 
 logging.basicConfig(
     level=logging.INFO,
@@ -48,7 +49,7 @@ def scrape_gainers() -> list[dict]:
     )
     resp.raise_for_status()
     data = resp.json()
-    candidates = data.get("candidates", [])[:20]
+    candidates = data.get("candidates", [])
     log.info("Got %d candidates from gainers page", len(candidates))
     return candidates
 
@@ -79,7 +80,8 @@ def resolve_mint(ticker: str) -> str | None:
         return None
 
 
-def get_launch_date(mint: str) -> str | None:
+def get_token_info(mint: str) -> dict | None:
+    """Fetch token info from DexScreener. Returns dict with launch, market cap, etc."""
     try:
         resp = httpx.get(f"{DEXSCREENER_TOKEN_URL}/{mint}", timeout=10)
         resp.raise_for_status()
@@ -87,60 +89,24 @@ def get_launch_date(mint: str) -> str | None:
         pairs = data.get("pairs", [])
         if not pairs:
             return None
-        created_ats = [
-            p.get("pairCreatedAt") for p in pairs if p.get("pairCreatedAt")
-        ]
-        if not created_ats:
-            return None
-        earliest = min(created_ats) / 1000
-        dt = datetime.fromtimestamp(earliest, tz=timezone.utc)
-        return dt.strftime("%Y-%m-%d")
+        pair = max(pairs, key=lambda p: p.get("liquidity", {}).get("usd", 0) or 0)
+        created_ms = pair.get("pairCreatedAt")
+        launched_at = None
+        if created_ms:
+            launched_at = datetime.fromtimestamp(created_ms / 1000, tz=timezone.utc)
+
+        info = {
+            "launched_at": launched_at,
+            "market_cap": pair.get("marketCap") or pair.get("fdv"),
+            "liquidity_usd": (pair.get("liquidity") or {}).get("usd"),
+            "txns": pair.get("txns", {}),
+            "volume": pair.get("volume", {}),
+            "price_usd": pair.get("priceUsd"),
+            "price_change": pair.get("priceChange", {}),
+        }
+        return info
     except Exception as exc:
-        log.warning("Failed to get launch date for %s: %s", mint[:8], exc)
-        return None
-
-
-def query_grok_mentions(ticker: str, mint: str, launch_date: str) -> int | None:
-    if not GROK_API_KEY:
-        log.warning("GROK_API_KEY not set")
-        return None
-
-    prompt = (
-        f"Search X for ${ticker} or {mint} posted on {launch_date}. "
-        "Count how many unique accounts mentioned it. Reply with just the integer."
-    )
-
-    payload = {
-        "model": "grok-4.3",
-        "input": [{"role": "user", "content": prompt}],
-        "tools": [{"type": "x_search"}],
-    }
-
-    try:
-        resp = httpx.post(
-            GROK_API_URL,
-            json=payload,
-            headers={
-                "Authorization": f"Bearer {GROK_API_KEY}",
-                "Content-Type": "application/json",
-            },
-            timeout=30,
-        )
-        resp.raise_for_status()
-        data = resp.json()
-        content_blocks = data.get("output", [])
-        for block in content_blocks:
-            inner = block.get("content") if isinstance(block, dict) else None
-            if isinstance(inner, list):
-                for item in inner:
-                    text = item.get("output_text") or item.get("text") or ""
-                    match = re.search(r"\d+", text.strip())
-                    if match:
-                        return int(match.group())
-        log.warning("No numeric mention count found for %s (%s)", ticker, mint[:8])
-        return None
-    except Exception as exc:
-        log.warning("Grok query failed for %s (%s): %s", ticker, mint[:8], exc)
+        log.warning("Failed to get token info for %s: %s", mint[:8], exc)
         return None
 
 
@@ -148,11 +114,16 @@ def get_change_pct(candidate: dict) -> float | None:
     return candidate.get("change_24h_pct") or candidate.get("change_6h_pct") or candidate.get("change_1h_pct")
 
 
-def main():
+async def main():
     candidates = scrape_gainers()
     results = []
+    grok_calls = 0
+    grok_successes = 0
 
     for i, c in enumerate(candidates):
+        if len(results) >= COIN_TARGET:
+            break
+
         ticker = c["name"]
         pair = c.get("pair", "?")
         price_change = get_change_pct(c)
@@ -161,60 +132,86 @@ def main():
         mint = resolve_mint(ticker)
         if not mint:
             log.warning("  No mint found for %s, skipping", ticker)
-            results.append({
-                "ticker": ticker,
-                "mint": None,
-                "launch_date": None,
-                "price_change_24h": price_change,
-                "day1_mentions": None,
-            })
             continue
 
-        launch_date = get_launch_date(mint)
-        if not launch_date:
-            log.warning("  No launch date for %s (%s), skipping Grok query", ticker, mint[:8])
-            results.append({
-                "ticker": ticker,
-                "mint": mint,
-                "launch_date": None,
-                "price_change_24h": price_change,
-                "day1_mentions": None,
-            })
+        token_info = get_token_info(mint)
+        if not token_info:
+            log.warning("  No token info for %s (%s), skipping", ticker, mint[:8])
             continue
 
-        log.info("  Mint: %s, Launch: %s, Change: %s%%", mint[:12], launch_date, price_change)
+        launched_at = token_info.get("launched_at")
+        market_cap = token_info.get("market_cap")
+        txns = token_info.get("txns", {})
+        volume = token_info.get("volume", {})
 
-        mentions = query_grok_mentions(ticker, mint, launch_date)
-        log.info("  Day-1 mentions: %s", mentions)
+        mcap_info = f"${market_cap:,.0f}" if market_cap else "N/A"
+        log.info(
+            "  Mint: %s, Market cap: %s, Launch: %s, Change: %s%%",
+            mint[:12], mcap_info,
+            launched_at.isoformat() if launched_at else "N/A",
+            price_change,
+        )
+
+        grok_calls += 1
+        if launched_at:
+            mention_data = await get_mentions_with_timestamps(ticker, mint, launched_at, hours=24)
+        else:
+            mention_data = {
+                "total_mentions": 0,
+                "mentions_0_5min": None,
+                "mentions_5_15min": None,
+                "mentions_15_60min": None,
+                "mentions_after_60min": None,
+                "earliest_mention_min": None,
+                "mention_timestamps": [],
+            }
+
+        if mention_data.get("total_mentions", 0) > 0:
+            grok_successes += 1
+
+        log.info(
+            "  Mentions: total=%s, 0-5min=%s, 5-15min=%s",
+            mention_data.get("total_mentions"),
+            mention_data.get("mentions_0_5min"),
+            mention_data.get("mentions_5_15min"),
+        )
 
         results.append({
             "ticker": ticker,
             "mint": mint,
-            "launch_date": launch_date,
-            "price_change_24h": price_change,
-            "day1_mentions": mentions,
+            "launched_at": launched_at.isoformat() if launched_at else None,
+            "price_change_pct": price_change,
+            "market_cap": market_cap,
+            "volume_24h": volume.get("h24") if volume else None,
+            "txns_24h": txns.get("h24") if txns else None,
+            **mention_data,
         })
 
-        if i < len(candidates) - 1:
-            time.sleep(2)
+        await asyncio.sleep(1.5)
 
     os.makedirs(os.path.dirname(OUTPUT_PATH), exist_ok=True)
     with open(OUTPUT_PATH, "w") as f:
         json.dump(results, f, indent=2)
-    log.info("Saved results to %s", OUTPUT_PATH)
+    log.info("Saved %d results to %s", len(results), OUTPUT_PATH)
+
+    success_rate = (grok_successes / grok_calls * 100) if grok_calls > 0 else 0
+    total_mentions_vals = [r["total_mentions"] for r in results]
+    mentions_0_5_vals = [r["mentions_0_5min"] for r in results if r["mentions_0_5min"] is not None]
+    mentions_5_15_vals = [r["mentions_5_15min"] for r in results if r["mentions_5_15min"] is not None]
+
+    avg_total = sum(total_mentions_vals) / len(total_mentions_vals) if total_mentions_vals else 0
+    avg_0_5 = sum(mentions_0_5_vals) / len(mentions_0_5_vals) if mentions_0_5_vals else 0
+    avg_5_15 = sum(mentions_5_15_vals) / len(mentions_5_15_vals) if mentions_5_15_vals else 0
 
     print()
-    print("=" * 80)
-    print(f"{'TICKER':10s} {'LAUNCH DATE':14s} {'24H CHANGE':12s} {'MENTIONS':10s}")
-    print("-" * 80)
-    sorted_results = sorted(results, key=lambda r: r.get("day1_mentions") or 0, reverse=True)
-    for r in sorted_results:
-        chg = f"{r['price_change_24h']:+.1f}%" if r["price_change_24h"] is not None else "N/A"
-        mentions = str(r["day1_mentions"]) if r["day1_mentions"] is not None else "N/A"
-        launch = r["launch_date"] or "N/A"
-        print(f"{r['ticker']:10s} {launch:14s} {chg:12s} {mentions:10s}")
-    print("=" * 80)
+    print("=" * 60)
+    print(f"WINNERS — {len(results)} coins processed")
+    print(f"Grok success rate: {success_rate:.1f}% ({grok_successes}/{grok_calls})")
+    print(f"Average total mentions:  {avg_total:.1f}")
+    print(f"Average mentions 0-5min: {avg_0_5:.1f}")
+    print(f"Average mentions 5-15min: {avg_5_15:.1f}")
+    print("=" * 60)
 
 
 if __name__ == "__main__":
-    main()
+    asyncio.run(main())
