@@ -3213,7 +3213,14 @@ async def run_paper_soak(
         sources=sources,
     )
 
+    runtime_db_path = resolve_db_path(db_path)
+    await init_db(runtime_db_path)
+
     settings = load_settings()
+    _soak_manager = PositionManager(runtime_db_path, settings)
+    _simulator = try_create_transaction_simulator()
+    _balance = try_create_balance_lookup()
+    _holdings = try_create_holdings_lookup()
     health_status = check_health()
 
     guardrails = evaluate_live_guardrails(settings)
@@ -3223,7 +3230,14 @@ async def run_paper_soak(
     breaker_decision = breaker.status(execution_mode="paper")
     circuit_breaker_diagnostics = breaker_decision.diagnostics if not breaker_decision.allowed else ("paper_mode_unaffected",)
 
-    readiness = await evaluate_micro_live_readiness(settings, circuit_breaker=breaker)
+    readiness = await evaluate_micro_live_readiness(
+        settings,
+        position_manager=_soak_manager,
+        wallet_balance_lookup=_balance,
+        transaction_simulator=_simulator,
+        wallet_holdings_lookup=_holdings,
+        circuit_breaker=breaker,
+    )
     readiness_checks = [
         {"name": check.name, "ok": check.ok, "diagnostics": list(check.diagnostics)}
         for check in readiness.checks
@@ -3237,9 +3251,6 @@ async def run_paper_soak(
         circuit_breaker_diagnostics=circuit_breaker_diagnostics,
         readiness_checks=readiness_checks,
     )
-
-    runtime_db_path = resolve_db_path(db_path)
-    await init_db(runtime_db_path)
 
     import json
 
