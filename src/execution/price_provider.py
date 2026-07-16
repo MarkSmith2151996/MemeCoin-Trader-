@@ -146,6 +146,28 @@ def _safe_float(data: object, key: str, default: float = 0.0) -> float:
     return default
 
 
+class JupiterPriceProvider(PriceProvider):
+    @property
+    def name(self) -> str:
+        return "jupiter"
+
+    def __init__(self, client: "JupiterClient | None" = None, reference_sol: float = 0.01) -> None:
+        from src.chain.jupiter import JupiterClient
+        self._client = client or JupiterClient()
+        self._reference_sol = reference_sol
+
+    async def get_current_price(self, mint_address: str) -> float | None:
+        from src.core.models import Side
+        try:
+            quote = await self._client.get_quote(mint_address, Side.BUY, self._reference_sol)
+            return quote.price_sol
+        except Exception:
+            return None
+
+    async def close(self) -> None:
+        await self._client.close()
+
+
 def _is_requested_mint_sol_pair(pair: dict[str, object], mint_address: str) -> bool:
     """Accept only requested-mint / canonical wrapped-SOL base-oriented pairs."""
     base_token = pair.get("baseToken")
