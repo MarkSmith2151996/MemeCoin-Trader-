@@ -1,0 +1,2534 @@
+{
+  "results": [
+    {
+      "ticker": "WOOD",
+      "mint": "aNM35husY4h11AgD6F5Wqd9BgoaWMyJQBBSGBndpump",
+      "launched_at": "2026-07-12 17:04:19",
+      "launch_unix": 1783875859,
+      "window_end_unix": 1783876159,
+      "ticker_query": null,
+      "mint_query": null,
+      "ticker_query_sent": "$WOOD since_time:1783875859 until_time:1783876159",
+      "ticker_raw": {
+        "created_at": 1784330235,
+        "completed_at": 1784330235,
+        "id": "3972fc1b-164d-9a92-a4e6-d0fd2d8a3f8a",
+        "max_output_tokens": null,
+        "model": "grok-4.3",
+        "object": "response",
+        "output": [
+          {
+            "id": "rs_3972fc1b-164d-9a92-a4e6-d0fd2d8a3f8a",
+            "summary": [
+              {
+                "text": "The task is: \"Search X for: $WOOD since_time:1783875859 until_time:1783876159",
+                "type": "summary_text"
+              }
+            ],
+            "type": "reasoning",
+            "status": "completed"
+          },
+          {
+            "call_id": "xs_call-a3506af1-d86e-49af-a97c-ac01caf08f6a-0",
+            "input": "{\"query\":\"$WOOD since_time:1783875859 until_time:1783876159\",\"limit\":\"10\",\"mode\":\"Latest\"}",
+            "name": "x_keyword_search",
+            "type": "custom_tool_call",
+            "id": "ctc_3972fc1b-164d-9a92-a4e6-d0fd2d8a3f8a_call-a3506af1-d86e-49af-a97c-ac01caf08f6a-0",
+            "status": "completed"
+          },
+          {
+            "id": "tco_3972fc1b-164d-9a92-a4e6-d0fd2d8a3f8a_call-a3506af1-d86e-49af-a97c-ac01caf08f6a-0",
+            "summary": [],
+            "type": "reasoning",
+            "status": "completed"
+          },
+          {
+            "content": [
+              {
+                "type": "output_text",
+                "text": "**No mentions found.**\n\nThe search for `$WOOD since_time:1783875859 until_time:1783876159` returned no results.\n\n- Total count of unique accounts: **0**",
+                "logprobs": [],
+                "annotations": []
+              }
+            ],
+            "id": "msg_3972fc1b-164d-9a92-a4e6-d0fd2d8a3f8a",
+            "role": "assistant",
+            "type": "message",
+            "status": "completed"
+          }
+        ],
+        "parallel_tool_calls": true,
+        "previous_response_id": null,
+        "reasoning": {
+          "effort": "low",
+          "summary": "detailed"
+        },
+        "temperature": 0.7,
+        "text": {
+          "format": {
+            "type": "text"
+          }
+        },
+        "tool_choice": "auto",
+        "tools": [
+          {
+            "type": "x_search"
+          }
+        ],
+        "top_p": 0.95,
+        "usage": {
+          "input_tokens": 3690,
+          "input_tokens_details": {
+            "cached_tokens": 3008
+          },
+          "output_tokens": 886,
+          "output_tokens_details": {
+            "reasoning_tokens": 843
+          },
+          "total_tokens": 4576,
+          "num_sources_used": 0,
+          "num_server_side_tools_used": 1,
+          "cost_in_usd_ticks": 86691000,
+          "server_side_tool_usage_details": {
+            "web_search_calls": 0,
+            "x_search_calls": 1,
+            "code_interpreter_calls": 0,
+            "file_search_calls": 0,
+            "mcp_calls": 0,
+            "document_search_calls": 0,
+            "image_generation_calls": 0
+          },
+          "context_details": {
+            "input_tokens": 2109,
+            "output_tokens": 367
+          }
+        },
+        "user": null,
+        "incomplete_details": null,
+        "status": "completed",
+        "store": true,
+        "metadata": {
+          "system_fingerprint": "fp_eb3c003fc66c14ed"
+        },
+        "background": false,
+        "service_tier": "default",
+        "truncation": "disabled",
+        "top_logprobs": 0,
+        "presence_penalty": 0.0,
+        "frequency_penalty": 0.0,
+        "prompt_cache_key": null,
+        "max_tool_calls": null,
+        "safety_identifier": null,
+        "error": null,
+        "instructions": null
+      },
+      "ticker_mentions": 0,
+      "ticker_timestamps": [],
+      "ticker_in_window": 0,
+      "mint_query_sent": "aNM35husY4h11AgD6F5Wqd9BgoaWMyJQBBSGBndpump since_time:1783875859 until_time:1783876159",
+      "mint_raw": {
+        "created_at": 1784330248,
+        "completed_at": 1784330248,
+        "id": "e953ff21-5be6-98ac-90f5-b4bc8c1ce58b",
+        "max_output_tokens": null,
+        "model": "grok-4.3",
+        "object": "response",
+        "output": [
+          {
+            "id": "rs_e953ff21-5be6-98ac-90f5-b4bc8c1ce58b",
+            "summary": [
+              {
+                "text": "The task is: Search X for: aNM35husY4h11AgD6F5Wqd9BgoaWMyJQBBSGBndpump since_time:1783875859 until_time:1783876159\n",
+                "type": "summary_text"
+              }
+            ],
+            "type": "reasoning",
+            "status": "completed"
+          },
+          {
+            "call_id": "xs_call-cc0606ea-f8b8-45c0-8ce5-bf3f61b4be0c-0",
+            "input": "{\"query\":\"aNM35husY4h11AgD6F5Wqd9BgoaWMyJQBBSGBndpump since_time:1783875859 until_time:1783876159\",\"limit\":\"10\",\"mode\":\"Latest\"}",
+            "name": "x_keyword_search",
+            "type": "custom_tool_call",
+            "id": "ctc_e953ff21-5be6-98ac-90f5-b4bc8c1ce58b_call-cc0606ea-f8b8-45c0-8ce5-bf3f61b4be0c-0",
+            "status": "completed"
+          },
+          {
+            "id": "tco_e953ff21-5be6-98ac-90f5-b4bc8c1ce58b_call-cc0606ea-f8b8-45c0-8ce5-bf3f61b4be0c-0",
+            "summary": [],
+            "type": "reasoning",
+            "status": "completed"
+          },
+          {
+            "content": [
+              {
+                "type": "output_text",
+                "text": "**Mentions found (1 total):**\n\n- @dogwifhood_xyz: 2026-07-12T17:04:36Z\n\n**Total unique accounts:** 1",
+                "logprobs": [],
+                "annotations": [
+                  {
+                    "type": "url_citation",
+                    "url": "https://x.com/i/status/2076352036493213796",
+                    "start_index": 0,
+                    "end_index": 0,
+                    "title": "https://x.com/i/status/2076352036493213796"
+                  }
+                ]
+              }
+            ],
+            "id": "msg_e953ff21-5be6-98ac-90f5-b4bc8c1ce58b",
+            "role": "assistant",
+            "type": "message",
+            "status": "completed"
+          }
+        ],
+        "parallel_tool_calls": true,
+        "previous_response_id": null,
+        "reasoning": {
+          "effort": "low",
+          "summary": "detailed"
+        },
+        "temperature": 0.7,
+        "text": {
+          "format": {
+            "type": "text"
+          }
+        },
+        "tool_choice": "auto",
+        "tools": [
+          {
+            "type": "x_search"
+          }
+        ],
+        "top_p": 0.95,
+        "usage": {
+          "input_tokens": 3798,
+          "input_tokens_details": {
+            "cached_tokens": 3136
+          },
+          "output_tokens": 803,
+          "output_tokens_details": {
+            "reasoning_tokens": 761
+          },
+          "total_tokens": 4601,
+          "num_sources_used": 0,
+          "num_server_side_tools_used": 1,
+          "cost_in_usd_ticks": 84622000,
+          "server_side_tool_usage_details": {
+            "web_search_calls": 0,
+            "x_search_calls": 1,
+            "code_interpreter_calls": 0,
+            "file_search_calls": 0,
+            "mcp_calls": 0,
+            "document_search_calls": 0,
+            "image_generation_calls": 0
+          },
+          "context_details": {
+            "input_tokens": 2192,
+            "output_tokens": 466
+          }
+        },
+        "user": null,
+        "incomplete_details": null,
+        "status": "completed",
+        "store": true,
+        "metadata": {
+          "system_fingerprint": "fp_eb3c003fc66c14ed"
+        },
+        "background": false,
+        "service_tier": "default",
+        "truncation": "disabled",
+        "top_logprobs": 0,
+        "presence_penalty": 0.0,
+        "frequency_penalty": 0.0,
+        "prompt_cache_key": null,
+        "max_tool_calls": null,
+        "safety_identifier": null,
+        "error": null,
+        "instructions": null
+      },
+      "mint_mentions": 1,
+      "mint_timestamps": [
+        "2026-07-12T17:04:36+00:00"
+      ],
+      "mint_in_window": 1,
+      "verdict": "OPERATORS WORKING \u2713"
+    },
+    {
+      "ticker": "SKHY",
+      "mint": "Co8gzijzHJdNEWoCayMX43oeoe5WiMBje9Vt7knD7Mo6",
+      "launched_at": "2026-07-11 03:14:12",
+      "launch_unix": 1783739652,
+      "window_end_unix": 1783739952,
+      "ticker_query": null,
+      "mint_query": null,
+      "ticker_query_sent": "$SKHY since_time:1783739652 until_time:1783739952",
+      "ticker_raw": {
+        "created_at": 1784330265,
+        "completed_at": 1784330265,
+        "id": "13408dfe-e8a2-9242-a749-5f1373f9cbf3",
+        "max_output_tokens": null,
+        "model": "grok-4.3",
+        "object": "response",
+        "output": [
+          {
+            "id": "rs_13408dfe-e8a2-9242-a749-5f1373f9cbf3",
+            "summary": [
+              {
+                "text": "The task is: Search X for: $SKHY since_time:1783739652 until_time:1783739952\n",
+                "type": "summary_text"
+              }
+            ],
+            "type": "reasoning",
+            "status": "completed"
+          },
+          {
+            "call_id": "xs_call-bd014d27-7638-4fa8-8479-44218749cd00-0",
+            "input": "{\"query\":\"$SKHY since_time:1783739652 until_time:1783739952\",\"limit\":\"10\",\"mode\":\"Latest\"}",
+            "name": "x_keyword_search",
+            "type": "custom_tool_call",
+            "id": "ctc_13408dfe-e8a2-9242-a749-5f1373f9cbf3_call-bd014d27-7638-4fa8-8479-44218749cd00-0",
+            "status": "completed"
+          },
+          {
+            "id": "tco_13408dfe-e8a2-9242-a749-5f1373f9cbf3_call-bd014d27-7638-4fa8-8479-44218749cd00-0",
+            "summary": [],
+            "type": "reasoning",
+            "status": "completed"
+          },
+          {
+            "content": [
+              {
+                "type": "output_text",
+                "text": "**Mentions of $SKHY** (all within the specified 5-minute window; timestamps converted to ISO 8601 UTC format):\n\n- **2026-07-11T03:15:06Z**: Post by @atsu_stock mentioning $SKHY (along with $SKHYV and $MU).[[1]](https://x.com/atsu_stock/status/2075780895693525494)\n- **2026-07-11T03:17:02Z**: Post by @itsjcmerlo with a detailed $SKHY / $MU pre-earnings thread.[[2]](https://x.com/itsjcmerlo/status/2075781383738314771)\n- **2026-07-11T03:17:44Z**: Post by @bpaynews noting Hyperliquid volume on SKHX/SKHY (with $SKHX and $SKHY tickers).[[3]](https://x.com/bpaynews/status/2075781557776707843)\n\n**Total unique accounts**: 3 (@atsu_stock, @itsjcmerlo, @bpaynews).",
+                "logprobs": [],
+                "annotations": [
+                  {
+                    "type": "url_citation",
+                    "url": "https://x.com/atsu_stock/status/2075780895693525494",
+                    "start_index": 205,
+                    "end_index": 263,
+                    "title": "1"
+                  },
+                  {
+                    "type": "url_citation",
+                    "url": "https://x.com/itsjcmerlo/status/2075781383738314771",
+                    "start_index": 360,
+                    "end_index": 418,
+                    "title": "2"
+                  },
+                  {
+                    "type": "url_citation",
+                    "url": "https://x.com/bpaynews/status/2075781557776707843",
+                    "start_index": 535,
+                    "end_index": 591,
+                    "title": "3"
+                  }
+                ]
+              }
+            ],
+            "id": "msg_13408dfe-e8a2-9242-a749-5f1373f9cbf3",
+            "role": "assistant",
+            "type": "message",
+            "status": "completed"
+          }
+        ],
+        "parallel_tool_calls": true,
+        "previous_response_id": null,
+        "reasoning": {
+          "effort": "low",
+          "summary": "detailed"
+        },
+        "temperature": 0.7,
+        "text": {
+          "format": {
+            "type": "text"
+          }
+        },
+        "tool_choice": "auto",
+        "tools": [
+          {
+            "type": "x_search"
+          }
+        ],
+        "top_p": 0.95,
+        "usage": {
+          "input_tokens": 4752,
+          "input_tokens_details": {
+            "cached_tokens": 3072
+          },
+          "output_tokens": 1118,
+          "output_tokens_details": {
+            "reasoning_tokens": 911
+          },
+          "total_tokens": 5870,
+          "num_sources_used": 0,
+          "num_server_side_tools_used": 1,
+          "cost_in_usd_ticks": 105094000,
+          "server_side_tool_usage_details": {
+            "web_search_calls": 0,
+            "x_search_calls": 1,
+            "code_interpreter_calls": 0,
+            "file_search_calls": 0,
+            "mcp_calls": 0,
+            "document_search_calls": 0,
+            "image_generation_calls": 0
+          },
+          "context_details": {
+            "input_tokens": 3170,
+            "output_tokens": 623
+          }
+        },
+        "user": null,
+        "incomplete_details": null,
+        "status": "completed",
+        "store": true,
+        "metadata": {
+          "system_fingerprint": "fp_eb3c003fc66c14ed"
+        },
+        "background": false,
+        "service_tier": "default",
+        "truncation": "disabled",
+        "top_logprobs": 0,
+        "presence_penalty": 0.0,
+        "frequency_penalty": 0.0,
+        "prompt_cache_key": null,
+        "max_tool_calls": null,
+        "safety_identifier": null,
+        "error": null,
+        "instructions": null
+      },
+      "ticker_mentions": 3,
+      "ticker_timestamps": [
+        "2026-07-11T03:15:06+00:00",
+        "2026-07-11T03:17:02+00:00",
+        "2026-07-11T03:17:44+00:00"
+      ],
+      "ticker_in_window": 3,
+      "mint_query_sent": "Co8gzijzHJdNEWoCayMX43oeoe5WiMBje9Vt7knD7Mo6 since_time:1783739652 until_time:1783739952",
+      "mint_raw": {
+        "created_at": 1784330279,
+        "completed_at": 1784330279,
+        "id": "8e380273-6185-9ef6-b6b8-149c9f19740c",
+        "max_output_tokens": null,
+        "model": "grok-4.3",
+        "object": "response",
+        "output": [
+          {
+            "id": "rs_8e380273-6185-9ef6-b6b8-149c9f19740c",
+            "summary": [
+              {
+                "text": "The question is: Search X for: Co8gzijzHJdNEWoCayMX43oeoe5WiMBje9Vt7knD7Mo6 since_time:1783739652 until_time:1783739952\nI need to use the x_keyword_search tool with the query \"Co8gzijzHJdNEWoCayMX43oeoe5WiMBje9Vt7knD7Mo6 since_time:1783739652 until_time:1783739952\".",
+                "type": "summary_text"
+              }
+            ],
+            "type": "reasoning",
+            "status": "completed"
+          },
+          {
+            "call_id": "xs_call-8a267acf-7a43-4c57-a578-52f7c0d8e49f-0",
+            "input": "{\"query\":\"Co8gzijzHJdNEWoCayMX43oeoe5WiMBje9Vt7knD7Mo6 since_time:1783739652 until_time:1783739952\",\"limit\":\"10\",\"mode\":\"Latest\"}",
+            "name": "x_keyword_search",
+            "type": "custom_tool_call",
+            "id": "ctc_8e380273-6185-9ef6-b6b8-149c9f19740c_call-8a267acf-7a43-4c57-a578-52f7c0d8e49f-0",
+            "status": "completed"
+          },
+          {
+            "id": "tco_8e380273-6185-9ef6-b6b8-149c9f19740c_call-8a267acf-7a43-4c57-a578-52f7c0d8e49f-0",
+            "summary": [],
+            "type": "reasoning",
+            "status": "completed"
+          },
+          {
+            "content": [
+              {
+                "type": "output_text",
+                "text": "**No mentions found.**\n\nTotal count of unique accounts: 0",
+                "logprobs": [],
+                "annotations": []
+              }
+            ],
+            "id": "msg_8e380273-6185-9ef6-b6b8-149c9f19740c",
+            "role": "assistant",
+            "type": "message",
+            "status": "completed"
+          }
+        ],
+        "parallel_tool_calls": true,
+        "previous_response_id": null,
+        "reasoning": {
+          "effort": "low",
+          "summary": "detailed"
+        },
+        "temperature": 0.7,
+        "text": {
+          "format": {
+            "type": "text"
+          }
+        },
+        "tool_choice": "auto",
+        "tools": [
+          {
+            "type": "x_search"
+          }
+        ],
+        "top_p": 0.95,
+        "usage": {
+          "input_tokens": 3898,
+          "input_tokens_details": {
+            "cached_tokens": 2688
+          },
+          "output_tokens": 903,
+          "output_tokens_details": {
+            "reasoning_tokens": 886
+          },
+          "total_tokens": 4801,
+          "num_sources_used": 0,
+          "num_server_side_tools_used": 1,
+          "cost_in_usd_ticks": 93076000,
+          "server_side_tool_usage_details": {
+            "web_search_calls": 0,
+            "x_search_calls": 1,
+            "code_interpreter_calls": 0,
+            "file_search_calls": 0,
+            "mcp_calls": 0,
+            "document_search_calls": 0,
+            "image_generation_calls": 0
+          },
+          "context_details": {
+            "input_tokens": 2292,
+            "output_tokens": 226
+          }
+        },
+        "user": null,
+        "incomplete_details": null,
+        "status": "completed",
+        "store": true,
+        "metadata": {
+          "system_fingerprint": "fp_eb3c003fc66c14ed"
+        },
+        "background": false,
+        "service_tier": "default",
+        "truncation": "disabled",
+        "top_logprobs": 0,
+        "presence_penalty": 0.0,
+        "frequency_penalty": 0.0,
+        "prompt_cache_key": null,
+        "max_tool_calls": null,
+        "safety_identifier": null,
+        "error": null,
+        "instructions": null
+      },
+      "mint_mentions": 0,
+      "mint_timestamps": [],
+      "mint_in_window": 0,
+      "verdict": "OPERATORS WORKING \u2713"
+    },
+    {
+      "ticker": "HOODIE",
+      "mint": "4euHEW3XCxJtj4jyRxGboQjv9d5T6Bg9q2pA7KM3ZaAC",
+      "launched_at": "2026-07-08 20:29:07",
+      "launch_unix": 1783542547,
+      "window_end_unix": 1783542847,
+      "ticker_query": null,
+      "mint_query": null,
+      "ticker_query_sent": "$HOODIE since_time:1783542547 until_time:1783542847",
+      "ticker_raw": {
+        "created_at": 1784330294,
+        "completed_at": 1784330294,
+        "id": "03d9b57c-276b-9f23-8d86-8b3facffcf7e",
+        "max_output_tokens": null,
+        "model": "grok-4.3",
+        "object": "response",
+        "output": [
+          {
+            "id": "rs_03d9b57c-276b-9f23-8d86-8b3facffcf7e",
+            "summary": [
+              {
+                "text": "The task is: Search X for: $HOODIE since_time:1783542547 until_time:1783542847\nI need to use the x_keyword_search tool with the query: \"$HOODIE since_time:1783542547 until_time:1783542847\"\n\nThe tool accepts \"since_time:unix, until_time:unix\" where unix is in seconds.\n\nYes.",
+                "type": "summary_text"
+              }
+            ],
+            "type": "reasoning",
+            "status": "completed"
+          },
+          {
+            "call_id": "xs_call-bfb6573b-67d8-4c6d-b8a4-ebdad367b875-0",
+            "input": "{\"query\":\"$HOODIE since_time:1783542547 until_time:1783542847\",\"limit\":\"10\",\"mode\":\"Latest\"}",
+            "name": "x_keyword_search",
+            "type": "custom_tool_call",
+            "id": "ctc_03d9b57c-276b-9f23-8d86-8b3facffcf7e_call-bfb6573b-67d8-4c6d-b8a4-ebdad367b875-0",
+            "status": "completed"
+          },
+          {
+            "id": "tco_03d9b57c-276b-9f23-8d86-8b3facffcf7e_call-bfb6573b-67d8-4c6d-b8a4-ebdad367b875-0",
+            "summary": [],
+            "type": "reasoning",
+            "status": "completed"
+          },
+          {
+            "content": [
+              {
+                "type": "output_text",
+                "text": "**Mentions found:**\n\n- **2026-07-08T20:32:10Z**: $HOODIE (by @tomjoo321)  \n- **2026-07-08T20:33:06Z**: $hoodie (by @0xOvertrade)\n\n**Total unique accounts:** 2",
+                "logprobs": [],
+                "annotations": [
+                  {
+                    "type": "url_citation",
+                    "url": "https://x.com/i/status/2074954953756393589",
+                    "start_index": 0,
+                    "end_index": 0,
+                    "title": "https://x.com/i/status/2074954953756393589"
+                  },
+                  {
+                    "type": "url_citation",
+                    "url": "https://x.com/i/status/2074954718296908025",
+                    "start_index": 0,
+                    "end_index": 0,
+                    "title": "https://x.com/i/status/2074954718296908025"
+                  }
+                ]
+              }
+            ],
+            "id": "msg_03d9b57c-276b-9f23-8d86-8b3facffcf7e",
+            "role": "assistant",
+            "type": "message",
+            "status": "completed"
+          }
+        ],
+        "parallel_tool_calls": true,
+        "previous_response_id": null,
+        "reasoning": {
+          "effort": "low",
+          "summary": "detailed"
+        },
+        "temperature": 0.7,
+        "text": {
+          "format": {
+            "type": "text"
+          }
+        },
+        "tool_choice": "auto",
+        "tools": [
+          {
+            "type": "x_search"
+          }
+        ],
+        "top_p": 0.95,
+        "usage": {
+          "input_tokens": 4064,
+          "input_tokens_details": {
+            "cached_tokens": 3072
+          },
+          "output_tokens": 975,
+          "output_tokens_details": {
+            "reasoning_tokens": 903
+          },
+          "total_tokens": 5039,
+          "num_sources_used": 0,
+          "num_server_side_tools_used": 1,
+          "cost_in_usd_ticks": 92919000,
+          "server_side_tool_usage_details": {
+            "web_search_calls": 0,
+            "x_search_calls": 1,
+            "code_interpreter_calls": 0,
+            "file_search_calls": 0,
+            "mcp_calls": 0,
+            "document_search_calls": 0,
+            "image_generation_calls": 0
+          },
+          "context_details": {
+            "input_tokens": 2481,
+            "output_tokens": 439
+          }
+        },
+        "user": null,
+        "incomplete_details": null,
+        "status": "completed",
+        "store": true,
+        "metadata": {
+          "system_fingerprint": "fp_eb3c003fc66c14ed"
+        },
+        "background": false,
+        "service_tier": "default",
+        "truncation": "disabled",
+        "top_logprobs": 0,
+        "presence_penalty": 0.0,
+        "frequency_penalty": 0.0,
+        "prompt_cache_key": null,
+        "max_tool_calls": null,
+        "safety_identifier": null,
+        "error": null,
+        "instructions": null
+      },
+      "ticker_mentions": 2,
+      "ticker_timestamps": [
+        "2026-07-08T20:32:10+00:00",
+        "2026-07-08T20:33:06+00:00"
+      ],
+      "ticker_in_window": 2,
+      "mint_query_sent": "4euHEW3XCxJtj4jyRxGboQjv9d5T6Bg9q2pA7KM3ZaAC since_time:1783542547 until_time:1783542847",
+      "mint_raw": {
+        "created_at": 1784330305,
+        "completed_at": 1784330305,
+        "id": "e60d2827-6848-9ca0-b53f-2b5abab8f9db",
+        "max_output_tokens": null,
+        "model": "grok-4.3",
+        "object": "response",
+        "output": [
+          {
+            "id": "rs_e60d2827-6848-9ca0-b53f-2b5abab8f9db",
+            "summary": [
+              {
+                "text": "The task is: Search X for: 4euHEW3XCxJtj4jyRxGboQjv9d5T6Bg9q2pA7KM3ZaAC since_time:1783542547 until_time:1783542847\n",
+                "type": "summary_text"
+              }
+            ],
+            "type": "reasoning",
+            "status": "completed"
+          },
+          {
+            "call_id": "xs_call-75a61982-c410-469d-93e1-e2cbfa22d611-0",
+            "input": "{\"query\":\"4euHEW3XCxJtj4jyRxGboQjv9d5T6Bg9q2pA7KM3ZaAC since_time:1783542547 until_time:1783542847\",\"limit\":\"10\",\"mode\":\"Latest\"}",
+            "name": "x_keyword_search",
+            "type": "custom_tool_call",
+            "id": "ctc_e60d2827-6848-9ca0-b53f-2b5abab8f9db_call-75a61982-c410-469d-93e1-e2cbfa22d611-0",
+            "status": "completed"
+          },
+          {
+            "id": "tco_e60d2827-6848-9ca0-b53f-2b5abab8f9db_call-75a61982-c410-469d-93e1-e2cbfa22d611-0",
+            "summary": [],
+            "type": "reasoning",
+            "status": "completed"
+          },
+          {
+            "content": [
+              {
+                "type": "output_text",
+                "text": "**No mentions found.**\n\nThe search for the specified string within the given time range returned zero results.\n\n**Total unique accounts:** 0",
+                "logprobs": [],
+                "annotations": []
+              }
+            ],
+            "id": "msg_e60d2827-6848-9ca0-b53f-2b5abab8f9db",
+            "role": "assistant",
+            "type": "message",
+            "status": "completed"
+          }
+        ],
+        "parallel_tool_calls": true,
+        "previous_response_id": null,
+        "reasoning": {
+          "effort": "low",
+          "summary": "detailed"
+        },
+        "temperature": 0.7,
+        "text": {
+          "format": {
+            "type": "text"
+          }
+        },
+        "tool_choice": "auto",
+        "tools": [
+          {
+            "type": "x_search"
+          }
+        ],
+        "top_p": 0.95,
+        "usage": {
+          "input_tokens": 3683,
+          "input_tokens_details": {
+            "cached_tokens": 3136
+          },
+          "output_tokens": 734,
+          "output_tokens_details": {
+            "reasoning_tokens": 703
+          },
+          "total_tokens": 4417,
+          "num_sources_used": 0,
+          "num_server_side_tools_used": 1,
+          "cost_in_usd_ticks": 81459500,
+          "server_side_tool_usage_details": {
+            "web_search_calls": 0,
+            "x_search_calls": 1,
+            "code_interpreter_calls": 0,
+            "file_search_calls": 0,
+            "mcp_calls": 0,
+            "document_search_calls": 0,
+            "image_generation_calls": 0
+          },
+          "context_details": {
+            "input_tokens": 2071,
+            "output_tokens": 284
+          }
+        },
+        "user": null,
+        "incomplete_details": null,
+        "status": "completed",
+        "store": true,
+        "metadata": {
+          "system_fingerprint": "fp_eb3c003fc66c14ed"
+        },
+        "background": false,
+        "service_tier": "default",
+        "truncation": "disabled",
+        "top_logprobs": 0,
+        "presence_penalty": 0.0,
+        "frequency_penalty": 0.0,
+        "prompt_cache_key": null,
+        "max_tool_calls": null,
+        "safety_identifier": null,
+        "error": null,
+        "instructions": null
+      },
+      "mint_mentions": 0,
+      "mint_timestamps": [],
+      "mint_in_window": 0,
+      "verdict": "OPERATORS WORKING \u2713"
+    },
+    {
+      "ticker": "INDEX",
+      "mint": "XqF7TY2r3UbuTya71stLcoejHiHGKy38UJUu8itpump",
+      "launched_at": "2026-07-15 20:07:10",
+      "launch_unix": 1784146030,
+      "window_end_unix": 1784146330,
+      "ticker_query": null,
+      "mint_query": null,
+      "ticker_query_sent": "$INDEX since_time:1784146030 until_time:1784146330",
+      "ticker_raw": {
+        "created_at": 1784330314,
+        "completed_at": 1784330314,
+        "id": "ca77b9ee-2d45-9cfc-9c7a-c6ecabc637c7",
+        "max_output_tokens": null,
+        "model": "grok-4.3",
+        "object": "response",
+        "output": [
+          {
+            "id": "rs_ca77b9ee-2d45-9cfc-9c7a-c6ecabc637c7",
+            "summary": [
+              {
+                "text": "The task is: \"Search X for: $INDEX since_time:1784146030 until_time:1784146330 List each mention with its approximate UTC timestamp (ISO format). Then report the total count of unique accounts that me...",
+                "type": "summary_text"
+              }
+            ],
+            "type": "reasoning",
+            "status": "completed"
+          },
+          {
+            "call_id": "xs_call-c1abb1fc-6847-474f-bce8-2242d3c36cdd-0",
+            "input": "{\"query\":\"$INDEX since_time:1784146030 until_time:1784146330\",\"limit\":\"10\",\"mode\":\"Latest\"}",
+            "name": "x_keyword_search",
+            "type": "custom_tool_call",
+            "id": "ctc_ca77b9ee-2d45-9cfc-9c7a-c6ecabc637c7_call-c1abb1fc-6847-474f-bce8-2242d3c36cdd-0",
+            "status": "completed"
+          },
+          {
+            "id": "tco_ca77b9ee-2d45-9cfc-9c7a-c6ecabc637c7_call-c1abb1fc-6847-474f-bce8-2242d3c36cdd-0",
+            "summary": [],
+            "type": "reasoning",
+            "status": "completed"
+          },
+          {
+            "content": [
+              {
+                "type": "output_text",
+                "text": "**No posts found** matching the query `$INDEX since_time:1784146030 until_time:1784146330`.\n\n- Total unique accounts that mentioned it: **0**",
+                "logprobs": [],
+                "annotations": []
+              }
+            ],
+            "id": "msg_ca77b9ee-2d45-9cfc-9c7a-c6ecabc637c7",
+            "role": "assistant",
+            "type": "message",
+            "status": "completed"
+          }
+        ],
+        "parallel_tool_calls": true,
+        "previous_response_id": null,
+        "reasoning": {
+          "effort": "low",
+          "summary": "detailed"
+        },
+        "temperature": 0.7,
+        "text": {
+          "format": {
+            "type": "text"
+          }
+        },
+        "tool_choice": "auto",
+        "tools": [
+          {
+            "type": "x_search"
+          }
+        ],
+        "top_p": 0.95,
+        "usage": {
+          "input_tokens": 3453,
+          "input_tokens_details": {
+            "cached_tokens": 3072
+          },
+          "output_tokens": 497,
+          "output_tokens_details": {
+            "reasoning_tokens": 457
+          },
+          "total_tokens": 3950,
+          "num_sources_used": 0,
+          "num_server_side_tools_used": 1,
+          "cost_in_usd_ticks": 73331500,
+          "server_side_tool_usage_details": {
+            "web_search_calls": 0,
+            "x_search_calls": 1,
+            "code_interpreter_calls": 0,
+            "file_search_calls": 0,
+            "mcp_calls": 0,
+            "document_search_calls": 0,
+            "image_generation_calls": 0
+          },
+          "context_details": {
+            "input_tokens": 1872,
+            "output_tokens": 215
+          }
+        },
+        "user": null,
+        "incomplete_details": null,
+        "status": "completed",
+        "store": true,
+        "metadata": {
+          "system_fingerprint": "fp_eb3c003fc66c14ed"
+        },
+        "background": false,
+        "service_tier": "default",
+        "truncation": "disabled",
+        "top_logprobs": 0,
+        "presence_penalty": 0.0,
+        "frequency_penalty": 0.0,
+        "prompt_cache_key": null,
+        "max_tool_calls": null,
+        "safety_identifier": null,
+        "error": null,
+        "instructions": null
+      },
+      "ticker_mentions": 0,
+      "ticker_timestamps": [],
+      "ticker_in_window": 0,
+      "mint_query_sent": "XqF7TY2r3UbuTya71stLcoejHiHGKy38UJUu8itpump since_time:1784146030 until_time:1784146330",
+      "mint_raw": {
+        "created_at": 1784330322,
+        "completed_at": 1784330322,
+        "id": "11686775-d560-9563-9f3e-9c443708ac51",
+        "max_output_tokens": null,
+        "model": "grok-4.3",
+        "object": "response",
+        "output": [
+          {
+            "id": "rs_11686775-d560-9563-9f3e-9c443708ac51",
+            "summary": [
+              {
+                "text": "The task is: Search X for: XqF7TY2r3UbuTya71stLcoejHiHGKy38UJUu8itpump since_time:1784146030 until_time:1784146330\n",
+                "type": "summary_text"
+              }
+            ],
+            "type": "reasoning",
+            "status": "completed"
+          },
+          {
+            "call_id": "xs_call-67f2cf50-9c54-4ec4-9a5f-91d6991e973d-0",
+            "input": "{\"query\":\"XqF7TY2r3UbuTya71stLcoejHiHGKy38UJUu8itpump since_time:1784146030 until_time:1784146330\",\"limit\":\"10\",\"mode\":\"Latest\"}",
+            "name": "x_keyword_search",
+            "type": "custom_tool_call",
+            "id": "ctc_11686775-d560-9563-9f3e-9c443708ac51_call-67f2cf50-9c54-4ec4-9a5f-91d6991e973d-0",
+            "status": "completed"
+          },
+          {
+            "id": "tco_11686775-d560-9563-9f3e-9c443708ac51_call-67f2cf50-9c54-4ec4-9a5f-91d6991e973d-0",
+            "summary": [],
+            "type": "reasoning",
+            "status": "completed"
+          },
+          {
+            "content": [
+              {
+                "type": "output_text",
+                "text": "**No mentions found.**\n\nThe search returned 0 results for the specified query and time range (1784146030 to 1784146330 Unix time).\n\n- **Total unique accounts that mentioned it**: 0",
+                "logprobs": [],
+                "annotations": []
+              }
+            ],
+            "id": "msg_11686775-d560-9563-9f3e-9c443708ac51",
+            "role": "assistant",
+            "type": "message",
+            "status": "completed"
+          }
+        ],
+        "parallel_tool_calls": true,
+        "previous_response_id": null,
+        "reasoning": {
+          "effort": "low",
+          "summary": "detailed"
+        },
+        "temperature": 0.7,
+        "text": {
+          "format": {
+            "type": "text"
+          }
+        },
+        "tool_choice": "auto",
+        "tools": [
+          {
+            "type": "x_search"
+          }
+        ],
+        "top_p": 0.95,
+        "usage": {
+          "input_tokens": 3555,
+          "input_tokens_details": {
+            "cached_tokens": 3136
+          },
+          "output_tokens": 493,
+          "output_tokens_details": {
+            "reasoning_tokens": 446
+          },
+          "total_tokens": 4048,
+          "num_sources_used": 0,
+          "num_server_side_tools_used": 1,
+          "cost_in_usd_ticks": 73834500,
+          "server_side_tool_usage_details": {
+            "web_search_calls": 0,
+            "x_search_calls": 1,
+            "code_interpreter_calls": 0,
+            "file_search_calls": 0,
+            "mcp_calls": 0,
+            "document_search_calls": 0,
+            "image_generation_calls": 0
+          },
+          "context_details": {
+            "input_tokens": 1949,
+            "output_tokens": 159
+          }
+        },
+        "user": null,
+        "incomplete_details": null,
+        "status": "completed",
+        "store": true,
+        "metadata": {
+          "system_fingerprint": "fp_eb3c003fc66c14ed"
+        },
+        "background": false,
+        "service_tier": "default",
+        "truncation": "disabled",
+        "top_logprobs": 0,
+        "presence_penalty": 0.0,
+        "frequency_penalty": 0.0,
+        "prompt_cache_key": null,
+        "max_tool_calls": null,
+        "safety_identifier": null,
+        "error": null,
+        "instructions": null
+      },
+      "mint_mentions": 0,
+      "mint_timestamps": [],
+      "mint_in_window": 0,
+      "verdict": "NO MENTIONS FOUND -"
+    },
+    {
+      "ticker": "HOOD",
+      "mint": "Bf4DZ8rzMiuyLnVdUCwP7bV8L4UW7x7mAAasuqrVhQUJ",
+      "launched_at": "2026-07-13 22:50:26",
+      "launch_unix": 1783983026,
+      "window_end_unix": 1783983326,
+      "ticker_query": null,
+      "mint_query": null,
+      "ticker_query_sent": "$HOOD since_time:1783983026 until_time:1783983326",
+      "ticker_raw": {
+        "created_at": 1784330334,
+        "completed_at": 1784330334,
+        "id": "127cf82c-0d97-9366-846e-2933eeec2f9b",
+        "max_output_tokens": null,
+        "model": "grok-4.3",
+        "object": "response",
+        "output": [
+          {
+            "id": "rs_127cf82c-0d97-9366-846e-2933eeec2f9b",
+            "summary": [
+              {
+                "text": "The task is: Search X for: $HOOD since_time:1783983026 until_time:1783983326\n",
+                "type": "summary_text"
+              }
+            ],
+            "type": "reasoning",
+            "status": "completed"
+          },
+          {
+            "call_id": "xs_call-d5c1603e-eab5-48fb-bd78-c65a3b3ac9c3-0",
+            "input": "{\"query\":\"$HOOD since_time:1783983026 until_time:1783983326\",\"limit\":\"10\",\"mode\":\"Latest\"}",
+            "name": "x_keyword_search",
+            "type": "custom_tool_call",
+            "id": "ctc_127cf82c-0d97-9366-846e-2933eeec2f9b_call-d5c1603e-eab5-48fb-bd78-c65a3b3ac9c3-0",
+            "status": "completed"
+          },
+          {
+            "id": "tco_127cf82c-0d97-9366-846e-2933eeec2f9b_call-d5c1603e-eab5-48fb-bd78-c65a3b3ac9c3-0",
+            "summary": [],
+            "type": "reasoning",
+            "status": "completed"
+          },
+          {
+            "content": [
+              {
+                "type": "output_text",
+                "text": "**Mentions of $HOOD in the specified time window (2026-07-13 22:51:02Z to 22:54:54Z):**\n\n- **2026-07-13T22:54:54Z** \u2014 @intai1112: \"\u8acb\u554f\u6709\u4eba\u63a8\u85a6\u4e00\u5b9a\u8981\u8ffd\u8e64\u7684 @X \u5e63\u5708\u5e33\u865f\u55ce\uff1f ethereum:native $HOOD\"\n- **2026-07-13T22:53:35Z** \u2014 @MBGBuzzer: \"SEND IT $HOOD 0x6966aa526a2a3e9e9e25c034c6c411474eab0f6d\"\n- **2026-07-13T22:51:59Z** \u2014 @CyberZyph: \"Everyone should be watching this. $hood https://twitter.com/i/broadcasts/1jxXggobMEzJZ\"\n- **2026-07-13T22:51:08Z** \u2014 @DaoKingdom: (reply/quote about $HOOD tokenization on Ethereum)\n- **2026-07-13T22:51:02Z** \u2014 @scuffed_gullet: \"Looking at a very bullish trend for $HOOD. ... CA: 0xeb98304f8b37736170f929882f01daebb56aaec8\"\n\n**Total unique accounts:** 5",
+                "logprobs": [],
+                "annotations": [
+                  {
+                    "type": "url_citation",
+                    "url": "https://x.com/i/status/2076801844861370632",
+                    "start_index": 0,
+                    "end_index": 0,
+                    "title": "https://x.com/i/status/2076801844861370632"
+                  },
+                  {
+                    "type": "url_citation",
+                    "url": "https://x.com/i/status/2076802246562517089",
+                    "start_index": 0,
+                    "end_index": 0,
+                    "title": "https://x.com/i/status/2076802246562517089"
+                  },
+                  {
+                    "type": "url_citation",
+                    "url": "https://x.com/i/status/2076801632432464333",
+                    "start_index": 0,
+                    "end_index": 0,
+                    "title": "https://x.com/i/status/2076801632432464333"
+                  },
+                  {
+                    "type": "url_citation",
+                    "url": "https://x.com/i/status/2076801604955898046",
+                    "start_index": 0,
+                    "end_index": 0,
+                    "title": "https://x.com/i/status/2076801604955898046"
+                  },
+                  {
+                    "type": "url_citation",
+                    "url": "https://x.com/i/status/2076802576432218571",
+                    "start_index": 0,
+                    "end_index": 0,
+                    "title": "https://x.com/i/status/2076802576432218571"
+                  }
+                ]
+              }
+            ],
+            "id": "msg_127cf82c-0d97-9366-846e-2933eeec2f9b",
+            "role": "assistant",
+            "type": "message",
+            "status": "completed"
+          }
+        ],
+        "parallel_tool_calls": true,
+        "previous_response_id": null,
+        "reasoning": {
+          "effort": "low",
+          "summary": "detailed"
+        },
+        "temperature": 0.7,
+        "text": {
+          "format": {
+            "type": "text"
+          }
+        },
+        "tool_choice": "auto",
+        "tools": [
+          {
+            "type": "x_search"
+          }
+        ],
+        "top_p": 0.95,
+        "usage": {
+          "input_tokens": 4691,
+          "input_tokens_details": {
+            "cached_tokens": 3072
+          },
+          "output_tokens": 961,
+          "output_tokens_details": {
+            "reasoning_tokens": 663
+          },
+          "total_tokens": 5652,
+          "num_sources_used": 0,
+          "num_server_side_tools_used": 1,
+          "cost_in_usd_ticks": 100406500,
+          "server_side_tool_usage_details": {
+            "web_search_calls": 0,
+            "x_search_calls": 1,
+            "code_interpreter_calls": 0,
+            "file_search_calls": 0,
+            "mcp_calls": 0,
+            "document_search_calls": 0,
+            "image_generation_calls": 0
+          },
+          "context_details": {
+            "input_tokens": 3109,
+            "output_tokens": 738
+          }
+        },
+        "user": null,
+        "incomplete_details": null,
+        "status": "completed",
+        "store": true,
+        "metadata": {
+          "system_fingerprint": "fp_eb3c003fc66c14ed"
+        },
+        "background": false,
+        "service_tier": "default",
+        "truncation": "disabled",
+        "top_logprobs": 0,
+        "presence_penalty": 0.0,
+        "frequency_penalty": 0.0,
+        "prompt_cache_key": null,
+        "max_tool_calls": null,
+        "safety_identifier": null,
+        "error": null,
+        "instructions": null
+      },
+      "ticker_mentions": 6,
+      "ticker_timestamps": [
+        "2026-07-13T22:51:02+00:00",
+        "2026-07-13T22:54:54+00:00",
+        "2026-07-13T22:53:35+00:00",
+        "2026-07-13T22:51:59+00:00",
+        "2026-07-13T22:51:08+00:00",
+        "2026-07-13T22:51:02+00:00"
+      ],
+      "ticker_in_window": 6,
+      "mint_query_sent": "Bf4DZ8rzMiuyLnVdUCwP7bV8L4UW7x7mAAasuqrVhQUJ since_time:1783983026 until_time:1783983326",
+      "mint_raw": {
+        "created_at": 1784330344,
+        "completed_at": 1784330344,
+        "id": "62191de9-da96-9b1c-be91-8cf2e20fefa7",
+        "max_output_tokens": null,
+        "model": "grok-4.3",
+        "object": "response",
+        "output": [
+          {
+            "id": "rs_62191de9-da96-9b1c-be91-8cf2e20fefa7",
+            "summary": [
+              {
+                "text": "The task is: Search X for: Bf4DZ8rzMiuyLnVdUCwP7bV8L4UW7x7mAAasuqrVhQUJ since_time:1783983026 until_time:1783983326\n",
+                "type": "summary_text"
+              }
+            ],
+            "type": "reasoning",
+            "status": "completed"
+          },
+          {
+            "call_id": "xs_call-d9d3d14d-7827-428b-b557-b27e0cea4495-0",
+            "input": "{\"query\":\"Bf4DZ8rzMiuyLnVdUCwP7bV8L4UW7x7mAAasuqrVhQUJ since_time:1783983026 until_time:1783983326\",\"limit\":\"10\",\"mode\":\"Latest\"}",
+            "name": "x_keyword_search",
+            "type": "custom_tool_call",
+            "id": "ctc_62191de9-da96-9b1c-be91-8cf2e20fefa7_call-d9d3d14d-7827-428b-b557-b27e0cea4495-0",
+            "status": "completed"
+          },
+          {
+            "id": "tco_62191de9-da96-9b1c-be91-8cf2e20fefa7_call-d9d3d14d-7827-428b-b557-b27e0cea4495-0",
+            "summary": [],
+            "type": "reasoning",
+            "status": "completed"
+          },
+          {
+            "content": [
+              {
+                "type": "output_text",
+                "text": "**No mentions found** in the specified time range.\n\n- List of mentions: (empty)\n- Total count of unique accounts: 0\n\n(The search was performed using the exact query string with the provided `since_time`/`until_time` Unix timestamp filters via the X advanced search tool; the 5-minute window yielded zero matching posts.)",
+                "logprobs": [],
+                "annotations": []
+              }
+            ],
+            "id": "msg_62191de9-da96-9b1c-be91-8cf2e20fefa7",
+            "role": "assistant",
+            "type": "message",
+            "status": "completed"
+          }
+        ],
+        "parallel_tool_calls": true,
+        "previous_response_id": null,
+        "reasoning": {
+          "effort": "low",
+          "summary": "detailed"
+        },
+        "temperature": 0.7,
+        "text": {
+          "format": {
+            "type": "text"
+          }
+        },
+        "tool_choice": "auto",
+        "tools": [
+          {
+            "type": "x_search"
+          }
+        ],
+        "top_p": 0.95,
+        "usage": {
+          "input_tokens": 3735,
+          "input_tokens_details": {
+            "cached_tokens": 3136
+          },
+          "output_tokens": 748,
+          "output_tokens_details": {
+            "reasoning_tokens": 675
+          },
+          "total_tokens": 4483,
+          "num_sources_used": 0,
+          "num_server_side_tools_used": 1,
+          "cost_in_usd_ticks": 82459500,
+          "server_side_tool_usage_details": {
+            "web_search_calls": 0,
+            "x_search_calls": 1,
+            "code_interpreter_calls": 0,
+            "file_search_calls": 0,
+            "mcp_calls": 0,
+            "document_search_calls": 0,
+            "image_generation_calls": 0
+          },
+          "context_details": {
+            "input_tokens": 2126,
+            "output_tokens": 240
+          }
+        },
+        "user": null,
+        "incomplete_details": null,
+        "status": "completed",
+        "store": true,
+        "metadata": {
+          "system_fingerprint": "fp_eb3c003fc66c14ed"
+        },
+        "background": false,
+        "service_tier": "default",
+        "truncation": "disabled",
+        "top_logprobs": 0,
+        "presence_penalty": 0.0,
+        "frequency_penalty": 0.0,
+        "prompt_cache_key": null,
+        "max_tool_calls": null,
+        "safety_identifier": null,
+        "error": null,
+        "instructions": null
+      },
+      "mint_mentions": 0,
+      "mint_timestamps": [],
+      "mint_in_window": 0,
+      "verdict": "OPERATORS WORKING \u2713"
+    }
+  ],
+  "raw_responses": {
+    "WOOD_ticker": {
+      "created_at": 1784330235,
+      "completed_at": 1784330235,
+      "id": "3972fc1b-164d-9a92-a4e6-d0fd2d8a3f8a",
+      "max_output_tokens": null,
+      "model": "grok-4.3",
+      "object": "response",
+      "output": [
+        {
+          "id": "rs_3972fc1b-164d-9a92-a4e6-d0fd2d8a3f8a",
+          "summary": [
+            {
+              "text": "The task is: \"Search X for: $WOOD since_time:1783875859 until_time:1783876159",
+              "type": "summary_text"
+            }
+          ],
+          "type": "reasoning",
+          "status": "completed"
+        },
+        {
+          "call_id": "xs_call-a3506af1-d86e-49af-a97c-ac01caf08f6a-0",
+          "input": "{\"query\":\"$WOOD since_time:1783875859 until_time:1783876159\",\"limit\":\"10\",\"mode\":\"Latest\"}",
+          "name": "x_keyword_search",
+          "type": "custom_tool_call",
+          "id": "ctc_3972fc1b-164d-9a92-a4e6-d0fd2d8a3f8a_call-a3506af1-d86e-49af-a97c-ac01caf08f6a-0",
+          "status": "completed"
+        },
+        {
+          "id": "tco_3972fc1b-164d-9a92-a4e6-d0fd2d8a3f8a_call-a3506af1-d86e-49af-a97c-ac01caf08f6a-0",
+          "summary": [],
+          "type": "reasoning",
+          "status": "completed"
+        },
+        {
+          "content": [
+            {
+              "type": "output_text",
+              "text": "**No mentions found.**\n\nThe search for `$WOOD since_time:1783875859 until_time:1783876159` returned no results.\n\n- Total count of unique accounts: **0**",
+              "logprobs": [],
+              "annotations": []
+            }
+          ],
+          "id": "msg_3972fc1b-164d-9a92-a4e6-d0fd2d8a3f8a",
+          "role": "assistant",
+          "type": "message",
+          "status": "completed"
+        }
+      ],
+      "parallel_tool_calls": true,
+      "previous_response_id": null,
+      "reasoning": {
+        "effort": "low",
+        "summary": "detailed"
+      },
+      "temperature": 0.7,
+      "text": {
+        "format": {
+          "type": "text"
+        }
+      },
+      "tool_choice": "auto",
+      "tools": [
+        {
+          "type": "x_search"
+        }
+      ],
+      "top_p": 0.95,
+      "usage": {
+        "input_tokens": 3690,
+        "input_tokens_details": {
+          "cached_tokens": 3008
+        },
+        "output_tokens": 886,
+        "output_tokens_details": {
+          "reasoning_tokens": 843
+        },
+        "total_tokens": 4576,
+        "num_sources_used": 0,
+        "num_server_side_tools_used": 1,
+        "cost_in_usd_ticks": 86691000,
+        "server_side_tool_usage_details": {
+          "web_search_calls": 0,
+          "x_search_calls": 1,
+          "code_interpreter_calls": 0,
+          "file_search_calls": 0,
+          "mcp_calls": 0,
+          "document_search_calls": 0,
+          "image_generation_calls": 0
+        },
+        "context_details": {
+          "input_tokens": 2109,
+          "output_tokens": 367
+        }
+      },
+      "user": null,
+      "incomplete_details": null,
+      "status": "completed",
+      "store": true,
+      "metadata": {
+        "system_fingerprint": "fp_eb3c003fc66c14ed"
+      },
+      "background": false,
+      "service_tier": "default",
+      "truncation": "disabled",
+      "top_logprobs": 0,
+      "presence_penalty": 0.0,
+      "frequency_penalty": 0.0,
+      "prompt_cache_key": null,
+      "max_tool_calls": null,
+      "safety_identifier": null,
+      "error": null,
+      "instructions": null
+    },
+    "WOOD_mint": {
+      "created_at": 1784330248,
+      "completed_at": 1784330248,
+      "id": "e953ff21-5be6-98ac-90f5-b4bc8c1ce58b",
+      "max_output_tokens": null,
+      "model": "grok-4.3",
+      "object": "response",
+      "output": [
+        {
+          "id": "rs_e953ff21-5be6-98ac-90f5-b4bc8c1ce58b",
+          "summary": [
+            {
+              "text": "The task is: Search X for: aNM35husY4h11AgD6F5Wqd9BgoaWMyJQBBSGBndpump since_time:1783875859 until_time:1783876159\n",
+              "type": "summary_text"
+            }
+          ],
+          "type": "reasoning",
+          "status": "completed"
+        },
+        {
+          "call_id": "xs_call-cc0606ea-f8b8-45c0-8ce5-bf3f61b4be0c-0",
+          "input": "{\"query\":\"aNM35husY4h11AgD6F5Wqd9BgoaWMyJQBBSGBndpump since_time:1783875859 until_time:1783876159\",\"limit\":\"10\",\"mode\":\"Latest\"}",
+          "name": "x_keyword_search",
+          "type": "custom_tool_call",
+          "id": "ctc_e953ff21-5be6-98ac-90f5-b4bc8c1ce58b_call-cc0606ea-f8b8-45c0-8ce5-bf3f61b4be0c-0",
+          "status": "completed"
+        },
+        {
+          "id": "tco_e953ff21-5be6-98ac-90f5-b4bc8c1ce58b_call-cc0606ea-f8b8-45c0-8ce5-bf3f61b4be0c-0",
+          "summary": [],
+          "type": "reasoning",
+          "status": "completed"
+        },
+        {
+          "content": [
+            {
+              "type": "output_text",
+              "text": "**Mentions found (1 total):**\n\n- @dogwifhood_xyz: 2026-07-12T17:04:36Z\n\n**Total unique accounts:** 1",
+              "logprobs": [],
+              "annotations": [
+                {
+                  "type": "url_citation",
+                  "url": "https://x.com/i/status/2076352036493213796",
+                  "start_index": 0,
+                  "end_index": 0,
+                  "title": "https://x.com/i/status/2076352036493213796"
+                }
+              ]
+            }
+          ],
+          "id": "msg_e953ff21-5be6-98ac-90f5-b4bc8c1ce58b",
+          "role": "assistant",
+          "type": "message",
+          "status": "completed"
+        }
+      ],
+      "parallel_tool_calls": true,
+      "previous_response_id": null,
+      "reasoning": {
+        "effort": "low",
+        "summary": "detailed"
+      },
+      "temperature": 0.7,
+      "text": {
+        "format": {
+          "type": "text"
+        }
+      },
+      "tool_choice": "auto",
+      "tools": [
+        {
+          "type": "x_search"
+        }
+      ],
+      "top_p": 0.95,
+      "usage": {
+        "input_tokens": 3798,
+        "input_tokens_details": {
+          "cached_tokens": 3136
+        },
+        "output_tokens": 803,
+        "output_tokens_details": {
+          "reasoning_tokens": 761
+        },
+        "total_tokens": 4601,
+        "num_sources_used": 0,
+        "num_server_side_tools_used": 1,
+        "cost_in_usd_ticks": 84622000,
+        "server_side_tool_usage_details": {
+          "web_search_calls": 0,
+          "x_search_calls": 1,
+          "code_interpreter_calls": 0,
+          "file_search_calls": 0,
+          "mcp_calls": 0,
+          "document_search_calls": 0,
+          "image_generation_calls": 0
+        },
+        "context_details": {
+          "input_tokens": 2192,
+          "output_tokens": 466
+        }
+      },
+      "user": null,
+      "incomplete_details": null,
+      "status": "completed",
+      "store": true,
+      "metadata": {
+        "system_fingerprint": "fp_eb3c003fc66c14ed"
+      },
+      "background": false,
+      "service_tier": "default",
+      "truncation": "disabled",
+      "top_logprobs": 0,
+      "presence_penalty": 0.0,
+      "frequency_penalty": 0.0,
+      "prompt_cache_key": null,
+      "max_tool_calls": null,
+      "safety_identifier": null,
+      "error": null,
+      "instructions": null
+    },
+    "SKHY_ticker": {
+      "created_at": 1784330265,
+      "completed_at": 1784330265,
+      "id": "13408dfe-e8a2-9242-a749-5f1373f9cbf3",
+      "max_output_tokens": null,
+      "model": "grok-4.3",
+      "object": "response",
+      "output": [
+        {
+          "id": "rs_13408dfe-e8a2-9242-a749-5f1373f9cbf3",
+          "summary": [
+            {
+              "text": "The task is: Search X for: $SKHY since_time:1783739652 until_time:1783739952\n",
+              "type": "summary_text"
+            }
+          ],
+          "type": "reasoning",
+          "status": "completed"
+        },
+        {
+          "call_id": "xs_call-bd014d27-7638-4fa8-8479-44218749cd00-0",
+          "input": "{\"query\":\"$SKHY since_time:1783739652 until_time:1783739952\",\"limit\":\"10\",\"mode\":\"Latest\"}",
+          "name": "x_keyword_search",
+          "type": "custom_tool_call",
+          "id": "ctc_13408dfe-e8a2-9242-a749-5f1373f9cbf3_call-bd014d27-7638-4fa8-8479-44218749cd00-0",
+          "status": "completed"
+        },
+        {
+          "id": "tco_13408dfe-e8a2-9242-a749-5f1373f9cbf3_call-bd014d27-7638-4fa8-8479-44218749cd00-0",
+          "summary": [],
+          "type": "reasoning",
+          "status": "completed"
+        },
+        {
+          "content": [
+            {
+              "type": "output_text",
+              "text": "**Mentions of $SKHY** (all within the specified 5-minute window; timestamps converted to ISO 8601 UTC format):\n\n- **2026-07-11T03:15:06Z**: Post by @atsu_stock mentioning $SKHY (along with $SKHYV and $MU).[[1]](https://x.com/atsu_stock/status/2075780895693525494)\n- **2026-07-11T03:17:02Z**: Post by @itsjcmerlo with a detailed $SKHY / $MU pre-earnings thread.[[2]](https://x.com/itsjcmerlo/status/2075781383738314771)\n- **2026-07-11T03:17:44Z**: Post by @bpaynews noting Hyperliquid volume on SKHX/SKHY (with $SKHX and $SKHY tickers).[[3]](https://x.com/bpaynews/status/2075781557776707843)\n\n**Total unique accounts**: 3 (@atsu_stock, @itsjcmerlo, @bpaynews).",
+              "logprobs": [],
+              "annotations": [
+                {
+                  "type": "url_citation",
+                  "url": "https://x.com/atsu_stock/status/2075780895693525494",
+                  "start_index": 205,
+                  "end_index": 263,
+                  "title": "1"
+                },
+                {
+                  "type": "url_citation",
+                  "url": "https://x.com/itsjcmerlo/status/2075781383738314771",
+                  "start_index": 360,
+                  "end_index": 418,
+                  "title": "2"
+                },
+                {
+                  "type": "url_citation",
+                  "url": "https://x.com/bpaynews/status/2075781557776707843",
+                  "start_index": 535,
+                  "end_index": 591,
+                  "title": "3"
+                }
+              ]
+            }
+          ],
+          "id": "msg_13408dfe-e8a2-9242-a749-5f1373f9cbf3",
+          "role": "assistant",
+          "type": "message",
+          "status": "completed"
+        }
+      ],
+      "parallel_tool_calls": true,
+      "previous_response_id": null,
+      "reasoning": {
+        "effort": "low",
+        "summary": "detailed"
+      },
+      "temperature": 0.7,
+      "text": {
+        "format": {
+          "type": "text"
+        }
+      },
+      "tool_choice": "auto",
+      "tools": [
+        {
+          "type": "x_search"
+        }
+      ],
+      "top_p": 0.95,
+      "usage": {
+        "input_tokens": 4752,
+        "input_tokens_details": {
+          "cached_tokens": 3072
+        },
+        "output_tokens": 1118,
+        "output_tokens_details": {
+          "reasoning_tokens": 911
+        },
+        "total_tokens": 5870,
+        "num_sources_used": 0,
+        "num_server_side_tools_used": 1,
+        "cost_in_usd_ticks": 105094000,
+        "server_side_tool_usage_details": {
+          "web_search_calls": 0,
+          "x_search_calls": 1,
+          "code_interpreter_calls": 0,
+          "file_search_calls": 0,
+          "mcp_calls": 0,
+          "document_search_calls": 0,
+          "image_generation_calls": 0
+        },
+        "context_details": {
+          "input_tokens": 3170,
+          "output_tokens": 623
+        }
+      },
+      "user": null,
+      "incomplete_details": null,
+      "status": "completed",
+      "store": true,
+      "metadata": {
+        "system_fingerprint": "fp_eb3c003fc66c14ed"
+      },
+      "background": false,
+      "service_tier": "default",
+      "truncation": "disabled",
+      "top_logprobs": 0,
+      "presence_penalty": 0.0,
+      "frequency_penalty": 0.0,
+      "prompt_cache_key": null,
+      "max_tool_calls": null,
+      "safety_identifier": null,
+      "error": null,
+      "instructions": null
+    },
+    "SKHY_mint": {
+      "created_at": 1784330279,
+      "completed_at": 1784330279,
+      "id": "8e380273-6185-9ef6-b6b8-149c9f19740c",
+      "max_output_tokens": null,
+      "model": "grok-4.3",
+      "object": "response",
+      "output": [
+        {
+          "id": "rs_8e380273-6185-9ef6-b6b8-149c9f19740c",
+          "summary": [
+            {
+              "text": "The question is: Search X for: Co8gzijzHJdNEWoCayMX43oeoe5WiMBje9Vt7knD7Mo6 since_time:1783739652 until_time:1783739952\nI need to use the x_keyword_search tool with the query \"Co8gzijzHJdNEWoCayMX43oeoe5WiMBje9Vt7knD7Mo6 since_time:1783739652 until_time:1783739952\".",
+              "type": "summary_text"
+            }
+          ],
+          "type": "reasoning",
+          "status": "completed"
+        },
+        {
+          "call_id": "xs_call-8a267acf-7a43-4c57-a578-52f7c0d8e49f-0",
+          "input": "{\"query\":\"Co8gzijzHJdNEWoCayMX43oeoe5WiMBje9Vt7knD7Mo6 since_time:1783739652 until_time:1783739952\",\"limit\":\"10\",\"mode\":\"Latest\"}",
+          "name": "x_keyword_search",
+          "type": "custom_tool_call",
+          "id": "ctc_8e380273-6185-9ef6-b6b8-149c9f19740c_call-8a267acf-7a43-4c57-a578-52f7c0d8e49f-0",
+          "status": "completed"
+        },
+        {
+          "id": "tco_8e380273-6185-9ef6-b6b8-149c9f19740c_call-8a267acf-7a43-4c57-a578-52f7c0d8e49f-0",
+          "summary": [],
+          "type": "reasoning",
+          "status": "completed"
+        },
+        {
+          "content": [
+            {
+              "type": "output_text",
+              "text": "**No mentions found.**\n\nTotal count of unique accounts: 0",
+              "logprobs": [],
+              "annotations": []
+            }
+          ],
+          "id": "msg_8e380273-6185-9ef6-b6b8-149c9f19740c",
+          "role": "assistant",
+          "type": "message",
+          "status": "completed"
+        }
+      ],
+      "parallel_tool_calls": true,
+      "previous_response_id": null,
+      "reasoning": {
+        "effort": "low",
+        "summary": "detailed"
+      },
+      "temperature": 0.7,
+      "text": {
+        "format": {
+          "type": "text"
+        }
+      },
+      "tool_choice": "auto",
+      "tools": [
+        {
+          "type": "x_search"
+        }
+      ],
+      "top_p": 0.95,
+      "usage": {
+        "input_tokens": 3898,
+        "input_tokens_details": {
+          "cached_tokens": 2688
+        },
+        "output_tokens": 903,
+        "output_tokens_details": {
+          "reasoning_tokens": 886
+        },
+        "total_tokens": 4801,
+        "num_sources_used": 0,
+        "num_server_side_tools_used": 1,
+        "cost_in_usd_ticks": 93076000,
+        "server_side_tool_usage_details": {
+          "web_search_calls": 0,
+          "x_search_calls": 1,
+          "code_interpreter_calls": 0,
+          "file_search_calls": 0,
+          "mcp_calls": 0,
+          "document_search_calls": 0,
+          "image_generation_calls": 0
+        },
+        "context_details": {
+          "input_tokens": 2292,
+          "output_tokens": 226
+        }
+      },
+      "user": null,
+      "incomplete_details": null,
+      "status": "completed",
+      "store": true,
+      "metadata": {
+        "system_fingerprint": "fp_eb3c003fc66c14ed"
+      },
+      "background": false,
+      "service_tier": "default",
+      "truncation": "disabled",
+      "top_logprobs": 0,
+      "presence_penalty": 0.0,
+      "frequency_penalty": 0.0,
+      "prompt_cache_key": null,
+      "max_tool_calls": null,
+      "safety_identifier": null,
+      "error": null,
+      "instructions": null
+    },
+    "HOODIE_ticker": {
+      "created_at": 1784330294,
+      "completed_at": 1784330294,
+      "id": "03d9b57c-276b-9f23-8d86-8b3facffcf7e",
+      "max_output_tokens": null,
+      "model": "grok-4.3",
+      "object": "response",
+      "output": [
+        {
+          "id": "rs_03d9b57c-276b-9f23-8d86-8b3facffcf7e",
+          "summary": [
+            {
+              "text": "The task is: Search X for: $HOODIE since_time:1783542547 until_time:1783542847\nI need to use the x_keyword_search tool with the query: \"$HOODIE since_time:1783542547 until_time:1783542847\"\n\nThe tool accepts \"since_time:unix, until_time:unix\" where unix is in seconds.\n\nYes.",
+              "type": "summary_text"
+            }
+          ],
+          "type": "reasoning",
+          "status": "completed"
+        },
+        {
+          "call_id": "xs_call-bfb6573b-67d8-4c6d-b8a4-ebdad367b875-0",
+          "input": "{\"query\":\"$HOODIE since_time:1783542547 until_time:1783542847\",\"limit\":\"10\",\"mode\":\"Latest\"}",
+          "name": "x_keyword_search",
+          "type": "custom_tool_call",
+          "id": "ctc_03d9b57c-276b-9f23-8d86-8b3facffcf7e_call-bfb6573b-67d8-4c6d-b8a4-ebdad367b875-0",
+          "status": "completed"
+        },
+        {
+          "id": "tco_03d9b57c-276b-9f23-8d86-8b3facffcf7e_call-bfb6573b-67d8-4c6d-b8a4-ebdad367b875-0",
+          "summary": [],
+          "type": "reasoning",
+          "status": "completed"
+        },
+        {
+          "content": [
+            {
+              "type": "output_text",
+              "text": "**Mentions found:**\n\n- **2026-07-08T20:32:10Z**: $HOODIE (by @tomjoo321)  \n- **2026-07-08T20:33:06Z**: $hoodie (by @0xOvertrade)\n\n**Total unique accounts:** 2",
+              "logprobs": [],
+              "annotations": [
+                {
+                  "type": "url_citation",
+                  "url": "https://x.com/i/status/2074954953756393589",
+                  "start_index": 0,
+                  "end_index": 0,
+                  "title": "https://x.com/i/status/2074954953756393589"
+                },
+                {
+                  "type": "url_citation",
+                  "url": "https://x.com/i/status/2074954718296908025",
+                  "start_index": 0,
+                  "end_index": 0,
+                  "title": "https://x.com/i/status/2074954718296908025"
+                }
+              ]
+            }
+          ],
+          "id": "msg_03d9b57c-276b-9f23-8d86-8b3facffcf7e",
+          "role": "assistant",
+          "type": "message",
+          "status": "completed"
+        }
+      ],
+      "parallel_tool_calls": true,
+      "previous_response_id": null,
+      "reasoning": {
+        "effort": "low",
+        "summary": "detailed"
+      },
+      "temperature": 0.7,
+      "text": {
+        "format": {
+          "type": "text"
+        }
+      },
+      "tool_choice": "auto",
+      "tools": [
+        {
+          "type": "x_search"
+        }
+      ],
+      "top_p": 0.95,
+      "usage": {
+        "input_tokens": 4064,
+        "input_tokens_details": {
+          "cached_tokens": 3072
+        },
+        "output_tokens": 975,
+        "output_tokens_details": {
+          "reasoning_tokens": 903
+        },
+        "total_tokens": 5039,
+        "num_sources_used": 0,
+        "num_server_side_tools_used": 1,
+        "cost_in_usd_ticks": 92919000,
+        "server_side_tool_usage_details": {
+          "web_search_calls": 0,
+          "x_search_calls": 1,
+          "code_interpreter_calls": 0,
+          "file_search_calls": 0,
+          "mcp_calls": 0,
+          "document_search_calls": 0,
+          "image_generation_calls": 0
+        },
+        "context_details": {
+          "input_tokens": 2481,
+          "output_tokens": 439
+        }
+      },
+      "user": null,
+      "incomplete_details": null,
+      "status": "completed",
+      "store": true,
+      "metadata": {
+        "system_fingerprint": "fp_eb3c003fc66c14ed"
+      },
+      "background": false,
+      "service_tier": "default",
+      "truncation": "disabled",
+      "top_logprobs": 0,
+      "presence_penalty": 0.0,
+      "frequency_penalty": 0.0,
+      "prompt_cache_key": null,
+      "max_tool_calls": null,
+      "safety_identifier": null,
+      "error": null,
+      "instructions": null
+    },
+    "HOODIE_mint": {
+      "created_at": 1784330305,
+      "completed_at": 1784330305,
+      "id": "e60d2827-6848-9ca0-b53f-2b5abab8f9db",
+      "max_output_tokens": null,
+      "model": "grok-4.3",
+      "object": "response",
+      "output": [
+        {
+          "id": "rs_e60d2827-6848-9ca0-b53f-2b5abab8f9db",
+          "summary": [
+            {
+              "text": "The task is: Search X for: 4euHEW3XCxJtj4jyRxGboQjv9d5T6Bg9q2pA7KM3ZaAC since_time:1783542547 until_time:1783542847\n",
+              "type": "summary_text"
+            }
+          ],
+          "type": "reasoning",
+          "status": "completed"
+        },
+        {
+          "call_id": "xs_call-75a61982-c410-469d-93e1-e2cbfa22d611-0",
+          "input": "{\"query\":\"4euHEW3XCxJtj4jyRxGboQjv9d5T6Bg9q2pA7KM3ZaAC since_time:1783542547 until_time:1783542847\",\"limit\":\"10\",\"mode\":\"Latest\"}",
+          "name": "x_keyword_search",
+          "type": "custom_tool_call",
+          "id": "ctc_e60d2827-6848-9ca0-b53f-2b5abab8f9db_call-75a61982-c410-469d-93e1-e2cbfa22d611-0",
+          "status": "completed"
+        },
+        {
+          "id": "tco_e60d2827-6848-9ca0-b53f-2b5abab8f9db_call-75a61982-c410-469d-93e1-e2cbfa22d611-0",
+          "summary": [],
+          "type": "reasoning",
+          "status": "completed"
+        },
+        {
+          "content": [
+            {
+              "type": "output_text",
+              "text": "**No mentions found.**\n\nThe search for the specified string within the given time range returned zero results.\n\n**Total unique accounts:** 0",
+              "logprobs": [],
+              "annotations": []
+            }
+          ],
+          "id": "msg_e60d2827-6848-9ca0-b53f-2b5abab8f9db",
+          "role": "assistant",
+          "type": "message",
+          "status": "completed"
+        }
+      ],
+      "parallel_tool_calls": true,
+      "previous_response_id": null,
+      "reasoning": {
+        "effort": "low",
+        "summary": "detailed"
+      },
+      "temperature": 0.7,
+      "text": {
+        "format": {
+          "type": "text"
+        }
+      },
+      "tool_choice": "auto",
+      "tools": [
+        {
+          "type": "x_search"
+        }
+      ],
+      "top_p": 0.95,
+      "usage": {
+        "input_tokens": 3683,
+        "input_tokens_details": {
+          "cached_tokens": 3136
+        },
+        "output_tokens": 734,
+        "output_tokens_details": {
+          "reasoning_tokens": 703
+        },
+        "total_tokens": 4417,
+        "num_sources_used": 0,
+        "num_server_side_tools_used": 1,
+        "cost_in_usd_ticks": 81459500,
+        "server_side_tool_usage_details": {
+          "web_search_calls": 0,
+          "x_search_calls": 1,
+          "code_interpreter_calls": 0,
+          "file_search_calls": 0,
+          "mcp_calls": 0,
+          "document_search_calls": 0,
+          "image_generation_calls": 0
+        },
+        "context_details": {
+          "input_tokens": 2071,
+          "output_tokens": 284
+        }
+      },
+      "user": null,
+      "incomplete_details": null,
+      "status": "completed",
+      "store": true,
+      "metadata": {
+        "system_fingerprint": "fp_eb3c003fc66c14ed"
+      },
+      "background": false,
+      "service_tier": "default",
+      "truncation": "disabled",
+      "top_logprobs": 0,
+      "presence_penalty": 0.0,
+      "frequency_penalty": 0.0,
+      "prompt_cache_key": null,
+      "max_tool_calls": null,
+      "safety_identifier": null,
+      "error": null,
+      "instructions": null
+    },
+    "INDEX_ticker": {
+      "created_at": 1784330314,
+      "completed_at": 1784330314,
+      "id": "ca77b9ee-2d45-9cfc-9c7a-c6ecabc637c7",
+      "max_output_tokens": null,
+      "model": "grok-4.3",
+      "object": "response",
+      "output": [
+        {
+          "id": "rs_ca77b9ee-2d45-9cfc-9c7a-c6ecabc637c7",
+          "summary": [
+            {
+              "text": "The task is: \"Search X for: $INDEX since_time:1784146030 until_time:1784146330 List each mention with its approximate UTC timestamp (ISO format). Then report the total count of unique accounts that me...",
+              "type": "summary_text"
+            }
+          ],
+          "type": "reasoning",
+          "status": "completed"
+        },
+        {
+          "call_id": "xs_call-c1abb1fc-6847-474f-bce8-2242d3c36cdd-0",
+          "input": "{\"query\":\"$INDEX since_time:1784146030 until_time:1784146330\",\"limit\":\"10\",\"mode\":\"Latest\"}",
+          "name": "x_keyword_search",
+          "type": "custom_tool_call",
+          "id": "ctc_ca77b9ee-2d45-9cfc-9c7a-c6ecabc637c7_call-c1abb1fc-6847-474f-bce8-2242d3c36cdd-0",
+          "status": "completed"
+        },
+        {
+          "id": "tco_ca77b9ee-2d45-9cfc-9c7a-c6ecabc637c7_call-c1abb1fc-6847-474f-bce8-2242d3c36cdd-0",
+          "summary": [],
+          "type": "reasoning",
+          "status": "completed"
+        },
+        {
+          "content": [
+            {
+              "type": "output_text",
+              "text": "**No posts found** matching the query `$INDEX since_time:1784146030 until_time:1784146330`.\n\n- Total unique accounts that mentioned it: **0**",
+              "logprobs": [],
+              "annotations": []
+            }
+          ],
+          "id": "msg_ca77b9ee-2d45-9cfc-9c7a-c6ecabc637c7",
+          "role": "assistant",
+          "type": "message",
+          "status": "completed"
+        }
+      ],
+      "parallel_tool_calls": true,
+      "previous_response_id": null,
+      "reasoning": {
+        "effort": "low",
+        "summary": "detailed"
+      },
+      "temperature": 0.7,
+      "text": {
+        "format": {
+          "type": "text"
+        }
+      },
+      "tool_choice": "auto",
+      "tools": [
+        {
+          "type": "x_search"
+        }
+      ],
+      "top_p": 0.95,
+      "usage": {
+        "input_tokens": 3453,
+        "input_tokens_details": {
+          "cached_tokens": 3072
+        },
+        "output_tokens": 497,
+        "output_tokens_details": {
+          "reasoning_tokens": 457
+        },
+        "total_tokens": 3950,
+        "num_sources_used": 0,
+        "num_server_side_tools_used": 1,
+        "cost_in_usd_ticks": 73331500,
+        "server_side_tool_usage_details": {
+          "web_search_calls": 0,
+          "x_search_calls": 1,
+          "code_interpreter_calls": 0,
+          "file_search_calls": 0,
+          "mcp_calls": 0,
+          "document_search_calls": 0,
+          "image_generation_calls": 0
+        },
+        "context_details": {
+          "input_tokens": 1872,
+          "output_tokens": 215
+        }
+      },
+      "user": null,
+      "incomplete_details": null,
+      "status": "completed",
+      "store": true,
+      "metadata": {
+        "system_fingerprint": "fp_eb3c003fc66c14ed"
+      },
+      "background": false,
+      "service_tier": "default",
+      "truncation": "disabled",
+      "top_logprobs": 0,
+      "presence_penalty": 0.0,
+      "frequency_penalty": 0.0,
+      "prompt_cache_key": null,
+      "max_tool_calls": null,
+      "safety_identifier": null,
+      "error": null,
+      "instructions": null
+    },
+    "INDEX_mint": {
+      "created_at": 1784330322,
+      "completed_at": 1784330322,
+      "id": "11686775-d560-9563-9f3e-9c443708ac51",
+      "max_output_tokens": null,
+      "model": "grok-4.3",
+      "object": "response",
+      "output": [
+        {
+          "id": "rs_11686775-d560-9563-9f3e-9c443708ac51",
+          "summary": [
+            {
+              "text": "The task is: Search X for: XqF7TY2r3UbuTya71stLcoejHiHGKy38UJUu8itpump since_time:1784146030 until_time:1784146330\n",
+              "type": "summary_text"
+            }
+          ],
+          "type": "reasoning",
+          "status": "completed"
+        },
+        {
+          "call_id": "xs_call-67f2cf50-9c54-4ec4-9a5f-91d6991e973d-0",
+          "input": "{\"query\":\"XqF7TY2r3UbuTya71stLcoejHiHGKy38UJUu8itpump since_time:1784146030 until_time:1784146330\",\"limit\":\"10\",\"mode\":\"Latest\"}",
+          "name": "x_keyword_search",
+          "type": "custom_tool_call",
+          "id": "ctc_11686775-d560-9563-9f3e-9c443708ac51_call-67f2cf50-9c54-4ec4-9a5f-91d6991e973d-0",
+          "status": "completed"
+        },
+        {
+          "id": "tco_11686775-d560-9563-9f3e-9c443708ac51_call-67f2cf50-9c54-4ec4-9a5f-91d6991e973d-0",
+          "summary": [],
+          "type": "reasoning",
+          "status": "completed"
+        },
+        {
+          "content": [
+            {
+              "type": "output_text",
+              "text": "**No mentions found.**\n\nThe search returned 0 results for the specified query and time range (1784146030 to 1784146330 Unix time).\n\n- **Total unique accounts that mentioned it**: 0",
+              "logprobs": [],
+              "annotations": []
+            }
+          ],
+          "id": "msg_11686775-d560-9563-9f3e-9c443708ac51",
+          "role": "assistant",
+          "type": "message",
+          "status": "completed"
+        }
+      ],
+      "parallel_tool_calls": true,
+      "previous_response_id": null,
+      "reasoning": {
+        "effort": "low",
+        "summary": "detailed"
+      },
+      "temperature": 0.7,
+      "text": {
+        "format": {
+          "type": "text"
+        }
+      },
+      "tool_choice": "auto",
+      "tools": [
+        {
+          "type": "x_search"
+        }
+      ],
+      "top_p": 0.95,
+      "usage": {
+        "input_tokens": 3555,
+        "input_tokens_details": {
+          "cached_tokens": 3136
+        },
+        "output_tokens": 493,
+        "output_tokens_details": {
+          "reasoning_tokens": 446
+        },
+        "total_tokens": 4048,
+        "num_sources_used": 0,
+        "num_server_side_tools_used": 1,
+        "cost_in_usd_ticks": 73834500,
+        "server_side_tool_usage_details": {
+          "web_search_calls": 0,
+          "x_search_calls": 1,
+          "code_interpreter_calls": 0,
+          "file_search_calls": 0,
+          "mcp_calls": 0,
+          "document_search_calls": 0,
+          "image_generation_calls": 0
+        },
+        "context_details": {
+          "input_tokens": 1949,
+          "output_tokens": 159
+        }
+      },
+      "user": null,
+      "incomplete_details": null,
+      "status": "completed",
+      "store": true,
+      "metadata": {
+        "system_fingerprint": "fp_eb3c003fc66c14ed"
+      },
+      "background": false,
+      "service_tier": "default",
+      "truncation": "disabled",
+      "top_logprobs": 0,
+      "presence_penalty": 0.0,
+      "frequency_penalty": 0.0,
+      "prompt_cache_key": null,
+      "max_tool_calls": null,
+      "safety_identifier": null,
+      "error": null,
+      "instructions": null
+    },
+    "HOOD_ticker": {
+      "created_at": 1784330334,
+      "completed_at": 1784330334,
+      "id": "127cf82c-0d97-9366-846e-2933eeec2f9b",
+      "max_output_tokens": null,
+      "model": "grok-4.3",
+      "object": "response",
+      "output": [
+        {
+          "id": "rs_127cf82c-0d97-9366-846e-2933eeec2f9b",
+          "summary": [
+            {
+              "text": "The task is: Search X for: $HOOD since_time:1783983026 until_time:1783983326\n",
+              "type": "summary_text"
+            }
+          ],
+          "type": "reasoning",
+          "status": "completed"
+        },
+        {
+          "call_id": "xs_call-d5c1603e-eab5-48fb-bd78-c65a3b3ac9c3-0",
+          "input": "{\"query\":\"$HOOD since_time:1783983026 until_time:1783983326\",\"limit\":\"10\",\"mode\":\"Latest\"}",
+          "name": "x_keyword_search",
+          "type": "custom_tool_call",
+          "id": "ctc_127cf82c-0d97-9366-846e-2933eeec2f9b_call-d5c1603e-eab5-48fb-bd78-c65a3b3ac9c3-0",
+          "status": "completed"
+        },
+        {
+          "id": "tco_127cf82c-0d97-9366-846e-2933eeec2f9b_call-d5c1603e-eab5-48fb-bd78-c65a3b3ac9c3-0",
+          "summary": [],
+          "type": "reasoning",
+          "status": "completed"
+        },
+        {
+          "content": [
+            {
+              "type": "output_text",
+              "text": "**Mentions of $HOOD in the specified time window (2026-07-13 22:51:02Z to 22:54:54Z):**\n\n- **2026-07-13T22:54:54Z** \u2014 @intai1112: \"\u8acb\u554f\u6709\u4eba\u63a8\u85a6\u4e00\u5b9a\u8981\u8ffd\u8e64\u7684 @X \u5e63\u5708\u5e33\u865f\u55ce\uff1f ethereum:native $HOOD\"\n- **2026-07-13T22:53:35Z** \u2014 @MBGBuzzer: \"SEND IT $HOOD 0x6966aa526a2a3e9e9e25c034c6c411474eab0f6d\"\n- **2026-07-13T22:51:59Z** \u2014 @CyberZyph: \"Everyone should be watching this. $hood https://twitter.com/i/broadcasts/1jxXggobMEzJZ\"\n- **2026-07-13T22:51:08Z** \u2014 @DaoKingdom: (reply/quote about $HOOD tokenization on Ethereum)\n- **2026-07-13T22:51:02Z** \u2014 @scuffed_gullet: \"Looking at a very bullish trend for $HOOD. ... CA: 0xeb98304f8b37736170f929882f01daebb56aaec8\"\n\n**Total unique accounts:** 5",
+              "logprobs": [],
+              "annotations": [
+                {
+                  "type": "url_citation",
+                  "url": "https://x.com/i/status/2076801844861370632",
+                  "start_index": 0,
+                  "end_index": 0,
+                  "title": "https://x.com/i/status/2076801844861370632"
+                },
+                {
+                  "type": "url_citation",
+                  "url": "https://x.com/i/status/2076802246562517089",
+                  "start_index": 0,
+                  "end_index": 0,
+                  "title": "https://x.com/i/status/2076802246562517089"
+                },
+                {
+                  "type": "url_citation",
+                  "url": "https://x.com/i/status/2076801632432464333",
+                  "start_index": 0,
+                  "end_index": 0,
+                  "title": "https://x.com/i/status/2076801632432464333"
+                },
+                {
+                  "type": "url_citation",
+                  "url": "https://x.com/i/status/2076801604955898046",
+                  "start_index": 0,
+                  "end_index": 0,
+                  "title": "https://x.com/i/status/2076801604955898046"
+                },
+                {
+                  "type": "url_citation",
+                  "url": "https://x.com/i/status/2076802576432218571",
+                  "start_index": 0,
+                  "end_index": 0,
+                  "title": "https://x.com/i/status/2076802576432218571"
+                }
+              ]
+            }
+          ],
+          "id": "msg_127cf82c-0d97-9366-846e-2933eeec2f9b",
+          "role": "assistant",
+          "type": "message",
+          "status": "completed"
+        }
+      ],
+      "parallel_tool_calls": true,
+      "previous_response_id": null,
+      "reasoning": {
+        "effort": "low",
+        "summary": "detailed"
+      },
+      "temperature": 0.7,
+      "text": {
+        "format": {
+          "type": "text"
+        }
+      },
+      "tool_choice": "auto",
+      "tools": [
+        {
+          "type": "x_search"
+        }
+      ],
+      "top_p": 0.95,
+      "usage": {
+        "input_tokens": 4691,
+        "input_tokens_details": {
+          "cached_tokens": 3072
+        },
+        "output_tokens": 961,
+        "output_tokens_details": {
+          "reasoning_tokens": 663
+        },
+        "total_tokens": 5652,
+        "num_sources_used": 0,
+        "num_server_side_tools_used": 1,
+        "cost_in_usd_ticks": 100406500,
+        "server_side_tool_usage_details": {
+          "web_search_calls": 0,
+          "x_search_calls": 1,
+          "code_interpreter_calls": 0,
+          "file_search_calls": 0,
+          "mcp_calls": 0,
+          "document_search_calls": 0,
+          "image_generation_calls": 0
+        },
+        "context_details": {
+          "input_tokens": 3109,
+          "output_tokens": 738
+        }
+      },
+      "user": null,
+      "incomplete_details": null,
+      "status": "completed",
+      "store": true,
+      "metadata": {
+        "system_fingerprint": "fp_eb3c003fc66c14ed"
+      },
+      "background": false,
+      "service_tier": "default",
+      "truncation": "disabled",
+      "top_logprobs": 0,
+      "presence_penalty": 0.0,
+      "frequency_penalty": 0.0,
+      "prompt_cache_key": null,
+      "max_tool_calls": null,
+      "safety_identifier": null,
+      "error": null,
+      "instructions": null
+    },
+    "HOOD_mint": {
+      "created_at": 1784330344,
+      "completed_at": 1784330344,
+      "id": "62191de9-da96-9b1c-be91-8cf2e20fefa7",
+      "max_output_tokens": null,
+      "model": "grok-4.3",
+      "object": "response",
+      "output": [
+        {
+          "id": "rs_62191de9-da96-9b1c-be91-8cf2e20fefa7",
+          "summary": [
+            {
+              "text": "The task is: Search X for: Bf4DZ8rzMiuyLnVdUCwP7bV8L4UW7x7mAAasuqrVhQUJ since_time:1783983026 until_time:1783983326\n",
+              "type": "summary_text"
+            }
+          ],
+          "type": "reasoning",
+          "status": "completed"
+        },
+        {
+          "call_id": "xs_call-d9d3d14d-7827-428b-b557-b27e0cea4495-0",
+          "input": "{\"query\":\"Bf4DZ8rzMiuyLnVdUCwP7bV8L4UW7x7mAAasuqrVhQUJ since_time:1783983026 until_time:1783983326\",\"limit\":\"10\",\"mode\":\"Latest\"}",
+          "name": "x_keyword_search",
+          "type": "custom_tool_call",
+          "id": "ctc_62191de9-da96-9b1c-be91-8cf2e20fefa7_call-d9d3d14d-7827-428b-b557-b27e0cea4495-0",
+          "status": "completed"
+        },
+        {
+          "id": "tco_62191de9-da96-9b1c-be91-8cf2e20fefa7_call-d9d3d14d-7827-428b-b557-b27e0cea4495-0",
+          "summary": [],
+          "type": "reasoning",
+          "status": "completed"
+        },
+        {
+          "content": [
+            {
+              "type": "output_text",
+              "text": "**No mentions found** in the specified time range.\n\n- List of mentions: (empty)\n- Total count of unique accounts: 0\n\n(The search was performed using the exact query string with the provided `since_time`/`until_time` Unix timestamp filters via the X advanced search tool; the 5-minute window yielded zero matching posts.)",
+              "logprobs": [],
+              "annotations": []
+            }
+          ],
+          "id": "msg_62191de9-da96-9b1c-be91-8cf2e20fefa7",
+          "role": "assistant",
+          "type": "message",
+          "status": "completed"
+        }
+      ],
+      "parallel_tool_calls": true,
+      "previous_response_id": null,
+      "reasoning": {
+        "effort": "low",
+        "summary": "detailed"
+      },
+      "temperature": 0.7,
+      "text": {
+        "format": {
+          "type": "text"
+        }
+      },
+      "tool_choice": "auto",
+      "tools": [
+        {
+          "type": "x_search"
+        }
+      ],
+      "top_p": 0.95,
+      "usage": {
+        "input_tokens": 3735,
+        "input_tokens_details": {
+          "cached_tokens": 3136
+        },
+        "output_tokens": 748,
+        "output_tokens_details": {
+          "reasoning_tokens": 675
+        },
+        "total_tokens": 4483,
+        "num_sources_used": 0,
+        "num_server_side_tools_used": 1,
+        "cost_in_usd_ticks": 82459500,
+        "server_side_tool_usage_details": {
+          "web_search_calls": 0,
+          "x_search_calls": 1,
+          "code_interpreter_calls": 0,
+          "file_search_calls": 0,
+          "mcp_calls": 0,
+          "document_search_calls": 0,
+          "image_generation_calls": 0
+        },
+        "context_details": {
+          "input_tokens": 2126,
+          "output_tokens": 240
+        }
+      },
+      "user": null,
+      "incomplete_details": null,
+      "status": "completed",
+      "store": true,
+      "metadata": {
+        "system_fingerprint": "fp_eb3c003fc66c14ed"
+      },
+      "background": false,
+      "service_tier": "default",
+      "truncation": "disabled",
+      "top_logprobs": 0,
+      "presence_penalty": 0.0,
+      "frequency_penalty": 0.0,
+      "prompt_cache_key": null,
+      "max_tool_calls": null,
+      "safety_identifier": null,
+      "error": null,
+      "instructions": null
+    }
+  }
+}
