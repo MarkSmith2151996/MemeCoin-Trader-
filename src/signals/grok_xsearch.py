@@ -7,7 +7,7 @@ import json
 import logging
 import os
 import re
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 import httpx
 
@@ -225,39 +225,12 @@ def _bucket_mentions(
 async def count_unique_mentions(ticker: str, mint: str, minutes: int = 5) -> int:
     """Query Grok's x_search tool for unique X accounts mentioning $ticker or mint.
 
-    Returns the count as an integer, or 0 on any error.
+    Delegates to get_mentions_with_timestamps and returns the 0-5min temporal
+    bucket count. Returns 0 on any error.
     """
-    api_key = os.getenv("GROK_API_KEY")
-    if not api_key:
-        log.warning("GROK_API_KEY not set")
-        return 0
-
-    prompt = (
-        f"Search X for ${ticker} or {mint} posted in the last {minutes} minutes. "
-        "Count unique accounts that mentioned it. Reply with just the integer."
-    )
-
-    payload = {
-        "model": DEFAULT_MODEL,
-        "input": prompt,
-        "tools": [{"type": "x_search"}],
-    }
-
-    data = await _post_with_retry(ticker, mint, payload)
-    if data is None:
-        return 0
-
-    text = _extract_output_text(data)
-    if text:
-        val = _extract_number(text)
-        if val is not None:
-            return val
-
-    log.warning(
-        "Grok API unexpected response shape for %s (%s) — no numeric count found",
-        ticker, mint[:8],
-    )
-    return 0
+    launched_at = datetime.now(timezone.utc) - timedelta(minutes=minutes)
+    result = await get_mentions_with_timestamps(ticker, mint, launched_at, hours=1)
+    return result.get("mentions_0_5min", 0)
 
 
 async def get_mentions_with_timestamps(

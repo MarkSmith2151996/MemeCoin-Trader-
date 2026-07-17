@@ -28,20 +28,35 @@ from src.core.database import init_db, record_trade
 from src.core.models import Side, Trade
 from src.execution.price_provider import DexScreenerPriceProvider
 from src.execution.paper import PaperExecutionAdapter
-from src.signals.grok_xsearch import count_unique_mentions
+from src.risk.rugcheck import RugCheckClient
+from src.signals.grok_xsearch import get_mentions_with_timestamps
 from src.strategy.position_manager import PositionManager
 
 PUMPFUN_COINS_URL = "https://frontend-api-v3.pump.fun/coins?offset=0&limit=50&includeNsfw=true"
+WRAPPED_SOL_MINT = "So11111111111111111111111111111111111111112"
 
 PAPER_SIZE_SOL = 0.05
-MIN_MENTIONS = 10
+MIN_MENTIONS = 3
 MENTION_WINDOW_MINUTES = 5
 MAX_OPEN = 5
 SCAN_INTERVAL = 60
 MONITOR_INTERVAL = 30
 TAKE_PROFIT_MULT = 2.0
-HARD_STOP_MULT = 0.5
+HARD_STOP_MULT = 0.70
 TIME_STOP_MINUTES = 10
+
+# Screening filters
+MAX_AGE_MINUTES = 15
+MIN_MCAP_USD = 5_000
+MAX_MCAP_USD = 50_000
+MIN_TRANSACTIONS = 12
+MIN_BUY_SELL_RATIO = 0.6
+MIN_VOLUME_USD = 500
+
+# Security gates
+MAX_DEV_HOLDINGS_PCT = 10.0
+MAX_TOP10_HOLDER_PCT = 30.0
+MAX_MCAP_RUGCHECK = 50_000
 
 DB_PATH = Path("data/trades.db")
 
@@ -56,6 +71,7 @@ logging.basicConfig(
 log = logging.getLogger("strategy_b")
 
 seen_mints: set[str] = set()
+_rugcheck = RugCheckClient(timeout_s=5.0)
 
 
 async def fetch_coins(client: httpx.AsyncClient) -> list[dict]:
@@ -72,6 +88,152 @@ async def fetch_coins(client: httpx.AsyncClient) -> list[dict]:
     if not isinstance(coins, list):
         return []
     return [c for c in coins if isinstance(c, dict)]
+
+
+def _extract_creator_pct(report) -> float | None:
+    """Extract creator/dev holding percentage from RugCheck raw payload."""
+    raw = report.raw if hasattr(report, "raw") else {}
+    creators = raw.get("creators")
+    if isinstance(creators, list):
+        for c in creators:
+            if isinstance(c, dict) and c.get("isCreator"):
+                pct = c.get("pct") or c.get("percentage") or c.get("share")
+                if pct is not None:
+                    try:
+                        return float(pct)
+                    except (TypeError, ValueError):
+                        pass
+    return None
+
+
+async def screen_coin(
+    coin: dict,
+    http: httpx.AsyncClient,
+    rugcheck_client: RugCheckClient,
+) -> tuple[bool, str]:
+    """Screen a PumpFun coin through age, mcap, DexScreener, and RugCheck gates.
+
+    Returns (pass: bool, diagnostic: str) where diagnostic can be used as:
+      SCREEN TICKER (mint): <diagnostic>
+    """
+    mint = coin.get("mint", "")
+    now = datetime.now(UTC)
+
+    # 2a — Age check from PumpFun payload
+    created_ts = coin.get("created_timestamp")
+    if not isinstance(created_ts, (int, float)) or created_ts <= 0:
+        return False, "no created_timestamp"
+    age_min = (now.timestamp() - created_ts / 1000) / 60
+    if age_min > MAX_AGE_MINUTES:
+        return False, f"age={age_min:.1f}m > {MAX_AGE_MINUTES}m"
+
+    # 2a — Market cap check from PumpFun payload
+    mcap = coin.get("usd_market_cap")
+    if not isinstance(mcap, (int, float)) or mcap <= 0:
+        return False, f"age={age_min:.1f}m no usd_market_cap"
+    if mcap < MIN_MCAP_USD:
+        return False, f"age={age_min:.1f}m mcap=${mcap:.0f} < ${MIN_MCAP_USD}"
+    if mcap > MAX_MCAP_USD:
+        return False, f"age={age_min:.1f}m mcap=${mcap:.0f} > ${MAX_MCAP_USD}"
+
+    # 2b — DexScreener enrichment
+    txns = None
+    vol = None
+    bs_ratio = None
+    ds_pair_found = False
+    try:
+        resp = await http.get(
+            "https://api.dexscreener.com/latest/dex/search",
+            params={"q": mint},
+            timeout=10.0,
+        )
+        resp.raise_for_status()
+        data = resp.json()
+        pairs = data.get("pairs") or []
+        pair = None
+        for p in pairs:
+            if not isinstance(p, dict):
+                continue
+            if p.get("chainId") != "solana":
+                continue
+            qt = p.get("quoteToken") or {}
+            if qt.get("address") == WRAPPED_SOL_MINT or qt.get("symbol") in ("WSOL", "SOL"):
+                pair = p
+                break
+
+        if pair:
+            ds_pair_found = True
+            h1 = (pair.get("txns") or {}).get("h1") or {}
+            buys = int(h1.get("buys", 0))
+            sells = int(h1.get("sells", 0))
+            txns = buys + sells
+            vol = float((pair.get("volume") or {}).get("h1", 0))
+            bs_ratio = buys / max(sells, 1)
+
+            if txns < MIN_TRANSACTIONS:
+                return False, (
+                    f"age={age_min:.1f}m mcap=${mcap:.0f} txns={txns} vol=${vol:.0f} "
+                    f"buys/sells={bs_ratio:.1f} → FAIL txns<{MIN_TRANSACTIONS}"
+                )
+            if vol < MIN_VOLUME_USD:
+                return False, (
+                    f"age={age_min:.1f}m mcap=${mcap:.0f} txns={txns} vol=${vol:.0f} "
+                    f"buys/sells={bs_ratio:.1f} → FAIL vol<${MIN_VOLUME_USD}"
+                )
+            if bs_ratio < MIN_BUY_SELL_RATIO:
+                return False, (
+                    f"age={age_min:.1f}m mcap=${mcap:.0f} txns={txns} vol=${vol:.0f} "
+                    f"buys/sells={bs_ratio:.1f} → FAIL buys/sells<{MIN_BUY_SELL_RATIO}"
+                )
+        else:
+            log.warning("DexScreener: no Solana/wSOL pair for %s — skipping txn/volume checks", mint[:8])
+    except Exception as exc:
+        log.warning("DexScreener search failed for %s: %s", mint[:8], exc)
+
+    # 2c — RugCheck security gates
+    try:
+        report = await rugcheck_client.fetch_report(mint)
+    except Exception as exc:
+        return False, (
+            f"age={age_min:.1f}m mcap=${mcap:.0f} → FAIL RugCheck error: {exc}"
+        )
+
+    if report.provider_status in ("timeout", "provider_error", "http_429"):
+        return False, (
+            f"age={age_min:.1f}m mcap=${mcap:.0f} → FAIL RugCheck {report.provider_status}"
+        )
+
+    if report.found:
+        if report.mint_authority_revoked is False:
+            return False, (
+                f"age={age_min:.1f}m mcap=${mcap:.0f} → FAIL mint authority not revoked"
+            )
+        if report.freeze_authority_revoked is False:
+            return False, (
+                f"age={age_min:.1f}m mcap=${mcap:.0f} → FAIL freeze authority not revoked"
+            )
+        if report.top_holder_pct is not None and report.top_holder_pct >= MAX_TOP10_HOLDER_PCT:
+            return False, (
+                f"age={age_min:.1f}m mcap=${mcap:.0f} → FAIL top10 holders={report.top_holder_pct:.1f}% "
+                f">= {MAX_TOP10_HOLDER_PCT}%"
+            )
+
+        creator_pct = _extract_creator_pct(report)
+        if creator_pct is not None and creator_pct > MAX_DEV_HOLDINGS_PCT:
+            return False, (
+                f"age={age_min:.1f}m mcap=${mcap:.0f} → FAIL dev holds {creator_pct:.1f}% "
+                f"> {MAX_DEV_HOLDINGS_PCT}%"
+            )
+        elif creator_pct is None:
+            log.warning("RugCheck: no creator holdings for %s — allowing through", mint[:8])
+    else:
+        log.warning("RugCheck: no report for %s — allowing through", mint[:8])
+
+    # Build PASS diagnostic
+    txn_str = f"txns={txns}" if txns is not None else "txns=N/A"
+    vol_str = f"vol=${vol:.0f}" if vol is not None else "vol=N/A"
+    bs_str = f"buys/sells={bs_ratio:.1f}" if bs_ratio is not None else "buys/sells=N/A"
+    return True, f"age={age_min:.1f}m mcap=${mcap:.0f} {txn_str} {vol_str} {bs_str} → PASS"
 
 
 async def try_enter(
@@ -212,16 +374,28 @@ async def scan_loop(
                     seen_mints.add(mint)
 
                     ticker = coin.get("symbol") or coin.get("ticker") or coin.get("name") or mint[:8]
-                    mentions = await count_unique_mentions(ticker, mint, minutes=MENTION_WINDOW_MINUTES)
-                    if mentions >= MIN_MENTIONS:
-                        ok = await try_enter(mint, ticker, mark_provider, adapter, manager, db_path)
-                        if ok:
-                            log.info("ENTRY mint=%s ticker=%s mentions=%d", mint[:16], ticker, mentions)
-                        slots_used = len(await manager.get_all_open(mode="paper"))
-                        if slots_used >= MAX_OPEN:
-                            break
-                    else:
-                        log.info("SKIP mint=%s ticker=%s mentions=%d", mint[:16], ticker, mentions)
+
+                    # Screening filters
+                    passed, reason = await screen_coin(coin, http, _rugcheck)
+                    log.info("SCREEN %s (%s): %s", ticker, mint[:8], reason)
+                    if not passed:
+                        log.info("FILTERED %s (%s): %s", ticker, mint[:8], reason)
+                        continue
+
+                    # Grok mention check (0-5min temporal bucket)
+                    launched_at = datetime.fromtimestamp(coin["created_timestamp"] / 1000, tz=UTC)
+                    mention_data = await get_mentions_with_timestamps(ticker, mint, launched_at, hours=1)
+                    early_mentions = mention_data.get("mentions_0_5min", 0)
+                    if early_mentions < MIN_MENTIONS:
+                        log.info("SKIP %s — %d early mentions (need %d)", ticker, early_mentions, MIN_MENTIONS)
+                        continue
+
+                    ok = await try_enter(mint, ticker, mark_provider, adapter, manager, db_path)
+                    if ok:
+                        log.info("ENTRY mint=%s ticker=%s mentions=%d", mint[:16], ticker, early_mentions)
+                    slots_used = len(await manager.get_all_open(mode="paper"))
+                    if slots_used >= MAX_OPEN:
+                        break
 
             elapsed = time.monotonic() - cycle_start
             await asyncio.sleep(max(0.0, SCAN_INTERVAL - elapsed))
