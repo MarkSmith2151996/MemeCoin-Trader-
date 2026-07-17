@@ -1,0 +1,24 @@
+                                             WINNERS (n=8)          LOSERS (n=50)
+-------------------------------------------------------------------------------
+                total_mentions avg:                  5.0                 42.3
+               mentions_0_5min avg:                  0.0                  0.2
+              mentions_5_15min avg:                  0.0                  0.3
+             mentions_15_60min avg:                  1.1                  0.0
+          mentions_after_60min avg:                  6.3                  0.0
+              earliest_mention avg:  280309.0 min             -267.6 min
+
+Losers 90th pctile (total):     7
+Winners median (total):         5
+Losers 90th pctile (0-5min):    1
+Winners median (0-5min):        0
+
+Recommended MIN_MENTIONS (total window):     8
+Recommended MIN_MENTIONS (0-5min window):    2
+Recommended MIN_MENTIONS (0-15min window):   2
+
+Notes:
+  - Winners n=8 (not 50) due to DexScreener API rate limiting; browser-capture was down
+  - Losers: 50 PumpFun non-graduated coins
+  - Grok x_search only sees recent posts, not historical launch-day data
+  - Winners were older coins; 0-5min/5-15min buckets reflect current recent activity, not launch
+  - Losers were minutes-old; 0-5min buckets are more meaningful

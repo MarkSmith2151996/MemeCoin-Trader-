@@ -1,4 +1,4 @@
-"""Scrape DexScreener gainers, get launch timestamps, query Grok for temporal mention data."""
+"""Research: find winner coins via DexScreener API, get temporal Grok mention data."""
 
 from __future__ import annotations
 
@@ -6,7 +6,6 @@ import asyncio
 import json
 import logging
 import os
-import time
 from datetime import datetime, timezone
 
 import httpx
@@ -16,19 +15,10 @@ from src.signals.grok_xsearch import get_mentions_with_timestamps
 
 load_dotenv()
 
-BROWSER_PC_URL = "http://172.21.32.1:8099/capture"
-DEXSCREENER_SEARCH_URL = "https://api.dexscreener.com/latest/dex/search"
 DEXSCREENER_TOKEN_URL = "https://api.dexscreener.com/latest/dex/tokens"
-
-GAINERS_URL = (
-    "https://dexscreener.com/gainers"
-    "?rankBy=priceChangeH24"
-    "&order=desc"
-    "&minLiq=250000"
-    "&min24HTxns=300"
-    "&min24HSells=30"
-    "&min24HVol=100000"
-)
+DEXSCREENER_SEARCH_URL = "https://api.dexscreener.com/latest/dex/search"
+DEXSCREENER_BOOSTS_TOP = "https://api.dexscreener.com/token-boosts/top/v1"
+DEXSCREENER_BOOSTS_LATEST = "https://api.dexscreener.com/token-boosts/latest/v1"
 
 OUTPUT_PATH = "research/mt477_output/winners_mentions.json"
 COIN_TARGET = 50
@@ -40,116 +30,112 @@ logging.basicConfig(
 log = logging.getLogger("research_winners")
 
 
-def scrape_gainers() -> list[dict]:
-    log.info("Scraping gainers page...")
-    resp = httpx.post(
-        BROWSER_PC_URL,
-        json={"url": GAINERS_URL, "wait": 6},
-        timeout=30,
-    )
-    resp.raise_for_status()
-    data = resp.json()
-    candidates = data.get("candidates", [])
-    log.info("Got %d candidates from gainers page", len(candidates))
-    return candidates
+def _collect_candidate_mints() -> set[str]:
+    """Collect Solana token addresses from multiple DexScreener API sources."""
+    mints: set[str] = set()
+
+    # Source 1: token-boosts (trending)
+    for url in (DEXSCREENER_BOOSTS_TOP, DEXSCREENER_BOOSTS_LATEST):
+        try:
+            resp = httpx.get(url, timeout=10)
+            if resp.status_code == 200:
+                boosts = resp.json()
+                for b in boosts:
+                    if b.get("chainId") == "solana":
+                        addr = b.get("tokenAddress")
+                        if addr:
+                            mints.add(addr)
+        except Exception as exc:
+            log.warning("Failed to fetch boosts from %s: %s", url.rsplit("/", 1)[-1], exc)
+
+    # Source 2: search query for broad terms
+    search_terms = ["SOL", "pump", "raydium", "cat", "dog", "pepe", "moon", "ai", "trump", "coin", "bonk", "win", "baby", "elon", "woof", "meme", "doge", "shib", "pig", "bird", "fish", "wolf", "dragon", "lion", "bear", "bull"]
+    for q in search_terms:
+        try:
+            resp = httpx.get(
+                DEXSCREENER_SEARCH_URL,
+                params={"q": q},
+                timeout=8,
+            )
+            if resp.status_code == 200:
+                data = resp.json()
+                for p in data.get("pairs", []):
+                    if p.get("chainId") == "solana":
+                        addr = p.get("baseToken", {}).get("address")
+                        if addr:
+                            mints.add(addr)
+        except Exception:
+            pass
+
+    log.info("Collected %d unique Solana token mints from DexScreener", len(mints))
+    return mints
 
 
-def resolve_mint(ticker: str) -> str | None:
+def _fetch_token_pairs(mint: str, client: httpx.Client) -> dict | None:
+    """Fetch pair data and return best pair info, or None."""
     try:
-        resp = httpx.get(
-            DEXSCREENER_SEARCH_URL,
-            params={"q": ticker},
-            timeout=10,
-        )
-        resp.raise_for_status()
+        resp = client.get(f"{DEXSCREENER_TOKEN_URL}/{mint}", timeout=8)
+        if resp.status_code != 200:
+            return None
         data = resp.json()
         pairs = data.get("pairs", [])
-        if not pairs:
+        sol_pairs = [p for p in pairs if p.get("chainId") == "solana"]
+        if not sol_pairs:
             return None
-        ticker_upper = ticker.upper()
-        matching = [
-            p for p in pairs
-            if p.get("baseToken", {}).get("symbol", "").upper() == ticker_upper
-        ]
-        if not matching:
+        best = max(sol_pairs, key=lambda p: float(p.get("liquidity", {}).get("usd", 0) or 0))
+        mcap = float(best.get("marketCap") or 0)
+        if mcap < 5000 or mcap > 500000:
             return None
-        best = max(matching, key=lambda p: p.get("liquidity", {}).get("usd", 0) or 0)
-        return best.get("baseToken", {}).get("address")
-    except Exception as exc:
-        log.warning("Failed to resolve mint for %s: %s", ticker, exc)
-        return None
-
-
-def get_token_info(mint: str) -> dict | None:
-    """Fetch token info from DexScreener. Returns dict with launch, market cap, etc."""
-    try:
-        resp = httpx.get(f"{DEXSCREENER_TOKEN_URL}/{mint}", timeout=10)
-        resp.raise_for_status()
-        data = resp.json()
-        pairs = data.get("pairs", [])
-        if not pairs:
+        liq = float(best.get("liquidity", {}).get("usd", 0) or 0)
+        if liq < 1000:
             return None
-        pair = max(pairs, key=lambda p: p.get("liquidity", {}).get("usd", 0) or 0)
-        created_ms = pair.get("pairCreatedAt")
-        launched_at = None
-        if created_ms:
-            launched_at = datetime.fromtimestamp(created_ms / 1000, tz=timezone.utc)
-
-        info = {
+        price_change = float(best.get("priceChange", {}).get("h24", 0) or 0)
+        symbol = best.get("baseToken", {}).get("symbol", "?")
+        created_ms = best.get("pairCreatedAt")
+        launched_at = datetime.fromtimestamp(created_ms / 1000, tz=timezone.utc) if created_ms else None
+        return {
+            "symbol": symbol,
+            "mint": mint,
             "launched_at": launched_at,
-            "market_cap": pair.get("marketCap") or pair.get("fdv"),
-            "liquidity_usd": (pair.get("liquidity") or {}).get("usd"),
-            "txns": pair.get("txns", {}),
-            "volume": pair.get("volume", {}),
-            "price_usd": pair.get("priceUsd"),
-            "price_change": pair.get("priceChange", {}),
+            "market_cap": mcap,
+            "liquidity_usd": liq,
+            "volume_24h": float(best.get("volume", {}).get("h24", 0) or 0),
+            "price_change_pct": price_change,
+            "txns_24h": best.get("txns", {}).get("h24", {}),
         }
-        return info
-    except Exception as exc:
-        log.warning("Failed to get token info for %s: %s", mint[:8], exc)
+    except Exception:
         return None
-
-
-def get_change_pct(candidate: dict) -> float | None:
-    return candidate.get("change_24h_pct") or candidate.get("change_6h_pct") or candidate.get("change_1h_pct")
 
 
 async def main():
-    candidates = scrape_gainers()
+    mints = _collect_candidate_mints()
+
+    winners: list[dict] = []
+    with httpx.Client(timeout=10) as client:
+        for mint in mints:
+            info = _fetch_token_pairs(mint, client)
+            if info:
+                winners.append(info)
+
+    winners.sort(key=lambda w: w["price_change_pct"], reverse=True)
+    winners = winners[:COIN_TARGET]
+    log.info("Selected %d winners (price change sorted)", len(winners))
+
     results = []
     grok_calls = 0
     grok_successes = 0
 
-    for i, c in enumerate(candidates):
-        if len(results) >= COIN_TARGET:
-            break
+    for i, w in enumerate(winners):
+        ticker = w["symbol"]
+        mint = w["mint"]
+        launched_at = w["launched_at"]
+        price_change = w["price_change_pct"]
 
-        ticker = c["name"]
-        pair = c.get("pair", "?")
-        price_change = get_change_pct(c)
-        log.info("[%d/%d] Processing %s (%s)...", i + 1, len(candidates), ticker, pair)
-
-        mint = resolve_mint(ticker)
-        if not mint:
-            log.warning("  No mint found for %s, skipping", ticker)
-            continue
-
-        token_info = get_token_info(mint)
-        if not token_info:
-            log.warning("  No token info for %s (%s), skipping", ticker, mint[:8])
-            continue
-
-        launched_at = token_info.get("launched_at")
-        market_cap = token_info.get("market_cap")
-        txns = token_info.get("txns", {})
-        volume = token_info.get("volume", {})
-
-        mcap_info = f"${market_cap:,.0f}" if market_cap else "N/A"
         log.info(
-            "  Mint: %s, Market cap: %s, Launch: %s, Change: %s%%",
-            mint[:12], mcap_info,
-            launched_at.isoformat() if launched_at else "N/A",
-            price_change,
+            "[%d/%d] %s (%s) — mcap=$%s, change=%+.1f%%",
+            i + 1, len(winners), ticker, mint[:8],
+            f"{w['market_cap']:,.0f}" if w.get("market_cap") else "N/A",
+            price_change or 0,
         )
 
         grok_calls += 1
@@ -158,12 +144,9 @@ async def main():
         else:
             mention_data = {
                 "total_mentions": 0,
-                "mentions_0_5min": None,
-                "mentions_5_15min": None,
-                "mentions_15_60min": None,
-                "mentions_after_60min": None,
-                "earliest_mention_min": None,
-                "mention_timestamps": [],
+                "mentions_0_5min": None, "mentions_5_15min": None,
+                "mentions_15_60min": None, "mentions_after_60min": None,
+                "earliest_mention_min": None, "mention_timestamps": [],
             }
 
         if mention_data.get("total_mentions", 0) > 0:
@@ -181,9 +164,8 @@ async def main():
             "mint": mint,
             "launched_at": launched_at.isoformat() if launched_at else None,
             "price_change_pct": price_change,
-            "market_cap": market_cap,
-            "volume_24h": volume.get("h24") if volume else None,
-            "txns_24h": txns.get("h24") if txns else None,
+            "market_cap": w.get("market_cap"),
+            "volume_24h": w.get("volume_24h"),
             **mention_data,
         })
 
@@ -195,21 +177,17 @@ async def main():
     log.info("Saved %d results to %s", len(results), OUTPUT_PATH)
 
     success_rate = (grok_successes / grok_calls * 100) if grok_calls > 0 else 0
-    total_mentions_vals = [r["total_mentions"] for r in results]
-    mentions_0_5_vals = [r["mentions_0_5min"] for r in results if r["mentions_0_5min"] is not None]
-    mentions_5_15_vals = [r["mentions_5_15min"] for r in results if r["mentions_5_15min"] is not None]
-
-    avg_total = sum(total_mentions_vals) / len(total_mentions_vals) if total_mentions_vals else 0
-    avg_0_5 = sum(mentions_0_5_vals) / len(mentions_0_5_vals) if mentions_0_5_vals else 0
-    avg_5_15 = sum(mentions_5_15_vals) / len(mentions_5_15_vals) if mentions_5_15_vals else 0
+    total_m = [r["total_mentions"] for r in results]
+    m_0_5 = [r["mentions_0_5min"] for r in results if r["mentions_0_5min"] is not None]
+    m_5_15 = [r["mentions_5_15min"] for r in results if r["mentions_5_15min"] is not None]
 
     print()
     print("=" * 60)
     print(f"WINNERS — {len(results)} coins processed")
     print(f"Grok success rate: {success_rate:.1f}% ({grok_successes}/{grok_calls})")
-    print(f"Average total mentions:  {avg_total:.1f}")
-    print(f"Average mentions 0-5min: {avg_0_5:.1f}")
-    print(f"Average mentions 5-15min: {avg_5_15:.1f}")
+    print(f"Average total mentions:  {sum(total_m)/len(total_m):.1f}" if total_m else "N/A")
+    print(f"Average mentions 0-5min: {sum(m_0_5)/len(m_0_5):.1f}" if m_0_5 else "N/A")
+    print(f"Average mentions 5-15min: {sum(m_5_15)/len(m_5_15):.1f}" if m_5_15 else "N/A")
     print("=" * 60)
 
 

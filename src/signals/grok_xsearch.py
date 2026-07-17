@@ -116,8 +116,33 @@ def _extract_output_text(data: dict) -> str | None:
 
 
 def _extract_number(text: str) -> int | None:
-    match = re.search(r"\d+", text.strip())
-    return int(match.group()) if match else None
+    """Extract a mention count from Grok response text.
+
+    Prefers numbers near count/unique/total keywords; falls back to the last
+    reasonable integer (ignoring mint-address-length digit sequences).
+    """
+    # Priority 1: keyword-adjacent numbers
+    keyword_match = re.search(
+        r"(?:count|total|unique)\s*[:=]?\s*(\d{1,9})\b",
+        text, re.IGNORECASE,
+    )
+    if keyword_match:
+        return int(keyword_match.group(1))
+
+    # Priority 2: "X unique" or "X mentions"
+    keyword_match2 = re.search(
+        r"(\d{1,9})\s*(?:unique|mention|account|user|result)s?\b",
+        text, re.IGNORECASE,
+    )
+    if keyword_match2:
+        return int(keyword_match2.group(1))
+
+    # Priority 3: last standalone integer that isn't absurdly long
+    all_nums = re.findall(r"\b(\d{1,9})\b", text)
+    if all_nums:
+        return int(all_nums[-1])
+
+    return None
 
 
 def _parse_iso_timestamps(text: str) -> list[datetime]:
@@ -228,19 +253,10 @@ async def count_unique_mentions(ticker: str, mint: str, minutes: int = 5) -> int
         if val is not None:
             return val
 
-    try:
-        content_blocks = data.get("output", [])
-        for block in content_blocks:
-            inner = block.get("content") if isinstance(block, dict) else None
-            if isinstance(inner, list):
-                for item in inner:
-                    text2 = item.get("output_text") or item.get("text") or ""
-                    match = re.search(r"\d+", text2.strip())
-                    if match:
-                        return int(match.group())
-    except (KeyError, TypeError, ValueError) as exc:
-        log.warning("Grok API unexpected response shape for %s (%s): %s", ticker, mint[:8], exc)
-
+    log.warning(
+        "Grok API unexpected response shape for %s (%s) — no numeric count found",
+        ticker, mint[:8],
+    )
     return 0
 
 
