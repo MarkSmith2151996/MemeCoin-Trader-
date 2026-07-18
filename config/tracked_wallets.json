@@ -1,0 +1,590 @@
+[
+  {
+    "address": "D5YqVMoSxnqeZAKAUUE1Dm3bmjtdxQ5DCF356ozqN9cM",
+    "label": "smart_money_1",
+    "coins_early_on": [
+      "BONK",
+      "WIF",
+      "POPCAT"
+    ],
+    "score": 3,
+    "total_trades": 552,
+    "unique_tokens_traded": 39
+  },
+  {
+    "address": "5Q544fKrFoe6tsEbD7S8EmxGTJYAKtTVhAW5Q5pge4j1",
+    "label": "smart_money_2",
+    "coins_early_on": [
+      "BONK",
+      "WIF",
+      "POPCAT"
+    ],
+    "score": 3,
+    "total_trades": 442,
+    "unique_tokens_traded": 66
+  },
+  {
+    "address": "78Bo7xxGWBEvqbh3VMKvkFG4Z63cXKSJ2LCEXAanhN7a",
+    "label": "smart_money_3",
+    "coins_early_on": [
+      "BONK",
+      "WIF",
+      "POPCAT"
+    ],
+    "score": 3,
+    "total_trades": 857,
+    "unique_tokens_traded": 107
+  },
+  {
+    "address": "ARu4n5mFdZogZAravu7CcizaojWnS6oqka37gdLT5SZn",
+    "label": "smart_money_4",
+    "coins_early_on": [
+      "BONK",
+      "WIF",
+      "POPCAT"
+    ],
+    "score": 3,
+    "total_trades": 718,
+    "unique_tokens_traded": 39
+  },
+  {
+    "address": "GpMZbSM2GgvTKHJirzeGfMFoaZ8UR2X7F4v8vHTvxFbL",
+    "label": "smart_money_5",
+    "coins_early_on": [
+      "BONK",
+      "WIF",
+      "POPCAT"
+    ],
+    "score": 3,
+    "total_trades": 474,
+    "unique_tokens_traded": 72
+  },
+  {
+    "address": "12BLKXs2JUSzMTq3r5JFor4FBiG4bA3kFpW5LpvMkweT",
+    "label": "smart_money_6",
+    "coins_early_on": [
+      "BONK",
+      "WIF",
+      "POPCAT"
+    ],
+    "score": 3,
+    "total_trades": 605,
+    "unique_tokens_traded": 46
+  },
+  {
+    "address": "HU23r7UoZbqTUuh3vA7emAGztFtqwTeVips789vqxxBw",
+    "label": "smart_money_7",
+    "coins_early_on": [
+      "BONK",
+      "WIF",
+      "POPCAT"
+    ],
+    "score": 3,
+    "total_trades": 776,
+    "unique_tokens_traded": 54
+  },
+  {
+    "address": "ttcZfmd93bR1UWoGGJNyNVCkuMLAo9L2rzuxbtPbNDq",
+    "label": "smart_money_8",
+    "coins_early_on": [
+      "BONK",
+      "WIF",
+      "POPCAT"
+    ],
+    "score": 3,
+    "total_trades": 568,
+    "unique_tokens_traded": 38
+  },
+  {
+    "address": "DcQNaByvstRZCERvb9UJHgHiQe8YX2FMdPptM86psQyz",
+    "label": "smart_money_9",
+    "coins_early_on": [
+      "BONK",
+      "WIF",
+      "POPCAT"
+    ],
+    "score": 3,
+    "total_trades": 717,
+    "unique_tokens_traded": 65
+  },
+  {
+    "address": "3CgvbiM3op4vjrrjH2zcrQUwsqh5veNVRjFCB9N6sRoD",
+    "label": "smart_money_10",
+    "coins_early_on": [
+      "BONK",
+      "WIF",
+      "POPCAT"
+    ],
+    "score": 3,
+    "total_trades": 818,
+    "unique_tokens_traded": 61
+  },
+  {
+    "address": "HFqp6ErWHY6Uzhj8rFyjYuDya2mXUpYEk8VW75K9PSiY",
+    "label": "smart_money_11",
+    "coins_early_on": [
+      "BONK",
+      "WIF",
+      "POPCAT"
+    ],
+    "score": 3,
+    "total_trades": 828,
+    "unique_tokens_traded": 59
+  },
+  {
+    "address": "rLsi2DPwRLovHzLV5XYxa8B597bv8w8nX7fZHJJf8uy",
+    "label": "smart_money_12",
+    "coins_early_on": [
+      "BONK",
+      "WIF",
+      "POPCAT"
+    ],
+    "score": 3,
+    "total_trades": 718,
+    "unique_tokens_traded": 113
+  },
+  {
+    "address": "35SGPwFuRJpzQdaG1n7onedyW34Bbb5DVTzQbYK7hAmk",
+    "label": "smart_money_13",
+    "coins_early_on": [
+      "BONK",
+      "WIF",
+      "POPCAT"
+    ],
+    "score": 3,
+    "total_trades": 279,
+    "unique_tokens_traded": 15
+  },
+  {
+    "address": "R32xAccFis3YzBzGwZ1C4QkGiehLxSao7gDmErA3kjk",
+    "label": "smart_money_14",
+    "coins_early_on": [
+      "BONK",
+      "WIF",
+      "POPCAT"
+    ],
+    "score": 3,
+    "total_trades": 766,
+    "unique_tokens_traded": 79
+  },
+  {
+    "address": "5xUfgsaX72xhfAyy24NgXbqYCCicSYxtC8z3YuVSx6Dw",
+    "label": "smart_money_15",
+    "coins_early_on": [
+      "BONK",
+      "WIF",
+      "POPCAT"
+    ],
+    "score": 3,
+    "total_trades": 748,
+    "unique_tokens_traded": 33
+  },
+  {
+    "address": "6LXutJvKUw8Q5ue2gCgKHQdAN4suWW8awzFVC6XCguFx",
+    "label": "smart_money_16",
+    "coins_early_on": [
+      "BONK",
+      "WIF",
+      "POPCAT"
+    ],
+    "score": 3,
+    "total_trades": 654,
+    "unique_tokens_traded": 43
+  },
+  {
+    "address": "MfDuWeqSHEqTFVYZ7LoexgAK9dxk7cy4DFJWjWMGVWa",
+    "label": "smart_money_17",
+    "coins_early_on": [
+      "BONK",
+      "WIF",
+      "POPCAT"
+    ],
+    "score": 3,
+    "total_trades": 199,
+    "unique_tokens_traded": 15
+  },
+  {
+    "address": "29eV5LuZwwVaoufKr5ShBejYVP6N4JZ14U3M5rffXsjp",
+    "label": "smart_money_18",
+    "coins_early_on": [
+      "BONK",
+      "WIF",
+      "POPCAT"
+    ],
+    "score": 3,
+    "total_trades": 606,
+    "unique_tokens_traded": 49
+  },
+  {
+    "address": "GgGap6tiUKhD8XeUZaHpVB3rerb3zKWNouWQJHozDujt",
+    "label": "smart_money_19",
+    "coins_early_on": [
+      "BONK",
+      "WIF",
+      "POPCAT"
+    ],
+    "score": 3,
+    "total_trades": 533,
+    "unique_tokens_traded": 46
+  },
+  {
+    "address": "GGztQqQ6pCPaJQnNpXBgELr5cs3WwDakRbh1iEMzjgSJ",
+    "label": "smart_money_20",
+    "coins_early_on": [
+      "BONK",
+      "WIF",
+      "POPCAT"
+    ],
+    "score": 3,
+    "total_trades": 742,
+    "unique_tokens_traded": 48
+  },
+  {
+    "address": "freeupq4fM9nSdZ5Q52AjSUp5NQ1UXC3y3y9rZVEByC",
+    "label": "smart_money_21",
+    "coins_early_on": [
+      "BONK",
+      "WIF",
+      "POPCAT"
+    ],
+    "score": 3,
+    "total_trades": 637,
+    "unique_tokens_traded": 49
+  },
+  {
+    "address": "o721mrttB9kBELuCaiiAE2e6EaahkmmspY6Xyo4t9EW",
+    "label": "smart_money_22",
+    "coins_early_on": [
+      "BONK",
+      "WIF",
+      "POPCAT"
+    ],
+    "score": 3,
+    "total_trades": 903,
+    "unique_tokens_traded": 60
+  },
+  {
+    "address": "7iWnBRRhBCiNXXPhqiGzvvBkKrvFSWqqmxRyu9VyYBxE",
+    "label": "smart_money_23",
+    "coins_early_on": [
+      "BONK",
+      "WIF",
+      "POPCAT"
+    ],
+    "score": 3,
+    "total_trades": 814,
+    "unique_tokens_traded": 56
+  },
+  {
+    "address": "3nMNd89AxwHUa1AFvQGqohRkxFEQsTsgiEyEyqXFHyyH",
+    "label": "smart_money_24",
+    "coins_early_on": [
+      "BONK",
+      "WIF",
+      "POPCAT"
+    ],
+    "score": 3,
+    "total_trades": 826,
+    "unique_tokens_traded": 126
+  },
+  {
+    "address": "riDi6z4Lzch9FvcEzmkkx9gqCoPniMrTMFchbGaikGq",
+    "label": "smart_money_25",
+    "coins_early_on": [
+      "BONK",
+      "WIF",
+      "POPCAT"
+    ],
+    "score": 3,
+    "total_trades": 587,
+    "unique_tokens_traded": 45
+  },
+  {
+    "address": "91iTFhWfwMJbATjymCBcY8uWN71F9FL8DYbTwjA8iCAp",
+    "label": "smart_money_26",
+    "coins_early_on": [
+      "BONK",
+      "WIF",
+      "POPCAT"
+    ],
+    "score": 3,
+    "total_trades": 701,
+    "unique_tokens_traded": 50
+  },
+  {
+    "address": "GoGoGo6N99mpyB7rfzhw2R4fXmaFctURXHaHMoGCyoLD",
+    "label": "smart_money_27",
+    "coins_early_on": [
+      "BONK",
+      "WIF",
+      "POPCAT"
+    ],
+    "score": 3,
+    "total_trades": 500,
+    "unique_tokens_traded": 36
+  },
+  {
+    "address": "7HkzG4LYyCJSrD3gopPQv3VVzQQKbHBZcm9fbjj5fuaH",
+    "label": "smart_money_28",
+    "coins_early_on": [
+      "BONK",
+      "WIF",
+      "POPCAT"
+    ],
+    "score": 3,
+    "total_trades": 1019,
+    "unique_tokens_traded": 33
+  },
+  {
+    "address": "GxDC9e7SP9mzhDo4re5HbpLa2RW7gB9DtmThx4i4pXSq",
+    "label": "smart_money_29",
+    "coins_early_on": [
+      "BONK",
+      "WIF",
+      "POPCAT"
+    ],
+    "score": 3,
+    "total_trades": 736,
+    "unique_tokens_traded": 92
+  },
+  {
+    "address": "GHigB15jr7wZ8GitjD4Hf5naqyUJfMbKa1n1PmSiBhUc",
+    "label": "smart_money_30",
+    "coins_early_on": [
+      "BONK",
+      "WIF",
+      "POPCAT"
+    ],
+    "score": 3,
+    "total_trades": 619,
+    "unique_tokens_traded": 54
+  },
+  {
+    "address": "FkdDHrM8j8psKbxuwjV1jBKCM2JGPygkj7WCX8sSCzNm",
+    "label": "smart_money_31",
+    "coins_early_on": [
+      "BONK",
+      "WIF",
+      "POPCAT"
+    ],
+    "score": 3,
+    "total_trades": 603,
+    "unique_tokens_traded": 56
+  },
+  {
+    "address": "RustQQ98WMbUrgL5i7sL5fFdyPbmk1sSh1QQkXHZrWs",
+    "label": "smart_money_32",
+    "coins_early_on": [
+      "BONK",
+      "WIF",
+      "POPCAT"
+    ],
+    "score": 3,
+    "total_trades": 545,
+    "unique_tokens_traded": 49
+  },
+  {
+    "address": "DSN3j1ykL3obAVNv7ZX49VsFCPe4LqzxHnmtLiPwY6xg",
+    "label": "smart_money_33",
+    "coins_early_on": [
+      "BONK",
+      "WIF",
+      "POPCAT"
+    ],
+    "score": 3,
+    "total_trades": 838,
+    "unique_tokens_traded": 48
+  },
+  {
+    "address": "yUwUyoufLrCmjcgURefVzvAfpcaZ2so6be4uDziT9aH",
+    "label": "smart_money_34",
+    "coins_early_on": [
+      "BONK",
+      "WIF",
+      "POPCAT"
+    ],
+    "score": 3,
+    "total_trades": 508,
+    "unique_tokens_traded": 52
+  },
+  {
+    "address": "56YM95f3yAmNbVxHRfho1MAx78GBL1fTjQGwaMDYVmNm",
+    "label": "smart_money_35",
+    "coins_early_on": [
+      "BONK",
+      "WIF",
+      "POPCAT"
+    ],
+    "score": 3,
+    "total_trades": 489,
+    "unique_tokens_traded": 42
+  },
+  {
+    "address": "theo9SfM3dKgKFbq4kFVmEXwSQ1pdr61wDqEWXKJpYs",
+    "label": "smart_money_36",
+    "coins_early_on": [
+      "BONK",
+      "WIF",
+      "POPCAT"
+    ],
+    "score": 3,
+    "total_trades": 938,
+    "unique_tokens_traded": 95
+  },
+  {
+    "address": "5ZGprBDnP2pWaYcbiAfN87UrZH3VihZo1aKSXXWskrZZ",
+    "label": "smart_money_37",
+    "coins_early_on": [
+      "BONK",
+      "WIF",
+      "POPCAT"
+    ],
+    "score": 3,
+    "total_trades": 855,
+    "unique_tokens_traded": 72
+  },
+  {
+    "address": "5Cuqafc5PbRugWztewZeQBMQGkoeACiN6YNeK3RokmFc",
+    "label": "smart_money_38",
+    "coins_early_on": [
+      "BONK",
+      "WIF",
+      "POPCAT"
+    ],
+    "score": 3,
+    "total_trades": 658,
+    "unique_tokens_traded": 25
+  },
+  {
+    "address": "4xDsmeTWPNjgSVSS1VTfzFq3iHZhp77ffPkAmkZkdu71",
+    "label": "smart_money_39",
+    "coins_early_on": [
+      "WIF",
+      "POPCAT"
+    ],
+    "score": 2,
+    "total_trades": 707,
+    "unique_tokens_traded": 52
+  },
+  {
+    "address": "CapuXNQoDviLvU1PxFiizLgPNQCxrsag1uMeyk6zLVps",
+    "label": "smart_money_40",
+    "coins_early_on": [
+      "WIF",
+      "POPCAT"
+    ],
+    "score": 2,
+    "total_trades": 700,
+    "unique_tokens_traded": 47
+  },
+  {
+    "address": "9Kkbt8qgNy1e5wm1QBdEHjgPw1F1TcaVu6kYwXJw4exj",
+    "label": "smart_money_41",
+    "coins_early_on": [
+      "WIF",
+      "POPCAT"
+    ],
+    "score": 2,
+    "total_trades": 686,
+    "unique_tokens_traded": 45
+  },
+  {
+    "address": "2MFoS3MPtvyQ4Wh4M9pdfPjz6UhVoNbFbGJAskCPCj3h",
+    "label": "smart_money_42",
+    "coins_early_on": [
+      "WIF",
+      "POPCAT"
+    ],
+    "score": 2,
+    "total_trades": 678,
+    "unique_tokens_traded": 35
+  },
+  {
+    "address": "AishPhdJXUHpo3zg2gt5AVfdUg3MPmf8DV8FButvbRJ6",
+    "label": "smart_money_43",
+    "coins_early_on": [
+      "WIF",
+      "POPCAT"
+    ],
+    "score": 2,
+    "total_trades": 806,
+    "unique_tokens_traded": 18
+  },
+  {
+    "address": "7Lv7Z44nYnsygdbLrKom3eGHUCg2oPMhDDXMNXDJRQ6s",
+    "label": "smart_money_44",
+    "coins_early_on": [
+      "WIF",
+      "POPCAT"
+    ],
+    "score": 2,
+    "total_trades": 637,
+    "unique_tokens_traded": 20
+  },
+  {
+    "address": "C9A9bGdLYumr2VXdWCquARkjQFgq7jWPD4jKuKzFhSY2",
+    "label": "smart_money_45",
+    "coins_early_on": [
+      "WIF",
+      "POPCAT"
+    ],
+    "score": 2,
+    "total_trades": 665,
+    "unique_tokens_traded": 45
+  },
+  {
+    "address": "BQ72nSv9f3PRyRKCBnHLVrerrv37CYTHm5h3s9VSGQDV",
+    "label": "smart_money_46",
+    "coins_early_on": [
+      "WIF",
+      "POPCAT"
+    ],
+    "score": 2,
+    "total_trades": 672,
+    "unique_tokens_traded": 45
+  },
+  {
+    "address": "DKaVnNPkt6V1EofifQLnkP74d8oM7Nd2cN6pcWfnXKxW",
+    "label": "smart_money_47",
+    "coins_early_on": [
+      "WIF",
+      "POPCAT"
+    ],
+    "score": 2,
+    "total_trades": 851,
+    "unique_tokens_traded": 18
+  },
+  {
+    "address": "DLZHiNNfrnp9CJfCRKYrGe12hYB1gEEb4CVSKKN31r35",
+    "label": "smart_money_48",
+    "coins_early_on": [
+      "WIF",
+      "POPCAT"
+    ],
+    "score": 2,
+    "total_trades": 757,
+    "unique_tokens_traded": 45
+  },
+  {
+    "address": "8psNvWTrdNTiVRNzAgsou9kETXNJm2SXZyaKuJraVRtf",
+    "label": "smart_money_49",
+    "coins_early_on": [
+      "WIF",
+      "POPCAT"
+    ],
+    "score": 2,
+    "total_trades": 1056,
+    "unique_tokens_traded": 73
+  },
+  {
+    "address": "6U91aKa8pmMxkJwBCfPTmUEfZi6dHe7DcFq2ALvB2tbB",
+    "label": "smart_money_50",
+    "coins_early_on": [
+      "WIF",
+      "POPCAT"
+    ],
+    "score": 2,
+    "total_trades": 683,
+    "unique_tokens_traded": 41
+  }
+]
