@@ -33,7 +33,7 @@ from src.execution.paper import PaperExecutionAdapter
 from src.strategy.position_manager import PositionManager
 from src.risk.rugcheck import RugCheckClient
 
-BROWSER_PC_URL = "http://172.21.32.1:8099"
+BROWSER_PC_URL = "http://localhost:8099"
 CAPTURE_URL = (
     "https://dexscreener.com/new-pairs/solana?"
     "rankBy=trendingScoreH6&order=desc"
@@ -216,7 +216,8 @@ async def monitor_positions(
             age_min = (datetime.now(UTC) - pos.opened_at).total_seconds() / 60
             if age_min >= TIME_STOP_MINUTES:
                 log.warning("CLOSE [price_unavailable]: mint=%s age=%.1fmin — force closing stale position", pos.mint_address[:16], age_min)
-                await manager.close_position(pos.mint_address, 0.0, mode="paper")
+                peak = peak_prices.get(pos.mint_address)
+                await manager.close_position(pos.mint_address, 0.0, mode="paper", peak_price_sol=peak)
                 peak_prices.pop(pos.mint_address, None)
             else:
                 log.warning("SKIP mark: mint=%s — DexScreener returned None (age=%.1fmin)", pos.mint_address[:16], age_min)
@@ -250,9 +251,10 @@ async def monitor_positions(
             close_reason = "time_stop"
 
         if close_reason:
+            peak = peak_prices.get(pos.mint_address)
             peak_prices.pop(pos.mint_address, None)
             trade = await _adapter_close(pos, current_price, close_reason, db_path)
-            await manager.close_position(pos.mint_address, current_price, mode="paper")
+            await manager.close_position(pos.mint_address, current_price, mode="paper", peak_price_sol=peak)
             log.info(
                 "CLOSE [%s]: mint=%s entry=%.8f peak=%.8f close=%.8f",
                 close_reason, pos.mint_address[:16], pos.entry_price_sol, peak, current_price,

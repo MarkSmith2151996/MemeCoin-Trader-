@@ -176,6 +176,7 @@ class Position(BaseModel):
     closed_at: datetime | None = None
     realized_pnl_sol: float = 0.0
     close_price_sol: float | None = None
+    peak_price_sol: float | None = None
     fill_quality: PaperFillQuality = PaperFillQuality.LEGACY_UNKNOWN
     archived: bool = False
     archived_at: datetime | None = None

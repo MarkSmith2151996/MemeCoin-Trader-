@@ -55,7 +55,7 @@ async def get_closed_today(db_path: Path) -> list[dict]:
     async with aiosqlite.connect(db_path) as db:
         cursor = await db.execute(
             """SELECT p.mint_address, p.entry_price_sol, p.close_price_sol,
-                      p.realized_pnl_sol, p.amount_sol
+                      p.realized_pnl_sol, p.amount_sol, p.peak_price_sol
                FROM positions p
                WHERE p.status = 'CLOSED'
                  AND p.closed_at >= datetime('now', '-1 day')
@@ -66,7 +66,7 @@ async def get_closed_today(db_path: Path) -> list[dict]:
     results = []
     async with aiosqlite.connect(db_path) as db:
         for r in rows:
-            mint, entry, close_price, realized_pnl, amount_sol = r
+            mint, entry, close_price, realized_pnl, amount_sol, peak_price_sol = r
             reason = "unknown"
             cursor = await db.execute(
                 """SELECT metadata_json FROM trades
@@ -86,6 +86,7 @@ async def get_closed_today(db_path: Path) -> list[dict]:
                 "mint": mint,
                 "entry_price": entry,
                 "close_price": close_price,
+                "peak_price_sol": peak_price_sol,
                 "realized_pnl": realized_pnl or 0.0,
                 "reason": reason,
             })
@@ -129,10 +130,12 @@ async def main() -> None:
     print(f"CLOSED TODAY ({len(closed_today)})")
     wins = 0
     realized_total = 0.0
+    left_on_table_values: list[float] = []
     for pos in closed_today:
         mint = pos["mint"]
         entry = pos["entry_price"]
         close_price = pos["close_price"]
+        peak_price = pos.get("peak_price_sol")
         realized_pnl = pos["realized_pnl"]
         reason = pos["reason"]
         realized_total += realized_pnl
@@ -146,10 +149,24 @@ async def main() -> None:
         else:
             pnl_str = "N/A"
 
-        print(f"  {_ticker(mint):6}  entry={entry:.8f}  close={close_price:.8f}  PnL={pnl_str}  reason={reason}")
+        peak_str = ""
+        left_str = ""
+        if entry and peak_price and entry > 0 and peak_price > 0:
+            peak_pct = ((peak_price - entry) / entry) * 100
+            peak_str = _fmt_pnl(peak_pct)
+            left_pct = peak_pct - pnl_pct if pnl_str != "N/A" else 0.0
+            left_str = _fmt_pnl(left_pct)
+            left_on_table_values.append(left_pct)
+        else:
+            peak_str = "N/A"
+            left_str = "N/A"
+
+        print(f"  {_ticker(mint):6}  entry={entry:.8f}  close={close_price:.8f}  peak={peak_str:>8}  PnL={pnl_str:>8}  left={left_str:>8}  reason={reason}")
     print()
 
-    _print_summary(len(open_positions), len(closed_today), wins, realized_total, open_unrealized)
+    avg_left = sum(left_on_table_values) / len(left_on_table_values) if left_on_table_values else 0.0
+    max_left = max(left_on_table_values) if left_on_table_values else 0.0
+    _print_summary(len(open_positions), len(closed_today), wins, realized_total, open_unrealized, avg_left, max_left)
 
 
 def _print_summary(
@@ -158,14 +175,18 @@ def _print_summary(
     wins: int,
     realized_total: float,
     unrealized_total: float,
+    avg_left_on_table: float = 0.0,
+    max_left_on_table: float = 0.0,
 ) -> None:
     win_rate_str = f"{wins}/{closed_count} ({int(wins / closed_count * 100) if closed_count else 0}%)"
     print("SUMMARY")
-    print(f"  Open positions:     {open_count}")
-    print(f"  Closed today:       {closed_count}")
-    print(f"  Win rate:           {win_rate_str}")
-    print(f"  Realized PnL:       {realized_total:+.6f} SOL")
-    print(f"  Unrealized PnL:     {unrealized_total:+.6f} SOL (live marks)")
+    print(f"  Open positions:       {open_count}")
+    print(f"  Closed today:         {closed_count}")
+    print(f"  Win rate:             {win_rate_str}")
+    print(f"  Realized PnL:         {realized_total:+.6f} SOL")
+    print(f"  Unrealized PnL:       {unrealized_total:+.6f} SOL (live marks)")
+    print(f"  Avg left on table:    {avg_left_on_table:.1f}%")
+    print(f"  Max left on table:    {max_left_on_table:.1f}%")
 
 
 if __name__ == "__main__":

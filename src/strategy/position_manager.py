@@ -143,6 +143,7 @@ class PositionManager:
         exit_price_sol: float | None = None,
         *,
         mode: str | None = None,
+        peak_price_sol: float | None = None,
     ) -> Position | None:
         position = self._cached_position(mint, mode)
         if position is None:
@@ -168,6 +169,7 @@ class PositionManager:
                 "closed_at": datetime.now(UTC),
                 "realized_pnl_sol": round(position.realized_pnl_sol + realized_pnl, 9),
                 "close_price_sol": close_price,
+                "peak_price_sol": peak_price_sol,
             }
         )
         self._cache[(closed.mint_address, closed.mode)] = closed

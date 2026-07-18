@@ -151,16 +151,31 @@ def _parse_age_minutes(s: str) -> float:
 def parse_row(row: dict) -> dict:
     """Map a browser-pc row to a coin dict for screen_coin()."""
     ticker = row.get("name") or row.get("symbol") or "?"
-    mcap_str = row.get("mcap", "0")
-    mcap = _parse_usd_string(mcap_str)
-    age_str = row.get("age", "0")
-    age_min = _parse_age_minutes(age_str)
+    # market_cap_usd is a float from browser-pc; mcap is a string from older format
+    if row.get("market_cap_usd") is not None:
+        mcap = float(row["market_cap_usd"])
+    else:
+        mcap = _parse_usd_string(row.get("mcap", "0"))
+    # age: prefer age_minutes float, fallback to parsing age string
+    if row.get("age_minutes") is not None:
+        age_min = float(row["age_minutes"])
+    else:
+        age_min = _parse_age_minutes(row.get("age", "0"))
     now = datetime.now(UTC)
     created_ts = int((now.timestamp() - age_min * 60) * 1000)
+    buys = int(row.get("buys", 0) or 0)
+    sells = int(row.get("sells", 0) or 0)
+    volume = float(row.get("volume_usd", 0) or 0)
+    txns = buys + sells
+    bs_ratio = buys / max(sells, 1)
     return {
         "ticker": ticker,
         "usd_market_cap": mcap,
         "created_timestamp": max(created_ts, 0),
+        "volume": volume,
+        "txns": txns,
+        "buy_sell_ratio": bs_ratio,
+        "liquidity": float(row.get("liquidity_usd", 0) or 0),
     }
 
 
@@ -174,7 +189,7 @@ async def fetch_candidates(http: httpx.AsyncClient) -> list[dict]:
         )
         resp.raise_for_status()
         data = resp.json()
-        rows = data.get("rows", [])
+        rows = data.get("candidates", data.get("rows", []))
         log.info("browser-pc returned %d rows", len(rows))
         return rows
     except Exception as e:
