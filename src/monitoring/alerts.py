@@ -141,6 +141,21 @@ def format_alert_message(payload: dict[str, Any]) -> str:
     return f"[{payload['level'].upper()}] {payload['title']}\n{payload['message']}"
 
 
+IMESSAGE_RECIPIENT = os.getenv("IMESSAGE_RECIPIENT", "")
+
+
+def send_imessage(message: str) -> None:
+    """Fire-and-forget: append alert to /tmp/alerts_pending.log for Mac-side poller."""
+    if not IMESSAGE_RECIPIENT:
+        return
+    try:
+        with open("/tmp/alerts_pending.log", "a") as f:
+            f.write(f"[{IMESSAGE_RECIPIENT}] {message}\n")
+        log_info("imessage.queued", recipient=IMESSAGE_RECIPIENT, preview=message[:60])
+    except Exception as exc:
+        log_warning("imessage.failed", error=str(exc))
+
+
 async def send_alert(message: str) -> None:
     if not message:
         raise ValueError("message cannot be empty")

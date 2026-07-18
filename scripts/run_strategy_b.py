@@ -35,6 +35,7 @@ from src.core.database import init_db, record_trade
 from src.core.models import Side, Trade
 from src.execution.price_provider import DexScreenerPriceProvider
 from src.execution.paper import PaperExecutionAdapter
+from src.monitoring.alerts import send_imessage
 from src.risk.rugcheck import RugCheckClient
 from src.signals.grok_xsearch import get_mentions_with_timestamps, count_influencer_mentions
 from src.strategy.position_manager import PositionManager
@@ -439,6 +440,11 @@ async def try_enter(
         return False
 
     log.info("ENTRY mint=%s ticker=%s price=%.8f SOL", mint[:16], ticker, price)
+    send_imessage(
+        f"\U0001f7e2 [STRATEGY B] ENTERED {ticker}\n"
+        f"Price: {price:.8f} SOL\n"
+        f"Size: {PAPER_SIZE_SOL} SOL"
+    )
     return True
 
 
@@ -474,9 +480,16 @@ async def monitor_positions(
         if close_reason:
             trade = await _adapter_close(pos, close_price, close_reason, db_path)
             await manager.close_position(pos.mint_address, close_price, mode="paper")
+            pnl_pct = ((current_price - pos.entry_price_sol) / pos.entry_price_sol) * 100 if pos.entry_price_sol else 0.0
             log.info(
                 "CLOSE [%s]: mint=%s entry=%.8f close=%.8f",
                 close_reason, pos.mint_address[:16], pos.entry_price_sol, current_price,
+            )
+            send_imessage(
+                f"\U0001f534 [STRATEGY B] CLOSED {pos.mint_address[:8]}\n"
+                f"Entry: {pos.entry_price_sol:.8f} \u2192 Close: {current_price:.8f}\n"
+                f"PnL: {pnl_pct:+.1f}%\n"
+                f"Reason: {close_reason}"
             )
 
 
