@@ -317,6 +317,89 @@ async def get_mentions_with_timestamps(
     return _bucket_mentions(timestamps, launched_at, total_mentions)
 
 
+INFLUENCER_HANDLES = [
+    "SolanaFloor", "lookonchain", "pumpdotfun", "blknoiz06", "0xVonGogh", "973Meech",
+]
+
+
+async def count_influencer_mentions(
+    ticker: str,
+    mint: str,
+    launched_at: datetime,
+    window_minutes: int = 15,
+) -> dict:
+    """Query Grok for mentions ONLY from tracked influencer accounts within
+    the first window_minutes after launch using since_time/until_time operators.
+
+    Returns dict with: total (int), accounts_mentioned (list[str])
+    """
+    launch_unix = int(launched_at.timestamp())
+    window_end = launch_unix + window_minutes * 60
+    from_filters = " OR ".join(f"from:{h}" for h in INFLUENCER_HANDLES)
+
+    for query_str in [f"${ticker}", mint]:
+        q = f"({from_filters}) {query_str} since_time:{launch_unix} until_time:{window_end}"
+        prompt = (
+            f"Search X for: {q}\n"
+            "List each mention with the account handle and approximate UTC timestamp (ISO format). "
+            "Then report the total count of unique accounts from the specified list that mentioned it. "
+            "Respond with the format: COUNT: <number>, ACCOUNTS: <handles or NONE>"
+        )
+        payload = {
+            "model": DEFAULT_MODEL,
+            "input": [{"role": "user", "content": prompt}],
+            "tools": [{"type": "x_search"}],
+        }
+        data = await _post_with_retry(ticker, mint, payload)
+        if data is None:
+            continue
+
+        text = _extract_output_text(data)
+        if not text:
+            continue
+
+        raw_text = text
+        if not any(h.lower() in raw_text.lower() for h in INFLUENCER_HANDLES):
+            try:
+                raw_json = json.dumps(data)
+                if any(h.lower() in raw_json.lower() for h in INFLUENCER_HANDLES):
+                    raw_text = raw_json
+            except (TypeError, ValueError):
+                pass
+
+        # Extract handles by checking which appear on mention-like (timestamp-bearing) lines
+        lines = raw_text.split("\n")
+        accounts_mentioned: list[str] = []
+        accounted: set[str] = set()
+        for line in lines:
+            l_lower = line.lower()
+            for h in INFLUENCER_HANDLES:
+                if h.lower() in l_lower and h not in accounted:
+                    mention_keywords = ["mention", "post", "tweet", "said"]
+                    if _ISO_TS_RE.search(line) or any(v in l_lower for v in mention_keywords):
+                        accounted.add(h)
+                        accounts_mentioned.append(h)
+
+        # Extract count: prefer mention-result context, ignore "X accounts" listing
+        mention_count = None
+        mc = re.search(r'(\d{1,9})\s*(?:mention|result)s?\b', raw_text, re.IGNORECASE)
+        if mc:
+            mention_count = int(mc.group(1))
+        else:
+            mc2 = re.search(r'(?:count|total)\s*[:=]?\s*(\d{1,9})\b', raw_text, re.IGNORECASE)
+            if mc2:
+                mention_count = int(mc2.group(1))
+
+        total = mention_count if mention_count is not None else len(accounts_mentioned)
+
+        return {
+            "total": total,
+            "accounts_mentioned": accounts_mentioned,
+        }
+
+    return {"total": 0, "accounts_mentioned": []}
+
+
 def _zero_mention_result() -> dict:
     return {
         "total_mentions": 0,

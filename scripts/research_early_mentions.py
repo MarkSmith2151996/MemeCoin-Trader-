@@ -14,6 +14,7 @@ Outputs:
 
 from __future__ import annotations
 
+import argparse
 import asyncio
 import json
 import logging
@@ -27,7 +28,10 @@ import httpx
 from dotenv import load_dotenv
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
-from src.signals.grok_xsearch import _post_with_retry, _extract_output_text, _parse_iso_timestamps
+from src.signals.grok_xsearch import (
+    _post_with_retry, _extract_output_text, _parse_iso_timestamps,
+    count_influencer_mentions, INFLUENCER_HANDLES,
+)
 
 load_dotenv()
 
@@ -401,56 +405,146 @@ def recommend_threshold(winners: list[dict], losers: list[dict], window: str) ->
     return best
 
 
+async def enrich_with_influencer_data(
+    winners: list[dict], losers: list[dict],
+) -> tuple[list[dict], list[dict]]:
+    """Add influencer mention data to existing coin records (does not re-fetch coins).
+
+    Returns updated winners and losers lists with new fields:
+      - influencer_mentions_15min: int
+      - influencer_accounts: list[str]
+    """
+    w_out: list[dict] = []
+    l_out: list[dict] = []
+
+    for group_label, coins, out_list in [
+        ("WINNER", winners, w_out),
+        ("LOSER", losers, l_out),
+    ]:
+        for i, coin in enumerate(coins):
+            ticker = coin["ticker"]
+            mint = coin["mint"]
+            launched_at = datetime.fromisoformat(coin["launched_at"])
+            log.info(
+                "[%s INFLUENCER %d/%d] %s (%s)",
+                group_label, i + 1, len(coins), ticker, mint[:8],
+            )
+            result = await count_influencer_mentions(ticker, mint, launched_at, window_minutes=15)
+            enriched = dict(coin)
+            enriched["influencer_mentions_15min"] = result["total"]
+            enriched["influencer_accounts"] = result["accounts_mentioned"]
+            out_list.append(enriched)
+            log.info(
+                "  influencer mentions=%d accounts=%s",
+                result["total"], result["accounts_mentioned"] or "[]",
+            )
+            await asyncio.sleep(2)
+
+    return w_out, l_out
+
+
 async def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument(
+        "--influencer-only", action="store_true",
+        help="Load existing winners/losers JSON and add influencer mention data only",
+    )
+    args = parser.parse_args()
+
     os.makedirs(OUTPUT_DIR, exist_ok=True)
 
-    winners, losers = _collect_coins()
+    if args.influencer_only:
+        w_path = f"{OUTPUT_DIR}/winners.json"
+        l_path = f"{OUTPUT_DIR}/losers.json"
+        if not os.path.exists(w_path) or not os.path.exists(l_path):
+            log.error("Existing winners/losers JSON not found in %s/", OUTPUT_DIR)
+            sys.exit(1)
+        with open(w_path) as f:
+            existing_winners = json.load(f)
+        with open(l_path) as f:
+            existing_losers = json.load(f)
+        log.info("Loaded %d winners, %d losers from %s/", len(existing_winners), len(existing_losers), OUTPUT_DIR)
 
-    if not winners and not losers:
-        log.error("No qualifying coins found — cannot proceed")
-        sys.exit(1)
+        w_results, l_results = await enrich_with_influencer_data(existing_winners, existing_losers)
 
-    w_results: list[dict] = []
-    l_results: list[dict] = []
+        # Save v2
+        with open(f"{OUTPUT_DIR}/winners_v2.json", "w") as f:
+            json.dump(w_results, f, indent=2)
+        with open(f"{OUTPUT_DIR}/losers_v2.json", "w") as f:
+            json.dump(l_results, f, indent=2)
+        log.info("Saved v2: winners=%d losers=%d to %s/", len(w_results), len(l_results), OUTPUT_DIR)
+    else:
+        winners, losers = _collect_coins()
 
-    for group_label, coins, results_list in [
-        ("WINNER", winners, w_results),
-        ("LOSER", losers, l_results),
-    ]:
-        for i, info in enumerate(coins):
-            log.info("[%s %d/%d]", group_label, i + 1, len(coins))
-            result = await process_coin(info)
-            if result:
-                results_list.append(result)
-            await asyncio.sleep(1.5)
+        if not winners and not losers:
+            log.error("No qualifying coins found \u2014 cannot proceed")
+            sys.exit(1)
 
-    # Save
-    with open(f"{OUTPUT_DIR}/winners.json", "w") as f:
-        json.dump(w_results, f, indent=2)
-    with open(f"{OUTPUT_DIR}/losers.json", "w") as f:
-        json.dump(l_results, f, indent=2)
-    log.info("Saved winners=%d losers=%d to %s/", len(w_results), len(l_results), OUTPUT_DIR)
+        w_results: list[dict] = []
+        l_results: list[dict] = []
+
+        for group_label, coins, results_list in [
+            ("WINNER", winners, w_results),
+            ("LOSER", losers, l_results),
+        ]:
+            for i, info in enumerate(coins):
+                log.info("[%s %d/%d]", group_label, i + 1, len(coins))
+                result = await process_coin(info)
+                if result:
+                    results_list.append(result)
+                await asyncio.sleep(1.5)
+
+        # Save
+        with open(f"{OUTPUT_DIR}/winners.json", "w") as f:
+            json.dump(w_results, f, indent=2)
+        with open(f"{OUTPUT_DIR}/losers.json", "w") as f:
+            json.dump(l_results, f, indent=2)
+        log.info("Saved winners=%d losers=%d to %s/", len(w_results), len(l_results), OUTPUT_DIR)
+
+        # Also enrich with influencer data
+        log.info("Enriching with influencer mention data...")
+        w_results, l_results = await enrich_with_influencer_data(w_results, l_results)
+
+        with open(f"{OUTPUT_DIR}/winners_v2.json", "w") as f:
+            json.dump(w_results, f, indent=2)
+        with open(f"{OUTPUT_DIR}/losers_v2.json", "w") as f:
+            json.dump(l_results, f, indent=2)
+        log.info("Saved v2: winners=%d losers=%d to %s/", len(w_results), len(l_results), OUTPUT_DIR)
 
     # Print comparison table
     print()
     print("=" * 80)
-    print(f"{'':30} WINNERS (n={len(w_results):>3})    LOSERS (n={len(l_results):>3})")
+    header_label = f"WINNERS (n={len(w_results):>3})    LOSERS (n={len(l_results):>3})"
+    print(f"{'':30} {header_label}")
     print("-" * 80)
 
-    w_s5, w_s15 = print_stats("WINNERS", w_results)
+    # Raw mention stats (from existing fields)
+    w_raw = [r.get("mentions_0_5min", r.get("raw_mentions_5min", 0)) for r in w_results]
+    l_raw = [r.get("mentions_0_5min", r.get("raw_mentions_5min", 0)) for r in l_results]
+
+    def avg(vals):
+        return round(sum(vals) / len(vals), 1) if vals else 0
+
+    # Influencer mention stats
+    w_infl = [r.get("influencer_mentions_15min", 0) for r in w_results]
+    l_infl = [r.get("influencer_mentions_15min", 0) for r in l_results]
+    w_any = sum(1 for r in w_results if r.get("influencer_mentions_15min", 0) > 0)
+    l_any = sum(1 for r in l_results if r.get("influencer_mentions_15min", 0) > 0)
+
+    # Aggregate accounts
+    w_accts: set[str] = set()
+    for r in w_results:
+        w_accts.update(r.get("influencer_accounts", []))
+    l_accts: set[str] = set()
+    for r in l_results:
+        l_accts.update(r.get("influencer_accounts", []))
+
+    print(f"  {'raw_mentions_5min avg:':>32}   {avg(w_raw):<20} {avg(l_raw)}")
+    print(f"  {'influencer_mentions_15min avg:':>32}   {avg(w_infl):<20} {avg(l_infl)}")
+    print(f"  {'any influencer mention:':>32}   {w_any}/{len(w_results):<15} {l_any}/{len(l_results)}")
     print()
-    print(f"{'':30} WINNERS (n={len(w_results):>3})    LOSERS (n={len(l_results):>3})")
-    print("-" * 80)
-    l_s5, l_s15 = print_stats("LOSERS", l_results)
-
-    print("-" * 80)
-
-    rec_5 = recommend_threshold(w_results, l_results, "5min")
-    rec_15 = recommend_threshold(w_results, l_results, "15min")
-    print(f"\n\nRecommended MIN_MENTIONS (0-5min window):  {rec_5}")
-    print(f"Recommended MIN_MENTIONS (0-15min window): {rec_15}")
-    print(f"\nRationale: threshold sits above LOSERS p90 ({l_s5['p90']}/{l_s15['p90']})")
-    print(f"           and at or below WINNERS median ({w_s5['median']}/{w_s15['median']})")
+    print(f"  Accounts that mentioned winners: {', '.join(sorted(w_accts)) if w_accts else 'none'}")
+    print(f"  Accounts that mentioned losers:  {', '.join(sorted(l_accts)) if l_accts else 'none'}")
     print("=" * 80)
 
 

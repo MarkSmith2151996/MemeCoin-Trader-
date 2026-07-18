@@ -36,7 +36,7 @@ from src.core.models import Side, Trade
 from src.execution.price_provider import DexScreenerPriceProvider
 from src.execution.paper import PaperExecutionAdapter
 from src.risk.rugcheck import RugCheckClient
-from src.signals.grok_xsearch import get_mentions_with_timestamps
+from src.signals.grok_xsearch import get_mentions_with_timestamps, count_influencer_mentions
 from src.strategy.position_manager import PositionManager
 
 DEX_PROFILES = "https://api.dexscreener.com/token-profiles/latest/v1"
@@ -53,6 +53,10 @@ MONITOR_INTERVAL = 30
 TAKE_PROFIT_MULT = 2.0
 HARD_STOP_MULT = 0.70
 TIME_STOP_MINUTES = 10
+
+# Mode flags
+REQUIRE_MENTIONS = True       # Set False to skip Grok entirely (on-chain only)
+USE_INFLUENCER_MENTIONS = False  # Set True to use influencer-weighted mentions instead of raw count
 
 MAX_AGE_MINUTES = 15
 MIN_MCAP_USD = 5_000
@@ -509,20 +513,46 @@ async def scan_loop(
 
                     pipe_stats["txn_pass"] += 1
 
-                    launched_at = datetime.fromtimestamp(
-                        coin["created_timestamp"] / 1000, tz=UTC,
-                    )
-                    mention_data = await get_mentions_with_timestamps(
-                        ticker, mint, launched_at, hours=1,
-                    )
-                    pipe_stats["grok_reached"] += 1
-                    early_mentions = mention_data.get("mentions_0_5min", 0)
-                    if early_mentions < MIN_MENTIONS:
-                        log.info(
-                            "SKIP %s \u2014 %d early mentions (need %d)",
-                            ticker, early_mentions, MIN_MENTIONS,
+                    if REQUIRE_MENTIONS:
+                        launched_at = datetime.fromtimestamp(
+                            coin["created_timestamp"] / 1000, tz=UTC,
                         )
-                        continue
+                        if USE_INFLUENCER_MENTIONS:
+                            infl_data = await count_influencer_mentions(
+                                ticker, mint, launched_at, window_minutes=15,
+                            )
+                            pipe_stats["grok_reached"] += 1
+                            infl_count = infl_data["total"]
+                            if infl_count < 1:
+                                log.info(
+                                    "SKIP %s \u2014 %d influencer mentions (need >= 1)",
+                                    ticker, infl_count,
+                                )
+                                continue
+                            log.info(
+                                "PASS %s \u2014 %d influencer mentions (accounts: %s)",
+                                ticker, infl_count, infl_data["accounts_mentioned"],
+                            )
+                        else:
+                            mention_data = await get_mentions_with_timestamps(
+                                ticker, mint, launched_at, hours=1,
+                            )
+                            pipe_stats["grok_reached"] += 1
+                            early_mentions = mention_data.get("mentions_0_5min", 0)
+                            if early_mentions < MIN_MENTIONS:
+                                log.info(
+                                    "SKIP %s \u2014 %d early mentions (need %d)",
+                                    ticker, early_mentions, MIN_MENTIONS,
+                                )
+                                continue
+                            log.info(
+                                "PASS %s \u2014 %d early mentions", ticker, early_mentions,
+                            )
+                    else:
+                        log.info(
+                            "MENTIONS SKIPPED (on-chain only mode) \u2014 proceeding to entry check for %s",
+                            ticker,
+                        )
 
                     ok = await try_enter(mint, ticker, mark_provider, adapter, manager, db_path)
                     if ok:
@@ -583,9 +613,16 @@ async def main() -> None:
     adapter = PaperExecutionAdapter(price_provider=mark_provider)
     manager = PositionManager(db_path, settings)
 
+    if not REQUIRE_MENTIONS:
+        mode_label = "ON-CHAIN ONLY (Grok disabled)"
+    elif USE_INFLUENCER_MENTIONS:
+        mode_label = "INFLUENCER MENTIONS >= 1 in first 15min"
+    else:
+        mode_label = f"RAW MENTIONS >= {MIN_MENTIONS} in first {MENTION_WINDOW_MINUTES}min"
+
     log.info(
-        "Strategy B started (DexScreener source). Scan every %ds, monitor every %ds.",
-        SCAN_INTERVAL, MONITOR_INTERVAL,
+        "Strategy B started \u2014 mode: %s (DexScreener source). Scan every %ds, monitor every %ds.",
+        mode_label, SCAN_INTERVAL, MONITOR_INTERVAL,
     )
     await asyncio.gather(
         scan_loop(mark_provider, adapter, manager, db_path, test_mode=args.test),
