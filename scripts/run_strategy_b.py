@@ -1,10 +1,10 @@
-"""Strategy B: DexScreener-backed Grok social-hype validated paper trading loop.
+"""Strategy B: browser-pc backed Grok social-hype validated paper trading loop.
 
-Replaces PumpFun API polling with DexScreener token-profiles + boosts + search
-endpoints to discover fresh Solana pairs under 15 minutes old.
+Uses browser-pc to scan DexScreener new-pairs page for fresh Solana pairs
+under 15 minutes old across all DEXs.
 
 SCAN (every 60s):
-  1. Poll DexScreener endpoints for fresh Solana pairs
+  1. browser-pc captures DexScreener new-pairs URL → rows
   2. Screen through age/mcap/txns/vol/ratio/RugCheck gates
   3. Grok mention check via 0-5min temporal bucket
   4. Paper enter if mentions >= MIN_MENTIONS and slots available
@@ -39,10 +39,15 @@ from src.risk.rugcheck import RugCheckClient
 from src.signals.grok_xsearch import get_mentions_with_timestamps, count_influencer_mentions
 from src.strategy.position_manager import PositionManager
 
-DEX_PROFILES = "https://api.dexscreener.com/token-profiles/latest/v1"
-DEX_BOOSTS_LATEST = "https://api.dexscreener.com/token-boosts/latest/v1"
-DEX_SEARCH = "https://api.dexscreener.com/latest/dex/search"
 WRAPPED_SOL_MINT = "So11111111111111111111111111111111111111112"
+
+BROWSER_PC_URL = "http://localhost:8099"
+STRATEGY_B_DEXSCREENER_URL = (
+    "https://dexscreener.com/new-pairs/solana"
+    "?rankBy=trendingScoreH6&order=desc"
+    "&minLiq=1000&minMarketCap=5000&maxMarketCap=50000&maxAge=0.25"
+)
+BROWSER_PC_WAIT_SECONDS = 8
 
 PAPER_SIZE_SOL = 0.05
 MIN_MENTIONS = 3
@@ -90,123 +95,120 @@ seen_mints: set[str] = set()
 _rugcheck = RugCheckClient(timeout_s=5.0)
 
 
-# ── DexScreener data source ──────────────────────────────────────────
+# ── browser-pc data source ──────────────────────────────────────────
 
-def _dexscreener_to_coin(pair: dict) -> dict | None:
-    """Transform a DexScreener pair dict into PumpFun-style coin fields."""
-    if not isinstance(pair, dict):
-        return None
-    if pair.get("chainId") != "solana":
-        return None
-    base = pair.get("baseToken") or {}
-    mint = base.get("address")
-    if not mint:
-        return None
-    created_ms = pair.get("pairCreatedAt")
-    if not isinstance(created_ms, (int, float)) or created_ms <= 0:
-        return None
-    symbol = base.get("symbol", "?")
+def _parse_usd_string(s: str) -> float:
+    """Parse a USD string like '$12.4K' or '$1.5M' to float."""
+    if not isinstance(s, str):
+        return 0.0
+    s = s.replace("$", "").replace(",", "").strip().upper()
+    if not s:
+        return 0.0
+    multiplier = 1.0
+    if s.endswith("K"):
+        multiplier = 1_000
+        s = s[:-1]
+    elif s.endswith("M"):
+        multiplier = 1_000_000
+        s = s[:-1]
+    elif s.endswith("B"):
+        multiplier = 1_000_000_000
+        s = s[:-1]
+    try:
+        return float(s) * multiplier
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def _parse_age_minutes(s: str) -> float:
+    """Parse an age string like '3m', '15m', '1h', '30s' to minutes."""
+    if not isinstance(s, str):
+        return 999.0
+    s = s.strip().lower()
+    if not s:
+        return 999.0
+    if s.endswith("h"):
+        try:
+            return float(s[:-1]) * 60
+        except (TypeError, ValueError):
+            return 999.0
+    if s.endswith("m"):
+        try:
+            return float(s[:-1])
+        except (TypeError, ValueError):
+            return 999.0
+    if s.endswith("s"):
+        try:
+            return float(s[:-1]) / 60
+        except (TypeError, ValueError):
+            return 999.0
+    try:
+        return float(s)
+    except (TypeError, ValueError):
+        return 999.0
+
+
+def parse_row(row: dict) -> dict:
+    """Map a browser-pc row to a coin dict for screen_coin()."""
+    ticker = row.get("name") or row.get("symbol") or "?"
+    mcap_str = row.get("mcap", "0")
+    mcap = _parse_usd_string(mcap_str)
+    age_str = row.get("age", "0")
+    age_min = _parse_age_minutes(age_str)
+    now = datetime.now(UTC)
+    created_ts = int((now.timestamp() - age_min * 60) * 1000)
     return {
-        "mint": mint,
-        "created_timestamp": int(created_ms),
-        "usd_market_cap": pair.get("marketCap") or pair.get("fdv") or 0,
-        "symbol": symbol,
-        "ticker": symbol,
-        "name": base.get("name", symbol),
+        "ticker": ticker,
+        "usd_market_cap": mcap,
+        "created_timestamp": max(created_ts, 0),
     }
 
 
-async def _collect_mint_candidates(http: httpx.AsyncClient) -> set[str]:
-    """Collect unique Solana mint addresses from token-profiles, boosts, and search."""
-    mints: set[str] = set()
-
-    # Source 1: token-profiles
+async def fetch_candidates(http: httpx.AsyncClient) -> list[dict]:
+    """Fetch fresh coins via browser-pc + DexScreener new-pairs URL."""
     try:
-        resp = await http.get(DEX_PROFILES, timeout=10.0)
-        resp.raise_for_status()
-        data = resp.json()
-        if isinstance(data, list):
-            for p in data:
-                if p.get("chainId") == "solana":
-                    m = p.get("tokenAddress") or p.get("address")
-                    if m:
-                        mints.add(m)
-    except Exception as exc:
-        log.warning("DexScreener profiles fetch failed: %s", exc)
-
-    # Source 2: token-boosts
-    try:
-        resp = await http.get(DEX_BOOSTS_LATEST, timeout=10.0)
-        resp.raise_for_status()
-        boosts = resp.json()
-        if isinstance(boosts, list):
-            for b in boosts:
-                if b.get("chainId") == "solana":
-                    m = b.get("tokenAddress")
-                    if m:
-                        mints.add(m)
-    except Exception as exc:
-        log.warning("DexScreener boosts fetch failed: %s", exc)
-
-    # Source 3: search with broad terms for fresh pairs
-    try:
-        search_terms = ["pump", "raydium", "cat", "dog", "ai", "pepe", "moon", "solana"]
-        for q in search_terms[:4]:
-            resp = await http.get(
-                DEX_SEARCH,
-                params={"q": q},
-                timeout=8.0,
-            )
-            if resp.status_code == 200:
-                data = resp.json()
-                for p in data.get("pairs", [])[:20]:
-                    if p.get("chainId") == "solana":
-                        addr = (p.get("baseToken") or {}).get("address")
-                        if addr:
-                            mints.add(addr)
-    except Exception as exc:
-        log.warning("DexScreener search fetch failed: %s", exc)
-
-    log.info("Collected %d unique candidate mints", len(mints))
-    return mints
-
-
-async def _enrich_mint(mint: str, http: httpx.AsyncClient) -> dict | None:
-    """Fetch single mint's pair data via DexScreener search and return coin dict."""
-    try:
-        resp = await http.get(
-            "https://api.dexscreener.com/latest/dex/search",
-            params={"q": mint},
-            timeout=8.0,
+        resp = await http.post(
+            f"{BROWSER_PC_URL}/capture",
+            json={"url": STRATEGY_B_DEXSCREENER_URL, "wait": BROWSER_PC_WAIT_SECONDS},
+            timeout=60,
         )
         resp.raise_for_status()
         data = resp.json()
-        pairs = data.get("pairs") or []
-        for p in pairs:
-            if not isinstance(p, dict) or p.get("chainId") != "solana":
-                continue
-            c = _dexscreener_to_coin(p)
-            if c:
-                return c
+        rows = data.get("rows", [])
+        log.info("browser-pc returned %d rows", len(rows))
+        return rows
+    except Exception as e:
+        log.warning("browser-pc error: %s", e)
+        return []
+
+
+async def resolve_mint(name: str, http: httpx.AsyncClient) -> str | None:
+    """Search DexScreener for the coin name, return Solana mint address or None."""
+    try:
+        resp = await http.get(
+            "https://api.dexscreener.com/latest/dex/search",
+            params={"q": name},
+            timeout=10.0,
+        )
+        resp.raise_for_status()
+        pairs = resp.json().get("pairs") or []
     except Exception as exc:
-        log.warning("Enrich failed for %s: %s", mint[:8], exc)
+        log.debug("DexScreener search failed for %s: %s", name, exc)
+        return None
+
+    for pair in pairs:
+        if not isinstance(pair, dict):
+            continue
+        if pair.get("chainId") != "solana":
+            continue
+        quote = pair.get("quoteToken", {})
+        if quote.get("address") != WRAPPED_SOL_MINT:
+            continue
+        mint = (pair.get("baseToken") or {}).get("address")
+        if mint and isinstance(mint, str):
+            log.info("RESOLVED %s \u2192 %s", name, mint)
+            return mint
     return None
-
-
-async def fetch_coins(http: httpx.AsyncClient) -> list[dict]:
-    """Collect fresh coins from DexScreener, enriching each via search API."""
-    candidate_mints = await _collect_mint_candidates(http)
-
-    enriched: list[dict] = []
-    for mint in candidate_mints:
-        coin = await _enrich_mint(mint, http)
-        if coin:
-            enriched.append(coin)
-        await asyncio.sleep(0.1)
-
-    enriched.sort(key=lambda c: c.get("created_timestamp", 0), reverse=True)
-    log.info("DexScreener: %d candidates enriched to %d coins", len(candidate_mints), len(enriched))
-    return enriched
 
 
 # ── Screening ────────────────────────────────────────────────────────
@@ -510,19 +512,18 @@ async def scan_loop(
             }
 
             if len(open_positions) < MAX_OPEN:
-                coins = await fetch_coins(http)
-                pipe_stats["total_pairs"] = len(coins)
-                log.info("DexScreener coins returned: %d", len(coins))
+                rows = await fetch_candidates(http)
+                pipe_stats["total_pairs"] = len(rows)
 
-                for coin in coins:
-                    mint = coin.get("mint")
-                    if not mint or not isinstance(mint, str):
-                        continue
-                    if mint in seen_mints:
+                for row in rows:
+                    coin = parse_row(row)
+                    ticker = coin["ticker"]
+
+                    mint = await resolve_mint(ticker, http)
+                    if not mint or mint in seen_mints:
                         continue
                     seen_mints.add(mint)
-
-                    ticker = coin.get("symbol") or coin.get("ticker") or coin.get("name") or mint[:8]
+                    coin["mint"] = mint
 
                     now = datetime.now(UTC)
                     created_ts = coin.get("created_timestamp")
@@ -608,8 +609,7 @@ async def scan_loop(
             if pipe_stats["grok_reached"] == 0 and pipe_stats["total_pairs"] > 0:
                 print(
                     "  NOTE: Zero coins reached Grok check. "
-                    "DexScreener API isn't surfacing sufficiently fresh+qualified pairs. "
-                    "browser-pc PumpFun fallback may be needed for higher throughput."
+                    "browser-pc isn't surfacing sufficiently qualified candidates."
                 )
 
             elapsed = time.monotonic() - cycle_start
@@ -652,7 +652,7 @@ async def main() -> None:
         mode_label = f"RAW MENTIONS >= {MIN_MENTIONS} in first {MENTION_WINDOW_MINUTES}min"
 
     log.info(
-        "Strategy B started \u2014 mode: %s (DexScreener source). Scan every %ds, monitor every %ds.",
+        "Strategy B started \u2014 mode: %s (browser-pc, all Solana DEXs, 0-15min). Scan every %ds, monitor every %ds.",
         mode_label, SCAN_INTERVAL, MONITOR_INTERVAL,
     )
     await asyncio.gather(
