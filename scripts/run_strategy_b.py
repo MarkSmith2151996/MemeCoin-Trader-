@@ -69,6 +69,11 @@ MAX_DEV_HOLDINGS_PCT = 10.0
 MAX_TOP10_HOLDER_PCT = 30.0
 MAX_MCAP_RUGCHECK = 50_000
 
+# Rug signal filters
+MIN_VOLUME_TO_MCAP_RATIO = 0.005
+MAX_VOLUME_TO_MCAP_RATIO = 50.0
+MIN_FEES_SOL_PER_15K_MCAP = 0.3
+
 DB_PATH = Path("data/trades.db")
 
 logging.basicConfig(
@@ -287,6 +292,27 @@ async def screen_coin(
                     f"age={age_min:.1f}m mcap=${mcap:.0f} txns={txns} vol=${vol:.0f} "
                     f"buys/sells={bs_ratio:.1f} \u2192 FAIL vol<${MIN_VOLUME_USD}"
                 )
+            if mcap > 0:
+                vol_ratio = vol / mcap
+                if vol_ratio < MIN_VOLUME_TO_MCAP_RATIO:
+                    return False, (
+                        f"age={age_min:.1f}m mcap=${mcap:.0f} txns={txns} vol=${vol:.0f} "
+                        f"vol/mcap={vol_ratio:.3f} buys/sells={bs_ratio:.1f} \u2192 FAIL dead_volume"
+                    )
+                if vol_ratio > MAX_VOLUME_TO_MCAP_RATIO:
+                    return False, (
+                        f"age={age_min:.1f}m mcap=${mcap:.0f} txns={txns} vol=${vol:.0f} "
+                        f"vol/mcap={vol_ratio:.1f} buys/sells={bs_ratio:.1f} \u2192 FAIL wash_trading"
+                    )
+
+            estimated_fees = txns * 0.001
+            expected_min_fees = (mcap / 15000) * MIN_FEES_SOL_PER_15K_MCAP
+            if estimated_fees < expected_min_fees:
+                return False, (
+                    f"age={age_min:.1f}m mcap=${mcap:.0f} txns={txns} vol=${vol:.0f} "
+                    f"est_fees={estimated_fees:.3f}SOL buys/sells={bs_ratio:.1f} \u2192 FAIL low_fees"
+                )
+
             if bs_ratio < MIN_BUY_SELL_RATIO:
                 return False, (
                     f"age={age_min:.1f}m mcap=${mcap:.0f} txns={txns} vol=${vol:.0f} "
@@ -338,7 +364,12 @@ async def screen_coin(
     txn_str = f"txns={txns}" if txns is not None else "txns=N/A"
     vol_str = f"vol=${vol:.0f}" if vol is not None else "vol=N/A"
     bs_str = f"buys/sells={bs_ratio:.1f}" if bs_ratio is not None else "buys/sells=N/A"
-    return True, f"age={age_min:.1f}m mcap=${mcap:.0f} {txn_str} {vol_str} {bs_str} \u2192 PASS"
+    extra = ""
+    if mcap > 0 and vol is not None and vol > 0:
+        extra += f"vol/mcap={vol / mcap:.3f} "
+    if txns is not None and txns > 0:
+        extra += f"est_fees={txns * 0.001:.3f}SOL "
+    return True, f"age={age_min:.1f}m mcap=${mcap:.0f} {txn_str} {vol_str} {extra}{bs_str} \u2192 PASS"
 
 
 # ── Entry ────────────────────────────────────────────────────────────
