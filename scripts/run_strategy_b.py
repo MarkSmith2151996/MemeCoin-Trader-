@@ -67,7 +67,6 @@ USE_INFLUENCER_MENTIONS = False  # Set True to use influencer-weighted mentions 
 MAX_AGE_MINUTES = 15
 MIN_MCAP_USD = 5_000
 MAX_MCAP_USD = 50_000
-MIN_TRANSACTIONS = 12
 MIN_BUY_SELL_RATIO = 0.6
 MIN_VOLUME_USD = 500
 
@@ -79,6 +78,14 @@ MAX_MCAP_RUGCHECK = 50_000
 MIN_VOLUME_TO_MCAP_RATIO = 0.005
 MAX_VOLUME_TO_MCAP_RATIO = 50.0
 MIN_FEES_SOL_PER_15K_MCAP = 0.3
+
+# Paper-mode holder concentration tiers (warn_pct, hard_reject_pct)
+HOLDER_TIERS = [
+    (2, 30.0, 80.0),    # 0-2 min: warn at 30%, hard reject at 80%
+    (5, 30.0, 65.0),    # 2-5 min: warn at 30%, hard reject at 65%
+    (10, 30.0, 50.0),   # 5-10 min: warn at 30%, hard reject at 50%
+    (999, 30.0, 40.0),  # 10-15 min: hard reject at 40%
+]
 
 DB_PATH = Path("data/trades.db")
 
@@ -101,6 +108,29 @@ except ImportError:
 
 seen_mints: set[str] = set()
 _rugcheck = RugCheckClient(timeout_s=5.0)
+
+
+# ── Gate helpers ────────────────────────────────────────────────────
+
+def _age_adjusted_min_txns(age_min: float) -> int:
+    """Age-aware minimum transaction threshold for paper mode."""
+    if age_min < 1.0:
+        return 3
+    if age_min < 3.0:
+        return 5
+    if age_min < 5.0:
+        return 8
+    if age_min < 10.0:
+        return 12
+    return 16  # 10-15 minutes
+
+
+def _age_holder_tier(age_min: float) -> tuple[float, float]:
+    """Return (warn_pct, hard_reject_pct) for given age in minutes."""
+    for max_age, warn, hard in HOLDER_TIERS:
+        if age_min < max_age:
+            return warn, hard
+    return 30.0, 40.0
 
 
 # ── browser-pc data source ──────────────────────────────────────────
@@ -255,29 +285,49 @@ async def screen_coin(
     coin: dict,
     http: httpx.AsyncClient,
     rugcheck_client: RugCheckClient,
-) -> tuple[bool, str]:
+) -> tuple[bool, str, dict]:
+    """Screen a coin through all gates.
+
+    Returns (passed, reason, gates) where gates is a dict mapping
+    gate names to bool.  In paper mode low_fees is a warning only --
+    it does not block passage.
+    """
     mint = coin.get("mint", "")
     now = datetime.now(UTC)
+    gates = {
+        "age_pass": False,
+        "mcap_pass": False,
+        "txn_pass": False,
+        "volume_pass": False,
+        "vol_mcap_pass": False,
+        "low_fees_pass": True,
+        "low_fees_warn": False,
+        "buy_sell_pass": False,
+        "rugcheck_pass": False,
+        "holder_pass": False,
+        "creator_pass": True,
+    }
 
     created_ts = coin.get("created_timestamp")
     if not isinstance(created_ts, (int, float)) or created_ts <= 0:
-        return False, "no created_timestamp"
+        return False, "no created_timestamp", gates
     age_min = (now.timestamp() - created_ts / 1000) / 60
     if age_min > MAX_AGE_MINUTES:
-        return False, f"age={age_min:.1f}m > {MAX_AGE_MINUTES}m"
+        return False, f"age={age_min:.1f}m > {MAX_AGE_MINUTES}m", gates
+    gates["age_pass"] = True
 
     mcap = coin.get("usd_market_cap")
     if not isinstance(mcap, (int, float)) or mcap <= 0:
-        return False, f"age={age_min:.1f}m no usd_market_cap"
+        return False, f"age={age_min:.1f}m no usd_market_cap", gates
     if mcap < MIN_MCAP_USD:
-        return False, f"age={age_min:.1f}m mcap=${mcap:.0f} < ${MIN_MCAP_USD}"
+        return False, f"age={age_min:.1f}m mcap=${mcap:.0f} < ${MIN_MCAP_USD}", gates
     if mcap > MAX_MCAP_USD:
-        return False, f"age={age_min:.1f}m mcap=${mcap:.0f} > ${MAX_MCAP_USD}"
+        return False, f"age={age_min:.1f}m mcap=${mcap:.0f} > ${MAX_MCAP_USD}", gates
+    gates["mcap_pass"] = True
 
     txns = None
     vol = None
     bs_ratio = None
-    ds_pair_found = False
     try:
         resp = await http.get(
             "https://api.dexscreener.com/latest/dex/search",
@@ -299,7 +349,6 @@ async def screen_coin(
                 break
 
         if pair:
-            ds_pair_found = True
             h1 = (pair.get("txns") or {}).get("h1") or {}
             buys = int(h1.get("buys", 0))
             sells = int(h1.get("sells", 0))
@@ -307,42 +356,26 @@ async def screen_coin(
             vol = float((pair.get("volume") or {}).get("h1", 0))
             bs_ratio = buys / max(sells, 1)
 
-            if txns < MIN_TRANSACTIONS:
-                return False, (
-                    f"age={age_min:.1f}m mcap=${mcap:.0f} txns={txns} vol=${vol:.0f} "
-                    f"buys/sells={bs_ratio:.1f} \u2192 FAIL txns<{MIN_TRANSACTIONS}"
-                )
-            if vol < MIN_VOLUME_USD:
-                return False, (
-                    f"age={age_min:.1f}m mcap=${mcap:.0f} txns={txns} vol=${vol:.0f} "
-                    f"buys/sells={bs_ratio:.1f} \u2192 FAIL vol<${MIN_VOLUME_USD}"
-                )
-            if mcap > 0:
+            min_txns = _age_adjusted_min_txns(age_min)
+            if txns >= min_txns:
+                gates["txn_pass"] = True
+
+            if vol >= MIN_VOLUME_USD:
+                gates["volume_pass"] = True
+
+            if mcap > 0 and vol > 0:
                 vol_ratio = vol / mcap
-                if vol_ratio < MIN_VOLUME_TO_MCAP_RATIO:
-                    return False, (
-                        f"age={age_min:.1f}m mcap=${mcap:.0f} txns={txns} vol=${vol:.0f} "
-                        f"vol/mcap={vol_ratio:.3f} buys/sells={bs_ratio:.1f} \u2192 FAIL dead_volume"
-                    )
-                if vol_ratio > MAX_VOLUME_TO_MCAP_RATIO:
-                    return False, (
-                        f"age={age_min:.1f}m mcap=${mcap:.0f} txns={txns} vol=${vol:.0f} "
-                        f"vol/mcap={vol_ratio:.1f} buys/sells={bs_ratio:.1f} \u2192 FAIL wash_trading"
-                    )
+                if MIN_VOLUME_TO_MCAP_RATIO <= vol_ratio <= MAX_VOLUME_TO_MCAP_RATIO:
+                    gates["vol_mcap_pass"] = True
 
             estimated_fees = txns * 0.001
             expected_min_fees = (mcap / 15000) * MIN_FEES_SOL_PER_15K_MCAP
             if estimated_fees < expected_min_fees:
-                return False, (
-                    f"age={age_min:.1f}m mcap=${mcap:.0f} txns={txns} vol=${vol:.0f} "
-                    f"est_fees={estimated_fees:.3f}SOL buys/sells={bs_ratio:.1f} \u2192 FAIL low_fees"
-                )
+                gates["low_fees_pass"] = False
+                gates["low_fees_warn"] = True
 
-            if bs_ratio < MIN_BUY_SELL_RATIO:
-                return False, (
-                    f"age={age_min:.1f}m mcap=${mcap:.0f} txns={txns} vol=${vol:.0f} "
-                    f"buys/sells={bs_ratio:.1f} \u2192 FAIL buys/sells<{MIN_BUY_SELL_RATIO}"
-                )
+            if bs_ratio >= MIN_BUY_SELL_RATIO:
+                gates["buy_sell_pass"] = True
         else:
             log.warning("DexScreener: no Solana/wSOL pair for %s", mint[:8])
     except Exception as exc:
@@ -353,38 +386,75 @@ async def screen_coin(
     except Exception as exc:
         return False, (
             f"age={age_min:.1f}m mcap=${mcap:.0f} \u2192 FAIL RugCheck error: {exc}"
-        )
+        ), gates
 
     if report.provider_status in ("timeout", "provider_error", "http_429"):
         return False, (
             f"age={age_min:.1f}m mcap=${mcap:.0f} \u2192 FAIL RugCheck {report.provider_status}"
-        )
+        ), gates
 
     if report.found:
-        if report.mint_authority_revoked is False:
-            return False, (
-                f"age={age_min:.1f}m mcap=${mcap:.0f} \u2192 FAIL mint authority not revoked"
-            )
+        if report.mint_authority_revoked is not False and report.freeze_authority_revoked is not False:
+            gates["rugcheck_pass"] = True
+
         if report.freeze_authority_revoked is False:
-            return False, (
-                f"age={age_min:.1f}m mcap=${mcap:.0f} \u2192 FAIL freeze authority not revoked"
-            )
-        if report.top_holder_pct is not None and report.top_holder_pct >= MAX_TOP10_HOLDER_PCT:
-            return False, (
-                f"age={age_min:.1f}m mcap=${mcap:.0f} \u2192 FAIL top10 holders={report.top_holder_pct:.1f}% "
-                f">= {MAX_TOP10_HOLDER_PCT}%"
-            )
+            gates["rugcheck_pass"] = False
+
+        if report.mint_authority_revoked is False:
+            gates["rugcheck_pass"] = False
+
+        warn_holder, hard_holder = _age_holder_tier(age_min)
+        if report.top_holder_pct is not None:
+            if report.top_holder_pct < hard_holder:
+                gates["holder_pass"] = True
 
         creator_pct = _extract_creator_pct(report)
         if creator_pct is not None and creator_pct > MAX_DEV_HOLDINGS_PCT:
-            return False, (
-                f"age={age_min:.1f}m mcap=${mcap:.0f} \u2192 FAIL dev holds {creator_pct:.1f}% "
-                f"> {MAX_DEV_HOLDINGS_PCT}%"
-            )
+            gates["creator_pass"] = False
         elif creator_pct is None:
             log.warning("RugCheck: no creator holdings for %s", mint[:8])
     else:
         log.warning("RugCheck: no report for %s", mint[:8])
+
+    # Build reason string
+    fail_reasons = []
+    if not gates["txn_pass"] and txns is not None:
+        min_txns = _age_adjusted_min_txns(age_min)
+        fail_reasons.append(f"txns={txns}<{min_txns}")
+    if not gates["volume_pass"] and vol is not None:
+        fail_reasons.append(f"vol=${vol:.0f}<${MIN_VOLUME_USD}")
+    if not gates["vol_mcap_pass"] and vol is not None and mcap > 0 and vol > 0:
+        vol_ratio = vol / mcap
+        label = "dead_volume" if vol_ratio < MIN_VOLUME_TO_MCAP_RATIO else "wash_trading"
+        fail_reasons.append(label)
+    if gates["low_fees_warn"] and txns is not None:
+        estimated_fees = txns * 0.001
+        fail_reasons.append(f"low_fees_warn({estimated_fees:.3f}SOL)")
+    if not gates["buy_sell_pass"] and bs_ratio is not None:
+        fail_reasons.append(f"buys/sells={bs_ratio:.1f}<{MIN_BUY_SELL_RATIO}")
+    if not gates["holder_pass"] and report.found and report.top_holder_pct is not None:
+        _, hard_holder = _age_holder_tier(age_min)
+        fail_reasons.append(f"top10={report.top_holder_pct:.1f}%>={hard_holder}%")
+    if not gates["creator_pass"]:
+        fail_reasons.append("dev_holdings")
+    if not gates["rugcheck_pass"] and report.found:
+        if report.mint_authority_revoked is False:
+            fail_reasons.append("mint_authority")
+        if report.freeze_authority_revoked is False:
+            fail_reasons.append("freeze_authority")
+
+    # Overall pass = all critical gates + not rug-failed
+    all_pass = (
+        gates["age_pass"]
+        and gates["mcap_pass"]
+        and gates["txn_pass"]
+        and gates["volume_pass"]
+        and gates["vol_mcap_pass"]
+        and gates["buy_sell_pass"]
+        and gates["rugcheck_pass"]
+        and gates["holder_pass"]
+        and gates["creator_pass"]
+    )
 
     txn_str = f"txns={txns}" if txns is not None else "txns=N/A"
     vol_str = f"vol=${vol:.0f}" if vol is not None else "vol=N/A"
@@ -394,7 +464,12 @@ async def screen_coin(
         extra += f"vol/mcap={vol / mcap:.3f} "
     if txns is not None and txns > 0:
         extra += f"est_fees={txns * 0.001:.3f}SOL "
-    return True, f"age={age_min:.1f}m mcap=${mcap:.0f} {txn_str} {vol_str} {extra}{bs_str} \u2192 PASS"
+    flags = " ".join(fail_reasons)
+    if all_pass:
+        reason_str = f"age={age_min:.1f}m mcap=${mcap:.0f} {txn_str} {vol_str} {extra}{bs_str} \u2192 PASS"
+    else:
+        reason_str = f"age={age_min:.1f}m mcap=${mcap:.0f} {txn_str} {vol_str} {extra}{bs_str} \u2192 FAIL {flags}"
+    return all_pass, reason_str, gates
 
 
 # ── Entry ────────────────────────────────────────────────────────────
@@ -543,17 +618,26 @@ async def scan_loop(
             open_positions = await manager.get_all_open(mode="paper")
             log.info("Open positions: %d / %d", len(open_positions), MAX_OPEN)
 
-            pipe_stats = {
-                "total_pairs": 0,
+            detailed = {
+                "total": 0,
                 "age_pass": 0,
                 "mcap_pass": 0,
                 "txn_pass": 0,
-                "grok_reached": 0,
+                "volume_pass": 0,
+                "vol_mcap_pass": 0,
+                "low_fees_warn_or_pass": 0,
+                "buy_sell_pass": 0,
+                "rugcheck_pass": 0,
+                "holder_pass": 0,
+                "full_screen_pass": 0,
+                "entry_attempts": 0,
+                "entered": 0,
             }
+            main_blocker_count: dict[str, int] = {}
 
             if len(open_positions) < MAX_OPEN:
                 rows = await fetch_candidates(http)
-                pipe_stats["total_pairs"] = len(rows)
+                detailed["total"] = len(rows)
 
                 for row in rows:
                     coin = parse_row(row)
@@ -565,25 +649,30 @@ async def scan_loop(
                     seen_mints.add(mint)
                     coin["mint"] = mint
 
-                    now = datetime.now(UTC)
-                    created_ts = coin.get("created_timestamp")
-                    age_min = None
-                    if isinstance(created_ts, (int, float)) and created_ts > 0:
-                        age_min = (now.timestamp() - created_ts / 1000) / 60
-                    if age_min is not None and age_min <= MAX_AGE_MINUTES:
-                        pipe_stats["age_pass"] += 1
-
-                    mcap = coin.get("usd_market_cap")
-                    if isinstance(mcap, (int, float)) and MIN_MCAP_USD <= mcap <= MAX_MCAP_USD:
-                        pipe_stats["mcap_pass"] += 1
-
-                    passed, reason = await screen_coin(coin, http, _rugcheck)
+                    passed, reason, gates = await screen_coin(coin, http, _rugcheck)
                     log.info("SCREEN %s (%s): %s", ticker, mint[:8], reason)
+
+                    # Aggregate per-gate diagnostics
+                    for gk in ("age_pass", "mcap_pass", "txn_pass", "volume_pass",
+                               "vol_mcap_pass", "buy_sell_pass", "rugcheck_pass",
+                               "holder_pass"):
+                        if gates.get(gk):
+                            detailed[gk] += 1
+                    if gates.get("low_fees_pass") or gates.get("low_fees_warn"):
+                        detailed["low_fees_warn_or_pass"] += 1
+
                     if not passed:
-                        log.info("FILTERED %s (%s): %s", ticker, mint[:8], reason)
+                        # Identify the main blocker from the reason string
+                        blockers = ["txn_pass", "volume_pass", "vol_mcap_pass",
+                                    "low_fees_pass", "buy_sell_pass", "rugcheck_pass",
+                                    "holder_pass", "creator_pass"]
+                        for bk in blockers:
+                            if not gates.get(bk, True):
+                                main_blocker_count[bk] = main_blocker_count.get(bk, 0) + 1
+                                break
                         continue
 
-                    pipe_stats["txn_pass"] += 1
+                    detailed["full_screen_pass"] += 1
 
                     if REQUIRE_MENTIONS:
                         launched_at = datetime.fromtimestamp(
@@ -637,29 +726,46 @@ async def scan_loop(
                         except Exception as e:
                             log.debug("Whale check failed (non-fatal): %s", e)
 
+                    detailed["entry_attempts"] += 1
                     ok = await try_enter(mint, ticker, mark_provider, adapter, manager, db_path, size_multiplier)
                     if ok:
-                        log.info("ENTRY mint=%s ticker=%s mentions=%d", mint[:16], ticker, early_mentions)
+                        detailed["entered"] += 1
+                        log.info("ENTRY mint=%s ticker=%s", mint[:16], ticker)
                     slots_used = len(await manager.get_all_open(mode="paper"))
                     if slots_used >= MAX_OPEN:
                         break
 
+            main_blocker = max(main_blocker_count, key=main_blocker_count.get) if main_blocker_count else "none"
             log.info(
-                "Pipe: total=%d age_pass=%d mcap_pass=%d txn_pass=%d grok_reached=%d",
-                pipe_stats["total_pairs"], pipe_stats["age_pass"],
-                pipe_stats["mcap_pass"], pipe_stats["txn_pass"],
-                pipe_stats["grok_reached"],
+                "Gates: total=%d age=%d mcap=%d txns=%d vol=%d vol/mcap=%d low_fees~=%d "
+                "b/s=%d rugcheck=%d holder=%d full_pass=%d entry_attempts=%d entered=%d "
+                "main_blocker=%s",
+                detailed["total"], detailed["age_pass"], detailed["mcap_pass"],
+                detailed["txn_pass"], detailed["volume_pass"], detailed["vol_mcap_pass"],
+                detailed["low_fees_warn_or_pass"], detailed["buy_sell_pass"],
+                detailed["rugcheck_pass"], detailed["holder_pass"],
+                detailed["full_screen_pass"], detailed["entry_attempts"],
+                detailed["entered"], main_blocker,
             )
             print(
-                f"Pipe: {pipe_stats['total_pairs']} pairs "
-                f"\u2192 {pipe_stats['age_pass']} age "
-                f"\u2192 {pipe_stats['mcap_pass']} mcap "
-                f"\u2192 {pipe_stats['txn_pass']} txn/vol/rug "
-                f"\u2192 {pipe_stats['grok_reached']} grok check",
+                f"Gates: {detailed['total']} pairs \u2192 "
+                f"{detailed['age_pass']} age \u2192 "
+                f"{detailed['mcap_pass']} mcap \u2192 "
+                f"{detailed['txn_pass']} txns \u2192 "
+                f"{detailed['volume_pass']} vol \u2192 "
+                f"{detailed['vol_mcap_pass']} vol/mcap \u2192 "
+                f"{detailed['low_fees_warn_or_pass']} low_fees~ \u2192 "
+                f"{detailed['buy_sell_pass']} b/s \u2192 "
+                f"{detailed['rugcheck_pass']} rugcheck \u2192 "
+                f"{detailed['holder_pass']} holder \u2192 "
+                f"{detailed['full_screen_pass']} full_pass \u2192 "
+                f"{detailed['entry_attempts']} entry_attempts \u2192 "
+                f"{detailed['entered']} entered "
+                f"(blocker: {main_blocker})",
             )
-            if pipe_stats["grok_reached"] == 0 and pipe_stats["total_pairs"] > 0:
+            if detailed["full_screen_pass"] == 0 and detailed["total"] > 0:
                 print(
-                    "  NOTE: Zero coins reached Grok check. "
+                    "  NOTE: Zero coins passed full screen. "
                     "browser-pc isn't surfacing sufficiently qualified candidates."
                 )
 
