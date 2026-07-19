@@ -92,6 +92,13 @@ logging.basicConfig(
 )
 log = logging.getLogger("strategy_b")
 
+try:
+    from src.signals.whale_tracker import get_whale_signal, load_tracked_wallets
+except ImportError:
+    get_whale_signal = None
+    load_tracked_wallets = None
+    log.warning("whale_tracker sizing unavailable — whale conviction sizing disabled")
+
 seen_mints: set[str] = set()
 _rugcheck = RugCheckClient(timeout_s=5.0)
 
@@ -399,6 +406,7 @@ async def try_enter(
     adapter: PaperExecutionAdapter,
     manager: PositionManager,
     db_path: Path,
+    size_multiplier: float = 1.0,
 ) -> bool:
     existing = await manager.get_position(mint, mode="paper")
     if existing is not None:
@@ -409,8 +417,9 @@ async def try_enter(
         log.warning("SKIP %s ticker=%s \u2014 no valid DexScreener price", mint[:16], ticker)
         return False
 
+    size_sol = PAPER_SIZE_SOL * size_multiplier
     try:
-        trade = await adapter.execute_swap(mint, Side.BUY, PAPER_SIZE_SOL)
+        trade = await adapter.execute_swap(mint, Side.BUY, size_sol)
     except Exception as exc:
         log.warning("SKIP %s ticker=%s \u2014 execute_swap failed: %s", mint[:16], ticker, exc)
         return False
@@ -439,11 +448,11 @@ async def try_enter(
         log.warning("SKIP %s ticker=%s \u2014 open_position failed: %s", mint[:16], ticker, exc)
         return False
 
-    log.info("ENTRY mint=%s ticker=%s price=%.8f SOL", mint[:16], ticker, price)
+    log.info("ENTRY mint=%s ticker=%s price=%.8f SOL size=%.4f SOL", mint[:16], ticker, price, size_sol)
     send_imessage(
         f"\U0001f7e2 [STRATEGY B] ENTERED {ticker}\n"
         f"Price: {price:.8f} SOL\n"
-        f"Size: {PAPER_SIZE_SOL} SOL"
+        f"Size: {size_sol} SOL"
     )
     return True
 
@@ -521,9 +530,12 @@ async def scan_loop(
     adapter: PaperExecutionAdapter,
     manager: PositionManager,
     db_path: Path,
+    tracked_wallets: list | None = None,
     test_mode: bool = False,
 ) -> None:
     global seen_mints
+    if tracked_wallets is None:
+        tracked_wallets = []
     async with httpx.AsyncClient() as http:
         while True:
             cycle_start = time.monotonic()
@@ -614,7 +626,18 @@ async def scan_loop(
                             ticker,
                         )
 
-                    ok = await try_enter(mint, ticker, mark_provider, adapter, manager, db_path)
+                    size_multiplier = 1.0
+                    if get_whale_signal is not None:
+                        try:
+                            whale_data = await get_whale_signal(mint, tracked_wallets, http)
+                            whale_count = whale_data.get("whale_count", 0)
+                            size_multiplier = whale_data.get("size_multiplier", 1.0)
+                            if whale_count > 0:
+                                log.info("🐋 WHALE SIGNAL: %d whale(s) in %s \u2014 size multiplier: %.1fx", whale_count, ticker, size_multiplier)
+                        except Exception as e:
+                            log.debug("Whale check failed (non-fatal): %s", e)
+
+                    ok = await try_enter(mint, ticker, mark_provider, adapter, manager, db_path, size_multiplier)
                     if ok:
                         log.info("ENTRY mint=%s ticker=%s mentions=%d", mint[:16], ticker, early_mentions)
                     slots_used = len(await manager.get_all_open(mode="paper"))
@@ -672,6 +695,14 @@ async def main() -> None:
     adapter = PaperExecutionAdapter(price_provider=mark_provider)
     manager = PositionManager(db_path, settings)
 
+    tracked_wallets: list = []
+    if load_tracked_wallets is not None:
+        try:
+            tracked_wallets = load_tracked_wallets()
+            log.info("Loaded %d tracked whale wallets", len(tracked_wallets))
+        except Exception:
+            log.warning("Failed to load tracked wallets — whale sizing disabled")
+
     if not REQUIRE_MENTIONS:
         mode_label = "ON-CHAIN ONLY (Grok disabled)"
     elif USE_INFLUENCER_MENTIONS:
@@ -684,7 +715,7 @@ async def main() -> None:
         mode_label, SCAN_INTERVAL, MONITOR_INTERVAL,
     )
     await asyncio.gather(
-        scan_loop(mark_provider, adapter, manager, db_path, test_mode=args.test),
+        scan_loop(mark_provider, adapter, manager, db_path, tracked_wallets=tracked_wallets, test_mode=args.test),
         monitor_loop(manager, mark_provider, db_path),
     )
 

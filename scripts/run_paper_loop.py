@@ -65,6 +65,13 @@ logging.basicConfig(
 )
 log = logging.getLogger("paper_loop")
 
+try:
+    from src.signals.whale_tracker import get_whale_signal, load_tracked_wallets
+except ImportError:
+    get_whale_signal = None
+    load_tracked_wallets = None
+    log.warning("whale_tracker sizing unavailable — whale conviction sizing disabled")
+
 
 def scan_candidates() -> list[str]:
     """Call browser-pc, return list of coin names from Profile B URL."""
@@ -132,6 +139,7 @@ async def try_enter(
     adapter: PaperExecutionAdapter,
     manager: PositionManager,
     db_path: Path,
+    size_multiplier: float = 1.0,
 ) -> bool:
     """Price via DexScreener and record a paper entry. Returns True if entry recorded."""
     existing = await manager.get_position(mint, mode="paper")
@@ -168,8 +176,9 @@ async def try_enter(
         log.warning("SKIP %s — no valid DexScreener price", mint)
         return False
 
+    size_sol = PAPER_SIZE_SOL * size_multiplier
     try:
-        trade = await adapter.execute_swap(mint, Side.BUY, PAPER_SIZE_SOL)
+        trade = await adapter.execute_swap(mint, Side.BUY, size_sol)
     except Exception as exc:
         log.warning("SKIP %s — execute_swap failed: %s", mint, exc)
         return False
@@ -198,11 +207,11 @@ async def try_enter(
         log.warning("SKIP %s — open_position failed: %s", mint, exc)
         return False
 
-    log.info("ENTRY: mint=%s price=%.8f SOL", mint, price)
+    log.info("ENTRY: mint=%s price=%.8f SOL size=%.4f SOL", mint, price, size_sol)
     send_imessage(
         f"\U0001f7e2 [STRATEGY A] ENTERED {mint[:8]}\n"
         f"Price: {price:.8f} SOL\n"
-        f"Size: {PAPER_SIZE_SOL} SOL"
+        f"Size: {size_sol} SOL"
     )
     return True
 
@@ -309,9 +318,12 @@ async def scan_loop(
     adapter: PaperExecutionAdapter,
     manager: PositionManager,
     db_path: Path,
+    tracked_wallets: list | None = None,
 ) -> None:
     """Discover and enter new candidates every 3 minutes."""
     global seen_mints
+    if tracked_wallets is None:
+        tracked_wallets = []
     async with httpx.AsyncClient() as http:
         while True:
             cycle_start = time.monotonic()
@@ -333,7 +345,19 @@ async def scan_loop(
                             log.debug("SKIP %s — already seen this session", name)
                         continue
                     seen_mints.add(mint)
-                    ok = await try_enter(mint, mark_provider, adapter, manager, db_path)
+
+                    size_multiplier = 1.0
+                    if get_whale_signal is not None and mint is not None:
+                        try:
+                            whale_data = await get_whale_signal(mint, tracked_wallets, http)
+                            whale_count = whale_data.get("whale_count", 0)
+                            size_multiplier = whale_data.get("size_multiplier", 1.0)
+                            if whale_count > 0:
+                                log.info("🐋 WHALE SIGNAL: %d whale(s) in %s — size multiplier: %.1fx", whale_count, name, size_multiplier)
+                        except Exception as e:
+                            log.debug("Whale check failed (non-fatal): %s", e)
+
+                    ok = await try_enter(mint, mark_provider, adapter, manager, db_path, size_multiplier)
                     if ok:
                         entered += 1
 
@@ -363,9 +387,17 @@ async def main() -> None:
     adapter = PaperExecutionAdapter(price_provider=mark_provider)
     manager = PositionManager(db_path, settings)
 
+    tracked_wallets: list = []
+    if load_tracked_wallets is not None:
+        try:
+            tracked_wallets = load_tracked_wallets()
+            log.info("Loaded %d tracked whale wallets", len(tracked_wallets))
+        except Exception:
+            log.warning("Failed to load tracked wallets — whale sizing disabled")
+
     log.info("Paper loop started. Scan every %ds, monitor every %ds.", SCAN_INTERVAL_S, MONITOR_INTERVAL_S)
     await asyncio.gather(
-        scan_loop(mark_provider, adapter, manager, db_path),
+        scan_loop(mark_provider, adapter, manager, db_path, tracked_wallets),
         monitor_loop(manager, mark_provider, db_path),
     )
 
