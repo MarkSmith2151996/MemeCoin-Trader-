@@ -430,6 +430,8 @@ async def enrich_wallet_pnl(
 
     Returns {address, estimated_pnl_sol, win_rate, data_source}.
     All numeric fields default to None on failure.
+    The ``debug_response`` key contains the raw response status + body
+    when a provider is configured but returns non-2xx.
     """
     result: dict[str, Any] = {
         "address": address,
@@ -438,65 +440,96 @@ async def enrich_wallet_pnl(
         "data_source": None,
     }
 
-    # Try Birdeye first
+    # -- Try Birdeye --
     if BIRDEYE_API_KEY:
-        try:
-            resp = await http.get(
-                f"https://public-api.birdeye.so/v1/wallet/token_list?wallet={address}",
-                headers={"X-API-KEY": BIRDEYE_API_KEY},
-            )
-            if resp.is_success:
-                data = resp.json()
-                items = data.get("data", []) if isinstance(data, dict) else []
-                if isinstance(items, list):
-                    total_pnl = 0.0
-                    wins = 0
-                    total = 0
-                    for item in items:
-                        if not isinstance(item, dict):
-                            continue
-                        pnl = item.get("realizedPnl")
-                        if pnl is not None:
+        tried_endpoints: list[str] = []
+        for attempt_url, attempt_headers, label in [
+            (
+                f"https://public-api.birdeye.so/v1/wallet/token_list?wallet={address}&chain=solana",
+                {"X-API-KEY": BIRDEYE_API_KEY, "x-chain": "solana"},
+                "v1/wallet/token_list (chain=solana)",
+            ),
+            (
+                f"https://public-api.birdeye.so/v1/portfolio?address={address}",
+                {"X-API-KEY": BIRDEYE_API_KEY},
+                "v1/portfolio",
+            ),
+        ]:
+            tried_endpoints.append(label)
+            try:
+                resp = await http.get(attempt_url, headers=attempt_headers)
+                if resp.status_code == 200 and resp.is_success:
+                    data = resp.json()
+                    items = data.get("data", []) if isinstance(data, dict) else []
+                    if isinstance(items, list):
+                        total_pnl = 0.0
+                        wins = 0
+                        total = 0
+                        for item in items:
+                            if not isinstance(item, dict):
+                                continue
+                            pnl = item.get("realizedPnl")
+                            if pnl is not None:
+                                try:
+                                    total_pnl += float(pnl)
+                                    total += 1
+                                    if float(pnl) > 0:
+                                        wins += 1
+                                except (TypeError, ValueError):
+                                    pass
+                        result["estimated_pnl_sol"] = round(total_pnl, 6)
+                        result["win_rate"] = round(wins / total, 4) if total > 0 else None
+                        result["data_source"] = "birdeye"
+                    return result
+                _log.warning(
+                    "Birdeye %s HTTP %s for %s: %.200s",
+                    label, resp.status_code, address,
+                    resp.text[:200].replace("\n", " "),
+                )
+            except (httpx.RequestError, ValueError, TypeError) as exc:
+                _log.warning("Birdeye %s failed for %s: %s", label, address, exc)
+
+        result["debug_birdeye"] = tried_endpoints
+
+    # -- Try Solscan --
+    if SOLSCAN_API_KEY:
+        tried_solscan: list[str] = []
+        for attempt_headers, label in [
+            ({"Authorization": f"Bearer {SOLSCAN_API_KEY}"}, "Bearer token"),
+            ({"token": SOLSCAN_API_KEY}, "token header"),
+        ]:
+            tried_solscan.append(label)
+            try:
+                resp = await http.get(
+                    f"https://pro-api.solscan.io/v2.0/account/token-accounts?address={address}&page=1&page_size=10",
+                    headers=attempt_headers,
+                )
+                if resp.status_code == 200 and resp.is_success:
+                    data = resp.json()
+                    result["data_source"] = "solscan"
+                    items = data.get("data", []) if isinstance(data, dict) else []
+                    if isinstance(items, list):
+                        total_pnl = 0.0
+                        for item in items:
+                            if not isinstance(item, dict):
+                                continue
+                            pnl = item.get("priceChange24h") or 0
                             try:
                                 total_pnl += float(pnl)
-                                total += 1
-                                if float(pnl) > 0:
-                                    wins += 1
                             except (TypeError, ValueError):
                                 pass
-                    result["estimated_pnl_sol"] = round(total_pnl, 6)
-                    result["win_rate"] = round(wins / total, 4) if total > 0 else None
-                    result["data_source"] = "birdeye"
-                return result
-        except (httpx.RequestError, ValueError, TypeError) as exc:
-            _log.warning("Birdeye failed for %s: %s", address, exc)
+                        if total_pnl != 0.0:
+                            result["estimated_pnl_sol"] = round(total_pnl, 6)
+                    return result
+                _log.warning(
+                    "Solscan %s HTTP %s for %s: %.200s",
+                    label, resp.status_code, address,
+                    resp.text[:200].replace("\n", " "),
+                )
+            except (httpx.RequestError, ValueError, TypeError) as exc:
+                _log.warning("Solscan %s failed for %s: %s", label, address, exc)
 
-    # Fallback to Solscan
-    if SOLSCAN_API_KEY:
-        try:
-            resp = await http.get(
-                f"https://pro-api.solscan.io/v2.0/account/token-accounts?address={address}",
-                headers={"token": SOLSCAN_API_KEY},
-            )
-            if resp.is_success:
-                data = resp.json()
-                result["data_source"] = "solscan"
-                items = data.get("data", []) if isinstance(data, dict) else []
-                if isinstance(items, list):
-                    total_pnl = 0.0
-                    for item in items:
-                        if not isinstance(item, dict):
-                            continue
-                        pnl = item.get("priceChange24h") or 0
-                        try:
-                            total_pnl += float(pnl)
-                        except (TypeError, ValueError):
-                            pass
-                    if total_pnl != 0.0:
-                        result["estimated_pnl_sol"] = round(total_pnl, 6)
-                return result
-        except (httpx.RequestError, ValueError, TypeError) as exc:
-            _log.warning("Solscan failed for %s: %s", address, exc)
+        result["debug_solscan"] = tried_solscan
 
     result["data_source"] = "none"
     return result

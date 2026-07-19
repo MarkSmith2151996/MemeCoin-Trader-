@@ -61,7 +61,7 @@ HARD_STOP_MULT = 0.70
 TIME_STOP_MINUTES = 10
 
 # Mode flags
-REQUIRE_MENTIONS = True       # Set False to skip Grok entirely (on-chain only)
+REQUIRE_MENTIONS = False      # Set False to skip Grok entirely (on-chain only)
 USE_INFLUENCER_MENTIONS = False  # Set True to use influencer-weighted mentions instead of raw count
 
 MAX_AGE_MINUTES = 15
