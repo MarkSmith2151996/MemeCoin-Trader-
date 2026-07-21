@@ -51,7 +51,7 @@ SCAN_INTERVAL_S = 180
 MONITOR_INTERVAL_S = 10
 MAX_OPEN_POSITIONS = 3
 PAPER_SIZE_SOL = 0.01
-TRAILING_STOP_PCT = 0.08
+TRAILING_STOP_PCT = 0.14
 HARD_STOP_PCT = 0.20
 TIME_STOP_MINUTES = 30
 RUGCHECK_ENABLED = True
@@ -256,8 +256,12 @@ async def monitor_positions(
             close_price = current_price
         if entry:
             drop_from_entry = (entry - current_price) / entry
+            pct_from_entry = (current_price - entry) / entry
             if drop_from_entry >= HARD_STOP_PCT:
                 close_reason = "hard_stop"
+                close_price = current_price
+            elif pct_from_entry >= 0.30:
+                close_reason = "take_profit"
                 close_price = current_price
             elif (peak - current_price) / peak >= TRAILING_STOP_PCT:
                 close_reason = "trailing_stop"
@@ -311,6 +315,7 @@ _rugcheck = RugCheckClient()
 
 seen_mints: set[str] = set()
 peak_prices: dict[str, float] = {}  # mint -> highest price seen
+pending_entries: dict[str, dict] = {}  # mint -> {"price": screen_price, "time": t, "ticker": name, "size_multiplier": float}
 
 
 async def scan_loop(
@@ -327,6 +332,40 @@ async def scan_loop(
     async with httpx.AsyncClient() as http:
         while True:
             cycle_start = time.monotonic()
+
+            # Process pending entries (confirmation delay)
+            now = time.time()
+            to_remove: list[str] = []
+            for mint, pend in list(pending_entries.items()):
+                age = now - pend["time"]
+                if age >= 45:
+                    if age > 70:
+                        log.info(
+                            "SKIP [stale_pending]: mint=%s age=%.0fs ticker=%s — expired",
+                            mint[:16], age, pend["ticker"],
+                        )
+                    else:
+                        current_price = await mark_provider.get_current_price(mint)
+                        if current_price is not None and current_price >= pend["price"]:
+                            log.info(
+                                "CONFIRM: mint=%s ticker=%s age=%.0fs screen=%.8f current=%.8f",
+                                mint[:16], pend["ticker"], age, pend["price"], current_price,
+                            )
+                            ok = await try_enter(mint, mark_provider, adapter, manager, db_path, pend.get("size_multiplier", 1.0))
+                            if ok:
+                                log.info("ENTRY [confirmed]: mint=%s ticker=%s", mint[:16], pend["ticker"])
+                            else:
+                                log.warning("SKIP [confirmation_entry_fail]: mint=%s ticker=%s — try_enter failed", mint[:16], pend["ticker"])
+                        else:
+                            log.info(
+                                "SKIP [confirmation_fail]: mint=%s ticker=%s age=%.0fs screen=%.8f current=%s",
+                                mint[:16], pend["ticker"], age, pend["price"],
+                                current_price if current_price is not None else "N/A",
+                            )
+                    to_remove.append(mint)
+            for m in to_remove:
+                pending_entries.pop(m, None)
+
             log.info("--- Scan cycle ---")
             open_positions = await manager.get_all_open(mode="paper")
             slots_available = MAX_OPEN_POSITIONS - len(open_positions)
@@ -357,9 +396,20 @@ async def scan_loop(
                         except Exception as e:
                             log.debug("Whale check failed (non-fatal): %s", e)
 
-                    ok = await try_enter(mint, mark_provider, adapter, manager, db_path, size_multiplier)
-                    if ok:
-                        entered += 1
+                    screen_price = await mark_provider.get_current_price(mint)
+                    if screen_price is None or screen_price <= 0:
+                        log.warning("SKIP %s — no valid DexScreener price for pending", name)
+                        continue
+                    pending_entries[mint] = {
+                        "price": screen_price,
+                        "time": time.time(),
+                        "ticker": name,
+                        "size_multiplier": size_multiplier,
+                    }
+                    log.info(
+                        "PENDING: mint=%s ticker=%s price=%.8f SOL — will confirm in 45s",
+                        mint[:16], name, screen_price,
+                    )
 
             elapsed = time.monotonic() - cycle_start
             await asyncio.sleep(max(0.0, SCAN_INTERVAL_S - elapsed))
