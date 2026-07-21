@@ -106,7 +106,8 @@ except ImportError:
     load_tracked_wallets = None
     log.warning("whale_tracker sizing unavailable — whale conviction sizing disabled")
 
-seen_mints: set[str] = set()
+seen_mints: dict[str, float] = {}
+SEEN_MINTS_TTL = 3600  # 1 hour in seconds
 _rugcheck = RugCheckClient(timeout_s=5.0)
 
 
@@ -613,167 +614,178 @@ async def scan_loop(
         tracked_wallets = []
     async with httpx.AsyncClient() as http:
         while True:
-            cycle_start = time.monotonic()
-            log.info("--- Strategy B Scan ---")
-            open_positions = await manager.get_all_open(mode="paper")
-            log.info("Open positions: %d / %d", len(open_positions), MAX_OPEN)
+            now_ts = time.time()
+            expired = [m for m, t in seen_mints.items() if now_ts - t > SEEN_MINTS_TTL]
+            for m in expired:
+                del seen_mints[m]
+            if expired:
+                log.info("Expired %d stale seen_mints entries", len(expired))
+            try:
+                cycle_start = time.monotonic()
+                log.info("--- Strategy B Scan ---")
+                open_positions = await manager.get_all_open(mode="paper")
+                log.info("Open positions: %d / %d", len(open_positions), MAX_OPEN)
 
-            detailed = {
-                "total": 0,
-                "age_pass": 0,
-                "mcap_pass": 0,
-                "txn_pass": 0,
-                "volume_pass": 0,
-                "vol_mcap_pass": 0,
-                "low_fees_warn_or_pass": 0,
-                "buy_sell_pass": 0,
-                "rugcheck_pass": 0,
-                "holder_pass": 0,
-                "full_screen_pass": 0,
-                "entry_attempts": 0,
-                "entered": 0,
-            }
-            main_blocker_count: dict[str, int] = {}
+                detailed = {
+                    "total": 0,
+                    "age_pass": 0,
+                    "mcap_pass": 0,
+                    "txn_pass": 0,
+                    "volume_pass": 0,
+                    "vol_mcap_pass": 0,
+                    "low_fees_warn_or_pass": 0,
+                    "buy_sell_pass": 0,
+                    "rugcheck_pass": 0,
+                    "holder_pass": 0,
+                    "full_screen_pass": 0,
+                    "entry_attempts": 0,
+                    "entered": 0,
+                }
+                main_blocker_count: dict[str, int] = {}
 
-            if len(open_positions) < MAX_OPEN:
-                rows = await fetch_candidates(http)
-                detailed["total"] = len(rows)
+                if len(open_positions) < MAX_OPEN:
+                    rows = await fetch_candidates(http)
+                    detailed["total"] = len(rows)
 
-                for row in rows:
-                    coin = parse_row(row)
-                    ticker = coin["ticker"]
+                    for row in rows:
+                        coin = parse_row(row)
+                        ticker = coin["ticker"]
 
-                    mint = await resolve_mint(ticker, http)
-                    if not mint or mint in seen_mints:
-                        continue
-                    seen_mints.add(mint)
-                    coin["mint"] = mint
+                        mint = await resolve_mint(ticker, http)
+                        if not mint or mint in seen_mints:
+                            continue
+                        seen_mints[mint] = time.time()
+                        coin["mint"] = mint
 
-                    passed, reason, gates = await screen_coin(coin, http, _rugcheck)
-                    log.info("SCREEN %s (%s): %s", ticker, mint[:8], reason)
+                        passed, reason, gates = await screen_coin(coin, http, _rugcheck)
+                        log.info("SCREEN %s (%s): %s", ticker, mint[:8], reason)
 
-                    # Aggregate per-gate diagnostics
-                    for gk in ("age_pass", "mcap_pass", "txn_pass", "volume_pass",
-                               "vol_mcap_pass", "buy_sell_pass", "rugcheck_pass",
-                               "holder_pass"):
-                        if gates.get(gk):
-                            detailed[gk] += 1
-                    if gates.get("low_fees_pass") or gates.get("low_fees_warn"):
-                        detailed["low_fees_warn_or_pass"] += 1
+                        # Aggregate per-gate diagnostics
+                        for gk in ("age_pass", "mcap_pass", "txn_pass", "volume_pass",
+                                   "vol_mcap_pass", "buy_sell_pass", "rugcheck_pass",
+                                   "holder_pass"):
+                            if gates.get(gk):
+                                detailed[gk] += 1
+                        if gates.get("low_fees_pass") or gates.get("low_fees_warn"):
+                            detailed["low_fees_warn_or_pass"] += 1
 
-                    if not passed:
-                        # Identify the main blocker from the reason string
-                        blockers = ["txn_pass", "volume_pass", "vol_mcap_pass",
-                                    "low_fees_pass", "buy_sell_pass", "rugcheck_pass",
-                                    "holder_pass", "creator_pass"]
-                        for bk in blockers:
-                            if not gates.get(bk, True):
-                                main_blocker_count[bk] = main_blocker_count.get(bk, 0) + 1
-                                break
-                        continue
+                        if not passed:
+                            # Identify the main blocker from the reason string
+                            blockers = ["txn_pass", "volume_pass", "vol_mcap_pass",
+                                        "low_fees_pass", "buy_sell_pass", "rugcheck_pass",
+                                        "holder_pass", "creator_pass"]
+                            for bk in blockers:
+                                if not gates.get(bk, True):
+                                    main_blocker_count[bk] = main_blocker_count.get(bk, 0) + 1
+                                    break
+                            continue
 
-                    detailed["full_screen_pass"] += 1
+                        detailed["full_screen_pass"] += 1
 
-                    if REQUIRE_MENTIONS:
-                        launched_at = datetime.fromtimestamp(
-                            coin["created_timestamp"] / 1000, tz=UTC,
-                        )
-                        if USE_INFLUENCER_MENTIONS:
-                            infl_data = await count_influencer_mentions(
-                                ticker, mint, launched_at, window_minutes=15,
+                        if REQUIRE_MENTIONS:
+                            launched_at = datetime.fromtimestamp(
+                                coin["created_timestamp"] / 1000, tz=UTC,
                             )
-                            pipe_stats["grok_reached"] += 1
-                            infl_count = infl_data["total"]
-                            if infl_count < 1:
-                                log.info(
-                                    "SKIP %s \u2014 %d influencer mentions (need >= 1)",
-                                    ticker, infl_count,
+                            if USE_INFLUENCER_MENTIONS:
+                                infl_data = await count_influencer_mentions(
+                                    ticker, mint, launched_at, window_minutes=15,
                                 )
-                                continue
-                            log.info(
-                                "PASS %s \u2014 %d influencer mentions (accounts: %s)",
-                                ticker, infl_count, infl_data["accounts_mentioned"],
-                            )
+                                pipe_stats["grok_reached"] += 1
+                                infl_count = infl_data["total"]
+                                if infl_count < 1:
+                                    log.info(
+                                        "SKIP %s \u2014 %d influencer mentions (need >= 1)",
+                                        ticker, infl_count,
+                                    )
+                                    continue
+                                log.info(
+                                    "PASS %s \u2014 %d influencer mentions (accounts: %s)",
+                                    ticker, infl_count, infl_data["accounts_mentioned"],
+                                )
+                            else:
+                                mention_data = await get_mentions_with_timestamps(
+                                    ticker, mint, launched_at, hours=1,
+                                )
+                                pipe_stats["grok_reached"] += 1
+                                early_mentions = mention_data.get("mentions_0_5min", 0)
+                                if early_mentions < MIN_MENTIONS:
+                                    log.info(
+                                        "SKIP %s \u2014 %d early mentions (need %d)",
+                                        ticker, early_mentions, MIN_MENTIONS,
+                                    )
+                                    continue
+                                log.info(
+                                    "PASS %s \u2014 %d early mentions", ticker, early_mentions,
+                                )
                         else:
-                            mention_data = await get_mentions_with_timestamps(
-                                ticker, mint, launched_at, hours=1,
-                            )
-                            pipe_stats["grok_reached"] += 1
-                            early_mentions = mention_data.get("mentions_0_5min", 0)
-                            if early_mentions < MIN_MENTIONS:
-                                log.info(
-                                    "SKIP %s \u2014 %d early mentions (need %d)",
-                                    ticker, early_mentions, MIN_MENTIONS,
-                                )
-                                continue
                             log.info(
-                                "PASS %s \u2014 %d early mentions", ticker, early_mentions,
+                                "MENTIONS SKIPPED (on-chain only mode) \u2014 proceeding to entry check for %s",
+                                ticker,
                             )
-                    else:
-                        log.info(
-                            "MENTIONS SKIPPED (on-chain only mode) \u2014 proceeding to entry check for %s",
-                            ticker,
-                        )
 
-                    size_multiplier = 1.0
-                    if get_whale_signal is not None:
-                        try:
-                            whale_data = await get_whale_signal(mint, tracked_wallets, http)
-                            whale_count = whale_data.get("whale_count", 0)
-                            size_multiplier = whale_data.get("size_multiplier", 1.0)
-                            if whale_count > 0:
-                                log.info("🐋 WHALE SIGNAL: %d whale(s) in %s \u2014 size multiplier: %.1fx", whale_count, ticker, size_multiplier)
-                        except Exception as e:
-                            log.debug("Whale check failed (non-fatal): %s", e)
+                        size_multiplier = 1.0
+                        if get_whale_signal is not None:
+                            try:
+                                whale_data = await get_whale_signal(mint, tracked_wallets, http)
+                                whale_count = whale_data.get("whale_count", 0)
+                                size_multiplier = whale_data.get("size_multiplier", 1.0)
+                                if whale_count > 0:
+                                    log.info("🐋 WHALE SIGNAL: %d whale(s) in %s \u2014 size multiplier: %.1fx", whale_count, ticker, size_multiplier)
+                            except Exception as e:
+                                log.debug("Whale check failed (non-fatal): %s", e)
 
-                    detailed["entry_attempts"] += 1
-                    ok = await try_enter(mint, ticker, mark_provider, adapter, manager, db_path, size_multiplier)
-                    if ok:
-                        detailed["entered"] += 1
-                        log.info("ENTRY mint=%s ticker=%s", mint[:16], ticker)
-                    slots_used = len(await manager.get_all_open(mode="paper"))
-                    if slots_used >= MAX_OPEN:
-                        break
+                        detailed["entry_attempts"] += 1
+                        ok = await try_enter(mint, ticker, mark_provider, adapter, manager, db_path, size_multiplier)
+                        if ok:
+                            detailed["entered"] += 1
+                            log.info("ENTRY mint=%s ticker=%s", mint[:16], ticker)
+                        slots_used = len(await manager.get_all_open(mode="paper"))
+                        if slots_used >= MAX_OPEN:
+                            break
 
-            main_blocker = max(main_blocker_count, key=main_blocker_count.get) if main_blocker_count else "none"
-            log.info(
-                "Gates: total=%d age=%d mcap=%d txns=%d vol=%d vol/mcap=%d low_fees~=%d "
-                "b/s=%d rugcheck=%d holder=%d full_pass=%d entry_attempts=%d entered=%d "
-                "main_blocker=%s",
-                detailed["total"], detailed["age_pass"], detailed["mcap_pass"],
-                detailed["txn_pass"], detailed["volume_pass"], detailed["vol_mcap_pass"],
-                detailed["low_fees_warn_or_pass"], detailed["buy_sell_pass"],
-                detailed["rugcheck_pass"], detailed["holder_pass"],
-                detailed["full_screen_pass"], detailed["entry_attempts"],
-                detailed["entered"], main_blocker,
-            )
-            print(
-                f"Gates: {detailed['total']} pairs \u2192 "
-                f"{detailed['age_pass']} age \u2192 "
-                f"{detailed['mcap_pass']} mcap \u2192 "
-                f"{detailed['txn_pass']} txns \u2192 "
-                f"{detailed['volume_pass']} vol \u2192 "
-                f"{detailed['vol_mcap_pass']} vol/mcap \u2192 "
-                f"{detailed['low_fees_warn_or_pass']} low_fees~ \u2192 "
-                f"{detailed['buy_sell_pass']} b/s \u2192 "
-                f"{detailed['rugcheck_pass']} rugcheck \u2192 "
-                f"{detailed['holder_pass']} holder \u2192 "
-                f"{detailed['full_screen_pass']} full_pass \u2192 "
-                f"{detailed['entry_attempts']} entry_attempts \u2192 "
-                f"{detailed['entered']} entered "
-                f"(blocker: {main_blocker})",
-            )
-            if detailed["full_screen_pass"] == 0 and detailed["total"] > 0:
-                print(
-                    "  NOTE: Zero coins passed full screen. "
-                    "browser-pc isn't surfacing sufficiently qualified candidates."
+                main_blocker = max(main_blocker_count, key=main_blocker_count.get) if main_blocker_count else "none"
+                log.info(
+                    "Gates: total=%d age=%d mcap=%d txns=%d vol=%d vol/mcap=%d low_fees~=%d "
+                    "b/s=%d rugcheck=%d holder=%d full_pass=%d entry_attempts=%d entered=%d "
+                    "main_blocker=%s",
+                    detailed["total"], detailed["age_pass"], detailed["mcap_pass"],
+                    detailed["txn_pass"], detailed["volume_pass"], detailed["vol_mcap_pass"],
+                    detailed["low_fees_warn_or_pass"], detailed["buy_sell_pass"],
+                    detailed["rugcheck_pass"], detailed["holder_pass"],
+                    detailed["full_screen_pass"], detailed["entry_attempts"],
+                    detailed["entered"], main_blocker,
                 )
+                print(
+                    f"Gates: {detailed['total']} pairs \u2192 "
+                    f"{detailed['age_pass']} age \u2192 "
+                    f"{detailed['mcap_pass']} mcap \u2192 "
+                    f"{detailed['txn_pass']} txns \u2192 "
+                    f"{detailed['volume_pass']} vol \u2192 "
+                    f"{detailed['vol_mcap_pass']} vol/mcap \u2192 "
+                    f"{detailed['low_fees_warn_or_pass']} low_fees~ \u2192 "
+                    f"{detailed['buy_sell_pass']} b/s \u2192 "
+                    f"{detailed['rugcheck_pass']} rugcheck \u2192 "
+                    f"{detailed['holder_pass']} holder \u2192 "
+                    f"{detailed['full_screen_pass']} full_pass \u2192 "
+                    f"{detailed['entry_attempts']} entry_attempts \u2192 "
+                    f"{detailed['entered']} entered "
+                    f"(blocker: {main_blocker})",
+                )
+                if detailed["full_screen_pass"] == 0 and detailed["total"] > 0:
+                    print(
+                        "  NOTE: Zero coins passed full screen. "
+                        "browser-pc isn't surfacing sufficiently qualified candidates."
+                    )
 
-            elapsed = time.monotonic() - cycle_start
-            if test_mode:
-                log.info("Test mode: single cycle complete")
-                return
-            await asyncio.sleep(max(0.0, SCAN_INTERVAL - elapsed))
+                elapsed = time.monotonic() - cycle_start
+                if test_mode:
+                    log.info("Test mode: single cycle complete")
+                    return
+                await asyncio.sleep(max(0.0, SCAN_INTERVAL - elapsed))
+            except Exception as exc:
+                log.error("CRASH in scan_loop cycle: %s", exc, exc_info=True)
+                await asyncio.sleep(SCAN_INTERVAL)
+                continue
 
 
 async def monitor_loop(
