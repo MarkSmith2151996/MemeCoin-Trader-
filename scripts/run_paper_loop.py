@@ -51,8 +51,8 @@ SCAN_INTERVAL_S = 180
 MONITOR_INTERVAL_S = 10
 MAX_OPEN_POSITIONS = 3
 PAPER_SIZE_SOL = 0.01
-TRAILING_STOP_PCT = 0.14
-HARD_STOP_PCT = 0.20
+TRAILING_STOP_PCT = 0.04
+HARD_STOP_PCT = 0.10
 TIME_STOP_MINUTES = 30
 RUGCHECK_ENABLED = True
 
@@ -133,6 +133,68 @@ async def resolve_mint(name: str, client: httpx.AsyncClient) -> str | None:
     return None
 
 
+async def fetch_entry_metadata(
+    mint: str,
+    client: httpx.AsyncClient | None = None,
+) -> dict[str, object]:
+    """Fetch current pair metadata from DexScreener search API for entry logging.
+
+    Returns a dict of entry_* fields, or {} when the API call fails or no
+    matching Solana pair is found. Never raises — callers must not block entry
+    on metadata capture.
+    """
+    try:
+        if client is None:
+            async with httpx.AsyncClient(timeout=10.0) as own_client:
+                return await _search_pair_metadata(mint, own_client)
+        return await _search_pair_metadata(mint, client)
+    except Exception as exc:
+        log.debug("DexScreener search failed for entry metadata %s: %s", mint[:16], exc)
+        return {}
+
+
+async def _search_pair_metadata(
+    mint: str,
+    client: httpx.AsyncClient,
+) -> dict[str, object]:
+    """Search DexScreener for the mint and build the entry metadata dict."""
+    resp = await client.get(
+        DEXSCREENER_SEARCH_URL,
+        params={"q": mint},
+    )
+    resp.raise_for_status()
+    pairs = resp.json().get("pairs") or []
+
+    for pair in pairs:
+        if not isinstance(pair, dict):
+            continue
+        if pair.get("chainId") != "solana":
+            continue
+        base = pair.get("baseToken") or {}
+        if base.get("address") != mint:
+            continue
+        txns_h24 = (pair.get("txns") or {}).get("h24") or {}
+        txns_h1 = (pair.get("txns") or {}).get("h1") or {}
+        created_ms = pair.get("pairCreatedAt")
+        age_hours = None
+        if isinstance(created_ms, (int, float)) and created_ms > 0:
+            age_hours = max(0.0, (time.time() * 1000 - created_ms) / 3_600_000)
+        return {
+            "quote_provider": "paper",
+            "entry_mcap": pair.get("marketCap"),
+            "entry_volume_24h": (pair.get("volume") or {}).get("h24"),
+            "entry_volume_1h": (pair.get("volume") or {}).get("h1"),
+            "entry_txns_24h": txns_h24.get("buys", 0) + txns_h24.get("sells", 0),
+            "entry_txns_1h": txns_h1.get("buys", 0) + txns_h1.get("sells", 0),
+            "entry_liquidity_usd": (pair.get("liquidity") or {}).get("usd"),
+            "entry_age_hours": age_hours,
+            "entry_price_change_1h": (pair.get("priceChange") or {}).get("h1"),
+            "entry_price_change_5m": (pair.get("priceChange") or {}).get("m5"),
+            "entry_fdv": pair.get("fdv"),
+        }
+    return {}
+
+
 async def try_enter(
     mint: str,
     mark_provider: DexScreenerPriceProvider,
@@ -186,6 +248,15 @@ async def try_enter(
     if trade is None:
         log.warning("SKIP %s — execute_swap returned None", mint)
         return False
+
+    try:
+        entry_metadata = await fetch_entry_metadata(mint)
+        if entry_metadata:
+            merged = dict(trade.metadata or {})
+            merged.update(entry_metadata)
+            trade.metadata = merged
+    except Exception as exc:
+        log.warning("ENTRY METADATA SKIP — mint=%s metadata fetch failed: %s", mint[:16], exc)
 
     try:
         await record_trade(db_path, trade)
@@ -260,7 +331,7 @@ async def monitor_positions(
             if drop_from_entry >= HARD_STOP_PCT:
                 close_reason = "hard_stop"
                 close_price = current_price
-            elif pct_from_entry >= 0.30:
+            elif pct_from_entry >= 0.60:
                 close_reason = "take_profit"
                 close_price = current_price
             elif (peak - current_price) / peak >= TRAILING_STOP_PCT:
