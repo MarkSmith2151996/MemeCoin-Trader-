@@ -42,8 +42,8 @@ def test_search_source_discards_stale_pairs() -> None:
 
 
 def test_holder_gate_accepts_concentrated_fresh_tokens() -> None:
-    assert MAX_TOP10_HOLDER_PCT == 90.0
-    assert all(_age_holder_tier(age)[1] == 90.0 for age in (0.5, 3, 8, 20))
+    assert MAX_TOP10_HOLDER_PCT == 95.0
+    assert all(_age_holder_tier(age)[1] == 95.0 for age in (0.5, 3, 8, 20))
 
 
 def test_candidate_tables_and_initial_gate_config(tmp_path: Path) -> None:
