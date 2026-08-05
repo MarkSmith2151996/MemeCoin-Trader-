@@ -6,11 +6,14 @@ All tests use httpx.MockTransport — no real network calls.
 from __future__ import annotations
 
 import asyncio
+import time
+from pathlib import Path
 
 import httpx
 import pytest
 
-from scripts.run_paper_loop import fetch_entry_metadata, resolve_mint
+import scripts.run_paper_loop as paper_loop
+from scripts.run_paper_loop import confirm_pending_entry, fetch_entry_metadata, resolve_mint
 
 
 def test_successful_resolution() -> None:
@@ -180,3 +183,36 @@ def test_fetch_entry_metadata_missing_fields_store_none() -> None:
     assert result["entry_mcap"] is None
     assert result["entry_age_hours"] is None
     assert result["entry_txns_24h"] == 0
+
+
+def test_pending_confirmation_enters_without_waiting_for_next_scan(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A pending candidate confirms even when its originating scan is already stale."""
+    mint = "PendingMint"
+    calls: list[tuple[str, str]] = []
+
+    class PriceProvider:
+        async def get_current_price(self, requested_mint: str) -> float:
+            assert requested_mint == mint
+            return 1.1
+
+    async def fake_try_enter(*args, **kwargs) -> bool:
+        calls.append((args[0], kwargs["ticker"]))
+        return True
+
+    monkeypatch.setattr(paper_loop, "try_enter", fake_try_enter)
+    paper_loop.pending_entries.clear()
+    paper_loop.pending_entries[mint] = {
+        "price": 1.0,
+        "time": time.time() - 152,
+        "ticker": "TST",
+        "size_multiplier": 1.0,
+    }
+
+    asyncio.run(
+        confirm_pending_entry(
+            mint, PriceProvider(), object(), object(), Path("unused.db"), confirmation_delay_s=0,
+        ),
+    )
+
+    assert calls == [(mint, "TST")]
+    assert mint not in paper_loop.pending_entries

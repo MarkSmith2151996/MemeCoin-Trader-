@@ -82,7 +82,7 @@ GATES = GateThresholds(
 MAX_MCAP_USD = 50_000
 
 MAX_DEV_HOLDINGS_PCT = 10.0
-MAX_TOP10_HOLDER_PCT = 30.0
+MAX_TOP10_HOLDER_PCT = 90.0
 MAX_MCAP_RUGCHECK = 50_000
 
 # Rug signal filters
@@ -92,10 +92,10 @@ MIN_FEES_SOL_PER_15K_MCAP = 0.3
 
 # Paper-mode holder concentration tiers (warn_pct, hard_reject_pct)
 HOLDER_TIERS = [
-    (2, 30.0, 80.0),    # 0-2 min: warn at 30%, hard reject at 80%
-    (5, 30.0, 65.0),    # 2-5 min: warn at 30%, hard reject at 65%
-    (10, 30.0, 50.0),   # 5-10 min: warn at 30%, hard reject at 50%
-    (999, 30.0, 40.0),  # 10-15 min: hard reject at 40%
+    (2, 30.0, MAX_TOP10_HOLDER_PCT),
+    (5, 30.0, MAX_TOP10_HOLDER_PCT),
+    (10, 30.0, MAX_TOP10_HOLDER_PCT),
+    (999, 30.0, MAX_TOP10_HOLDER_PCT),
 ]
 
 DB_PATH = Path("data/trades.db")
@@ -109,6 +109,7 @@ logging.basicConfig(
     ],
 )
 log = logging.getLogger("strategy_b")
+logging.getLogger("httpx").setLevel(logging.WARNING)
 
 try:
     from src.signals.whale_tracker import get_whale_signal, load_tracked_wallets
@@ -142,7 +143,7 @@ def _age_holder_tier(age_min: float) -> tuple[float, float]:
     for max_age, warn, hard in HOLDER_TIERS:
         if age_min < max_age:
             return warn, hard
-    return 30.0, 40.0
+    return 30.0, MAX_TOP10_HOLDER_PCT
 
 
 # ── browser-pc data source ──────────────────────────────────────────

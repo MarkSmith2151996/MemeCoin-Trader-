@@ -49,6 +49,7 @@ WRAPPED_SOL_MINT = "So11111111111111111111111111111111111111112"
 
 SCAN_INTERVAL_S = 180
 MONITOR_INTERVAL_S = 10
+CONFIRMATION_DELAY_S = 45
 MAX_OPEN_POSITIONS = 3
 PAPER_SIZE_SOL = 0.01
 TRAILING_STOP_PCT = 0.04
@@ -64,6 +65,7 @@ logging.basicConfig(
     handlers=[logging.StreamHandler(sys.stdout)],
 )
 log = logging.getLogger("paper_loop")
+logging.getLogger("httpx").setLevel(logging.WARNING)
 
 try:
     from src.signals.whale_tracker import get_whale_signal, load_tracked_wallets
@@ -402,6 +404,64 @@ _rugcheck = RugCheckClient()
 seen_mints: set[str] = set()
 peak_prices: dict[str, float] = {}  # mint -> highest price seen
 pending_entries: dict[str, dict] = {}  # mint -> {"price": screen_price, "time": t, "ticker": name, "size_multiplier": float}
+pending_confirmation_tasks: set[asyncio.Task[None]] = set()
+
+
+async def confirm_pending_entry(
+    mint: str,
+    mark_provider: DexScreenerPriceProvider,
+    adapter: PaperExecutionAdapter,
+    manager: PositionManager,
+    db_path: Path,
+    *,
+    confirmation_delay_s: float = CONFIRMATION_DELAY_S,
+) -> None:
+    """Confirm a pending candidate independently of the scan interval."""
+    await asyncio.sleep(confirmation_delay_s)
+    pend = pending_entries.pop(mint, None)
+    if pend is None:
+        return
+
+    age = time.time() - pend["time"]
+    current_price = await mark_provider.get_current_price(mint)
+    if current_price is None or current_price < pend["price"]:
+        log.info(
+            "SKIP [confirmation_fail]: mint=%s ticker=%s age=%.0fs screen=%.8f current=%s",
+            mint[:16], pend["ticker"], age, pend["price"],
+            current_price if current_price is not None else "N/A",
+        )
+        return
+
+    log.info(
+        "CONFIRM: mint=%s ticker=%s age=%.0fs screen=%.8f current=%.8f",
+        mint[:16], pend["ticker"], age, pend["price"], current_price,
+    )
+    ok = await try_enter(
+        mint, mark_provider, adapter, manager, db_path,
+        pend.get("size_multiplier", 1.0), ticker=pend["ticker"],
+    )
+    if ok:
+        log.info("ENTRY [confirmed]: mint=%s ticker=%s", mint[:16], pend["ticker"])
+    else:
+        log.warning(
+            "SKIP [confirmation_entry_fail]: mint=%s ticker=%s - try_enter failed",
+            mint[:16], pend["ticker"],
+        )
+
+
+def schedule_pending_confirmation(
+    mint: str,
+    mark_provider: DexScreenerPriceProvider,
+    adapter: PaperExecutionAdapter,
+    manager: PositionManager,
+    db_path: Path,
+) -> None:
+    """Keep the confirmation task alive until it consumes its pending entry."""
+    task = asyncio.create_task(
+        confirm_pending_entry(mint, mark_provider, adapter, manager, db_path),
+    )
+    pending_confirmation_tasks.add(task)
+    task.add_done_callback(pending_confirmation_tasks.discard)
 
 
 async def scan_loop(
@@ -419,53 +479,17 @@ async def scan_loop(
         while True:
             cycle_start = time.monotonic()
 
-            # Process pending entries (confirmation delay)
-            now = time.time()
-            to_remove: list[str] = []
-            for mint, pend in list(pending_entries.items()):
-                age = now - pend["time"]
-                if age >= 45:
-                    if age > 70:
-                        log.info(
-                            "SKIP [stale_pending]: mint=%s age=%.0fs ticker=%s — expired",
-                            mint[:16], age, pend["ticker"],
-                        )
-                    else:
-                        current_price = await mark_provider.get_current_price(mint)
-                        if current_price is not None and current_price >= pend["price"]:
-                            log.info(
-                                "CONFIRM: mint=%s ticker=%s age=%.0fs screen=%.8f current=%.8f",
-                                mint[:16], pend["ticker"], age, pend["price"], current_price,
-                            )
-                            ok = await try_enter(
-                                mint, mark_provider, adapter, manager, db_path,
-                                pend.get("size_multiplier", 1.0), ticker=pend["ticker"],
-                            )
-                            if ok:
-                                log.info("ENTRY [confirmed]: mint=%s ticker=%s", mint[:16], pend["ticker"])
-                            else:
-                                log.warning("SKIP [confirmation_entry_fail]: mint=%s ticker=%s — try_enter failed", mint[:16], pend["ticker"])
-                        else:
-                            log.info(
-                                "SKIP [confirmation_fail]: mint=%s ticker=%s age=%.0fs screen=%.8f current=%s",
-                                mint[:16], pend["ticker"], age, pend["price"],
-                                current_price if current_price is not None else "N/A",
-                            )
-                    to_remove.append(mint)
-            for m in to_remove:
-                pending_entries.pop(m, None)
-
             log.info("--- Scan cycle ---")
             open_positions = await manager.get_all_open(mode="paper")
-            slots_available = MAX_OPEN_POSITIONS - len(open_positions)
+            slots_available = MAX_OPEN_POSITIONS - len(open_positions) - len(pending_entries)
             log.info("Open positions: %d / %d", len(open_positions), MAX_OPEN_POSITIONS)
 
             if slots_available > 0:
                 names = scan_candidates()
                 log.info("Candidates from browser-pc: %s", names)
-                entered = 0
+                scheduled = 0
                 for name in names:
-                    if entered >= slots_available:
+                    if scheduled >= slots_available:
                         break
                     mint = await resolve_mint(name, http)
                     if mint is None or mint in seen_mints:
@@ -499,6 +523,8 @@ async def scan_loop(
                         "PENDING: mint=%s ticker=%s price=%.8f SOL — will confirm in 45s",
                         mint[:16], name, screen_price,
                     )
+                    schedule_pending_confirmation(mint, mark_provider, adapter, manager, db_path)
+                    scheduled += 1
 
             elapsed = time.monotonic() - cycle_start
             await asyncio.sleep(max(0.0, SCAN_INTERVAL_S - elapsed))

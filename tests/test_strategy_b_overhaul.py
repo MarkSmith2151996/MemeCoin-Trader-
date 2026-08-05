@@ -10,7 +10,12 @@ from pathlib import Path
 
 import httpx
 
-from scripts.run_strategy_b import SOURCE_MAX_AGE_MINUTES, _search_fresh_pair
+from scripts.run_strategy_b import (
+    MAX_TOP10_HOLDER_PCT,
+    SOURCE_MAX_AGE_MINUTES,
+    _age_holder_tier,
+    _search_fresh_pair,
+)
 from src.core.database import init_db, mark_strategy_candidate_entered, record_strategy_candidate
 from src.strategy.gate_tuner import GateThresholds, GateTuner
 
@@ -34,6 +39,11 @@ def test_search_source_discards_stale_pairs() -> None:
     assert candidate is not None
     assert candidate["ticker"] == "fresh"
     assert candidate["source_age_minutes"] <= SOURCE_MAX_AGE_MINUTES
+
+
+def test_holder_gate_accepts_concentrated_fresh_tokens() -> None:
+    assert MAX_TOP10_HOLDER_PCT == 90.0
+    assert all(_age_holder_tier(age)[1] == 90.0 for age in (0.5, 3, 8, 20))
 
 
 def test_candidate_tables_and_initial_gate_config(tmp_path: Path) -> None:
