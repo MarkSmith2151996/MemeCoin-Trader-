@@ -14,3 +14,5 @@ data/*.sqlite
 data/*.sqlite3
 !data/.gitkeep
 shared/
+bot/node_modules/
+bot/auth/
