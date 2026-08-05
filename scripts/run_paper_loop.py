@@ -4,7 +4,7 @@ Scan cycle (every 3 min):
   1. browser-pc  → scan Profile B DexScreener URL → coin names
   2. DexScreener search API → name → mint address
   3. JupiterClient.get_quote() → entry price
-  4. Record paper entry (max 3 open positions, 0.01 SOL each)
+  4. Record paper entry (max 4 open positions, 0.01 SOL each)
 
 Monitor cycle (every 30s):
   5. Re-mark and close open positions (trailing stop / hard stop / time stop)
@@ -49,12 +49,19 @@ WRAPPED_SOL_MINT = "So11111111111111111111111111111111111111112"
 
 SCAN_INTERVAL_S = 180
 MONITOR_INTERVAL_S = 10
+FAST_MONITOR_INTERVAL_S = 5
+FAST_POLL_DROP_PCT = 0.05
 CONFIRMATION_DELAY_S = 45
-MAX_OPEN_POSITIONS = 3
+MAX_OPEN_POSITIONS = 4
 PAPER_SIZE_SOL = 0.01
 TRAILING_STOP_PCT = 0.04
+TRAILING_ARM_PCT = 0.02
 HARD_STOP_PCT = 0.10
 TIME_STOP_MINUTES = 30
+ENTRY_CONFIRM_WINDOW_S = 90
+EARLY_EXIT_GREEN_PCT = 0.01
+BLOCKED_UTC_HOURS = frozenset({0, 7, 19, 20})
+SATURDAY_SIZE_MULTIPLIER = 0.5
 RUGCHECK_ENABLED = True
 
 DB_PATH = Path("data/trades.db")
@@ -221,6 +228,45 @@ async def try_enter(
     ticker: str | None = None,
 ) -> bool:
     """Price via DexScreener and record a paper entry. Returns True if entry recorded."""
+    from datetime import UTC, datetime
+
+    from src.core.database import has_losing_close, record_entry_skip
+
+    open_positions = await manager.get_all_open(mode="paper")
+    if len(open_positions) + len(pending_entries) >= MAX_OPEN_POSITIONS:
+        log.warning(
+            "SKIP %s — position cap reached (%d open + %d pending)",
+            mint, len(open_positions), len(pending_entries),
+        )
+        return False
+
+    utc_now = datetime.now(UTC)
+    if utc_now.hour in BLOCKED_UTC_HOURS:
+        log.warning("SKIP %s — time_gate: UTC hour %d blocked", mint, utc_now.hour)
+        try:
+            await record_entry_skip(
+                db_path, strategy="A", mint_address=mint, ticker=ticker,
+                gate="time_gate", reason=f"utc_hour={utc_now.hour}",
+            )
+        except Exception as exc:
+            log.debug("candidate_log write failed (non-fatal): %s", exc)
+        return False
+
+    if await has_losing_close(db_path, mint):
+        log.warning("SKIP %s — repeat_loser: mint previously closed at a loss", mint)
+        try:
+            await record_entry_skip(
+                db_path, strategy="A", mint_address=mint, ticker=ticker,
+                gate="repeat_loser", reason="previous close had negative PnL",
+            )
+        except Exception as exc:
+            log.debug("candidate_log write failed (non-fatal): %s", exc)
+        return False
+
+    if utc_now.weekday() == 5:
+        log.info("Saturday — halving position size for %s", mint)
+        size_multiplier *= SATURDAY_SIZE_MULTIPLIER
+
     existing = await manager.get_position(mint, mode="paper")
     if existing is not None:
         log.warning("SKIP %s — position already open", mint)
@@ -308,10 +354,15 @@ async def monitor_positions(
     manager: PositionManager,
     mark_provider: DexScreenerPriceProvider,
     db_path: Path,
-) -> None:
-    """Re-mark open positions and close any that hit stop or time limit."""
+) -> bool:
+    """Re-mark open positions and close any that hit stop or time limit.
+
+    Returns True when any still-open position is trading below 95% of its
+    entry (danger zone) — the caller polls at FAST_MONITOR_INTERVAL_S then.
+    """
     from datetime import UTC, datetime
 
+    danger = False
     positions = await manager.get_all_open(mode="paper")
     for pos in positions:
         current_price = await mark_provider.get_current_price(pos.mint_address)
@@ -347,33 +398,47 @@ async def monitor_positions(
             pct_from_entry = (current_price - entry) / entry
             if drop_from_entry >= HARD_STOP_PCT:
                 close_reason = "hard_stop"
-                close_price = current_price
+                close_price = entry * (1.0 - HARD_STOP_PCT)
             elif pct_from_entry >= 0.60:
                 close_reason = "take_profit"
                 close_price = current_price
-            elif (peak - current_price) / peak >= TRAILING_STOP_PCT:
+            elif (
+                peak > entry * (1.0 + TRAILING_ARM_PCT)
+                and (peak - current_price) / peak >= TRAILING_STOP_PCT
+            ):
                 close_reason = "trailing_stop"
                 close_price = current_price
+        if (
+            close_reason is None
+            and age_min * 60 >= ENTRY_CONFIRM_WINDOW_S
+            and peak <= entry * (1.0 + EARLY_EXIT_GREEN_PCT)
+        ):
+            close_reason = "early_exit_no_green"
+            close_price = current_price
         if age_min >= TIME_STOP_MINUTES and close_reason is None:
             close_reason = "time_stop"
 
         if close_reason:
             peak = peak_prices.get(pos.mint_address)
             peak_prices.pop(pos.mint_address, None)
-            trade = await _adapter_close(pos, current_price, close_reason, db_path)
-            await manager.close_position(pos.mint_address, current_price, mode="paper", peak_price_sol=peak)
-            pnl_pct = ((current_price - pos.entry_price_sol) / pos.entry_price_sol) * 100 if pos.entry_price_sol else 0.0
+            trade = await _adapter_close(pos, close_price, close_reason, db_path)
+            await manager.close_position(pos.mint_address, close_price, mode="paper", peak_price_sol=peak)
+            pnl_pct = ((close_price - pos.entry_price_sol) / pos.entry_price_sol) * 100 if pos.entry_price_sol else 0.0
             peak_pnl_pct = ((peak - pos.entry_price_sol) / pos.entry_price_sol) * 100 if pos.entry_price_sol else 0.0
             log.info(
                 "CLOSE [%s]: mint=%s entry=%.8f peak=%.8f close=%.8f",
-                close_reason, pos.mint_address[:16], pos.entry_price_sol, peak, current_price,
+                close_reason, pos.mint_address[:16], pos.entry_price_sol, peak, close_price,
             )
             send_imessage(
                 f"\U0001f534 [STRATEGY A] CLOSED {pos.mint_address[:8]}\n"
-                f"Entry: {pos.entry_price_sol:.8f} \u2192 Close: {current_price:.8f}\n"
+                f"Entry: {pos.entry_price_sol:.8f} \u2192 Close: {close_price:.8f}\n"
                 f"PnL: {pnl_pct:+.1f}%  Peak: {peak_pnl_pct:+.1f}%\n"
                 f"Reason: {close_reason}"
             )
+        elif current_price < entry * (1.0 - FAST_POLL_DROP_PCT):
+            danger = True
+
+    return danger
 
 
 async def _adapter_close(pos, close_price: float, reason: str, db_path: Path) -> Trade:
@@ -535,12 +600,17 @@ async def monitor_loop(
     mark_provider: DexScreenerPriceProvider,
     db_path: Path,
 ) -> None:
-    """Check open positions for stops every 30 seconds."""
+    """Check open positions for stops every 30 seconds.
+
+    Polls at FAST_MONITOR_INTERVAL_S while any open position trades below
+    95% of its entry so the hard stop is caught near its -10% trigger.
+    """
     while True:
         cycle_start = time.monotonic()
-        await monitor_positions(manager, mark_provider, db_path)
+        danger = await monitor_positions(manager, mark_provider, db_path)
         elapsed = time.monotonic() - cycle_start
-        await asyncio.sleep(max(0.0, MONITOR_INTERVAL_S - elapsed))
+        interval = FAST_MONITOR_INTERVAL_S if danger else MONITOR_INTERVAL_S
+        await asyncio.sleep(max(0.0, interval - elapsed))
 
 
 async def main() -> None:

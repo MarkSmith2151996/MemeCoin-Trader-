@@ -65,9 +65,15 @@ MENTION_WINDOW_MINUTES = 5
 MAX_OPEN = 5
 SCAN_INTERVAL = 60
 MONITOR_INTERVAL = 30
+FAST_MONITOR_INTERVAL_S = 5
+FAST_POLL_DROP_PCT = 0.05
 TAKE_PROFIT_MULT = 2.0
 HARD_STOP_MULT = 0.70
 TIME_STOP_MINUTES = 10
+ENTRY_CONFIRM_WINDOW_S = 90
+EARLY_EXIT_GREEN_PCT = 0.01
+BLOCKED_UTC_HOURS = frozenset({0, 7, 19, 20})
+SATURDAY_SIZE_MULTIPLIER = 0.5
 
 # Mode flags
 REQUIRE_MENTIONS = False      # Set False to skip Grok entirely (on-chain only)
@@ -121,6 +127,7 @@ except ImportError:
 seen_mints: dict[str, float] = {}
 SEEN_MINTS_TTL = 3600  # 1 hour in seconds
 _rugcheck = RugCheckClient(timeout_s=5.0)
+peak_prices: dict[str, float] = {}  # mint -> highest price seen
 
 
 # ── Gate helpers ────────────────────────────────────────────────────
@@ -603,6 +610,45 @@ async def try_enter(
     size_multiplier: float = 1.0,
     pair: dict | None = None,
 ) -> str | None:
+    from src.core.database import has_losing_close, record_entry_skip
+
+    if len(await manager.get_all_open(mode="paper")) >= MAX_OPEN:
+        log.warning("SKIP %s ticker=%s — strategy capacity reached", mint[:16], ticker)
+        return None
+
+    utc_now = datetime.now(UTC)
+    if utc_now.hour in BLOCKED_UTC_HOURS:
+        log.warning(
+            "SKIP %s ticker=%s — time_gate: UTC hour %d blocked",
+            mint[:16], ticker, utc_now.hour,
+        )
+        try:
+            await record_entry_skip(
+                db_path, strategy="B", mint_address=mint, ticker=ticker,
+                gate="time_gate", reason=f"utc_hour={utc_now.hour}",
+            )
+        except Exception as exc:
+            log.debug("candidate_log write failed (non-fatal): %s", exc)
+        return None
+
+    if await has_losing_close(db_path, mint):
+        log.warning(
+            "SKIP %s ticker=%s — repeat_loser: mint previously closed at a loss",
+            mint[:16], ticker,
+        )
+        try:
+            await record_entry_skip(
+                db_path, strategy="B", mint_address=mint, ticker=ticker,
+                gate="repeat_loser", reason="previous close had negative PnL",
+            )
+        except Exception as exc:
+            log.debug("candidate_log write failed (non-fatal): %s", exc)
+        return None
+
+    if utc_now.weekday() == 5:
+        log.info("Saturday — halving position size for %s (%s)", mint[:16], ticker)
+        size_multiplier *= SATURDAY_SIZE_MULTIPLIER
+
     existing = await manager.get_position(mint, mode="paper")
     if existing is not None:
         return None
@@ -664,7 +710,10 @@ async def monitor_positions(
     mark_provider: DexScreenerPriceProvider,
     db_path: Path,
     gate_tuner: GateTuner | None = None,
-) -> None:
+) -> bool:
+    """Re-mark open positions and close on stops; True if any position is in
+    the danger zone (below 95% of entry) so the caller polls at 5s."""
+    danger = False
     positions = await manager.get_all_open(mode="paper")
     for pos in positions:
         current_price = await mark_provider.get_current_price(pos.mint_address)
@@ -673,6 +722,10 @@ async def monitor_positions(
 
         age_min = (datetime.now(UTC) - pos.opened_at).total_seconds() / 60
         entry = pos.entry_price_sol if pos.entry_price_sol > 0 else current_price
+
+        prev_peak = peak_prices.get(pos.mint_address, entry)
+        peak = max(prev_peak, current_price)
+        peak_prices[pos.mint_address] = peak
 
         close_reason = None
         close_price = current_price
@@ -683,26 +736,40 @@ async def monitor_positions(
                 close_price = entry * TAKE_PROFIT_MULT
             elif current_price <= entry * HARD_STOP_MULT:
                 close_reason = "hard_stop"
+                close_price = entry * HARD_STOP_MULT
+
+        if (
+            close_reason is None
+            and age_min * 60 >= ENTRY_CONFIRM_WINDOW_S
+            and peak <= entry * (1.0 + EARLY_EXIT_GREEN_PCT)
+        ):
+            close_reason = "early_exit_no_green"
 
         if age_min >= TIME_STOP_MINUTES and close_reason is None:
             close_reason = "time_stop"
 
         if close_reason:
+            peak = peak_prices.get(pos.mint_address)
+            peak_prices.pop(pos.mint_address, None)
             trade = await _adapter_close(pos, close_price, close_reason, db_path)
-            await manager.close_position(pos.mint_address, close_price, mode="paper")
+            await manager.close_position(pos.mint_address, close_price, mode="paper", peak_price_sol=peak)
             if gate_tuner is not None and await gate_tuner.maybe_tune():
                 log.info("Auto-tuned Strategy B gates: %s", json.dumps(gate_tuner.thresholds.as_dict()))
-            pnl_pct = ((current_price - pos.entry_price_sol) / pos.entry_price_sol) * 100 if pos.entry_price_sol else 0.0
+            pnl_pct = ((close_price - pos.entry_price_sol) / pos.entry_price_sol) * 100 if pos.entry_price_sol else 0.0
             log.info(
                 "CLOSE [%s]: mint=%s entry=%.8f close=%.8f",
-                close_reason, pos.mint_address[:16], pos.entry_price_sol, current_price,
+                close_reason, pos.mint_address[:16], pos.entry_price_sol, close_price,
             )
             send_imessage(
                 f"\U0001f534 [STRATEGY B] CLOSED {pos.mint_address[:8]}\n"
-                f"Entry: {pos.entry_price_sol:.8f} \u2192 Close: {current_price:.8f}\n"
+                f"Entry: {pos.entry_price_sol:.8f} \u2192 Close: {close_price:.8f}\n"
                 f"PnL: {pnl_pct:+.1f}%\n"
                 f"Reason: {close_reason}"
             )
+        elif current_price < entry * (1.0 - FAST_POLL_DROP_PCT):
+            danger = True
+
+    return danger
 
 
 async def _adapter_close(pos, close_price: float, reason: str, db_path: Path) -> Trade:
@@ -932,9 +999,10 @@ async def monitor_loop(
 ) -> None:
     while True:
         cycle_start = time.monotonic()
-        await monitor_positions(manager, mark_provider, db_path, gate_tuner)
+        danger = await monitor_positions(manager, mark_provider, db_path, gate_tuner)
         elapsed = time.monotonic() - cycle_start
-        await asyncio.sleep(max(0.0, MONITOR_INTERVAL - elapsed))
+        interval = FAST_MONITOR_INTERVAL_S if danger else MONITOR_INTERVAL
+        await asyncio.sleep(max(0.0, interval - elapsed))
 
 
 async def main() -> None:

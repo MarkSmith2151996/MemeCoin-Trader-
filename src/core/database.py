@@ -10,7 +10,7 @@ from uuid import uuid4
 
 import aiosqlite
 
-from src.core.models import PaperDecisionRecord, Position, SoakRunRecord, Trade
+from src.core.models import PaperDecisionRecord, Position, PositionStatus, SoakRunRecord, Trade
 
 
 @dataclass(frozen=True, slots=True)
@@ -580,6 +580,50 @@ async def mark_strategy_candidate_entered(
             (position_id, candidate_id),
         )
         await db.commit()
+
+
+async def has_losing_close(path: str | Path, mint_address: str) -> bool:
+    """Return True if any closed position for this mint realized a loss.
+
+    Used to block re-entry on losing mints. Checks all strategies — a mint
+    that closed underwater for one strategy should not be re-entered by the
+    other either.
+    """
+
+    async with aiosqlite.connect(path) as db:
+        cursor = await db.execute(
+            "SELECT 1 FROM positions WHERE mint_address = ? AND status = ?"
+            " AND realized_pnl_sol < 0 LIMIT 1",
+            (mint_address, PositionStatus.CLOSED.value),
+        )
+        return await cursor.fetchone() is not None
+
+
+async def record_entry_skip(
+    path: str | Path,
+    *,
+    strategy: str,
+    mint_address: str,
+    ticker: str | None,
+    gate: str,
+    reason: str,
+) -> int:
+    """Persist an entry-level gate skip (time_gate, repeat_loser, ...) to candidate_log."""
+
+    async with aiosqlite.connect(path) as db:
+        cursor = await db.execute(
+            """
+            INSERT INTO candidate_log (
+                scan_time, strategy, mint_address, ticker, gates_passed, gates_failed
+            ) VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            (
+                datetime.now(UTC).isoformat(), strategy, mint_address, ticker,
+                json.dumps([]), json.dumps({"gate": gate, "reason": reason}),
+            ),
+        )
+        await db.commit()
+        return int(cursor.lastrowid)
 
 
 async def record_paper_decision(path: str | Path, record: PaperDecisionRecord) -> None:
