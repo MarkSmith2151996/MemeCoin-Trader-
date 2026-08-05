@@ -1,31 +1,24 @@
 "use strict";
 /*
- * WhatsApp trading bot for the memecoin paper trader (MT-510).
+ * Telegram trading bot for the memecoin paper trader (MT-513).
  *
- * First run (QR scan):
- *   cd bot && npm install
- *   node /home/dev/projects/memecoin-trader/bot/bot.js
- *   Scan the QR with WhatsApp > Linked Devices. Credentials are stored in
- *   bot/auth/ and reused on later starts. (Run with the absolute path so the
- *   watchdog's "node bot/bot.js" process check recognizes this instance and
- *   does not spawn a duplicate while you are scanning.)
+ * Setup (after creating the bot with @BotFather):
+ *   1. Create the bot with @BotFather and copy the API token.
+ *   2. Get your chat id (message @userinfobot once and read "Id:").
+ *   3. Fill telegram_token and telegram_chat_id in bot/config.json.
+ *   4. cd bot && npm install
  *
  * Then run as a background service (watchdog-managed, like the trading loops):
- *   cd bot && NODE_NO_WARNINGS=1 nohup node bot.js >> /tmp/whatsapp_bot.log 2>&1 &
+ *   cd bot && NODE_NO_WARNINGS=1 nohup node bot.js >> /tmp/telegram_bot.log 2>&1 &
  *   (the cron watchdog /home/dev/watchdog_memecoin.sh does this automatically)
  *
- * Only responds to the owner number in bot/config.json.
+ * Uses long polling (no webhook — simpler from WSL) and only responds to
+ * messages from the configured chat id. With blank telegram_token and/or
+ * telegram_chat_id the bot starts and idles until the config is filled.
  */
 const path = require("node:path");
 const fs = require("node:fs");
-const pino = require("pino");
-const qrcode = require("qrcode-terminal");
-const makeWASocket = require("@whiskeysockets/baileys").default;
-const {
-  useMultiFileAuthState,
-  fetchLatestBaileysVersion,
-  DisconnectReason,
-} = require("@whiskeysockets/baileys");
+const TelegramBot = require("node-telegram-bot-api");
 
 const lib = require("./lib");
 const db = require("./db");
@@ -33,7 +26,6 @@ const sys = require("./system");
 const reports = require("./reports");
 
 const CONFIG_PATH = process.env.BOT_CONFIG || path.join(__dirname, "config.json");
-const AUTH_DIR = process.env.BOT_AUTH_DIR || path.join(__dirname, "auth");
 const DEFAULT_DB_PATH = "/home/dev/projects/memecoin-trader/data/trades.db";
 
 let config;
@@ -47,151 +39,47 @@ try {
 const DB_PATH = config.db_path || DEFAULT_DB_PATH;
 const PROJECT_ROOT = path.dirname(path.dirname(DB_PATH));
 
-const ownerDigits = lib.digitsOnly(config.owner_number || "");
-const OWNER_JID = ownerDigits ? `${ownerDigits}@s.whatsapp.net` : null;
+const TOKEN = String(config.telegram_token || "").trim();
+const rawChatId = String(config.telegram_chat_id == null ? "" : config.telegram_chat_id).trim();
+const CHAT_ID = rawChatId && Number.isInteger(Number(rawChatId)) ? Number(rawChatId) : null;
 
 db.initDb(DB_PATH);
 
 const HEALTH_INTERVAL_MS = Math.max(0, Number(config.health_check_interval_seconds || 60) * 1000);
 const RE_ALERT_MS = 30 * 60 * 1000;
-const DAY_MS = 24 * 3600 * 1000;
 
-const logger = pino({ level: "warn" });
-
-let sock = null;
-let connectionState = "idle";
-let lastOpenAt = 0;
-let reconnectTimer = null;
-let backoffMs = 5000;
+let bot = null;
 let shuttingDown = false;
 
-/* ---------------- WhatsApp connection ---------------- */
+/* ---------------- Telegram connection ---------------- */
 
-async function startSocket() {
-  if (shuttingDown) return;
-  try {
-    const { state, saveCreds } = await useMultiFileAuthState(AUTH_DIR);
-    const { version } = await fetchLatestBaileysVersion();
-    if (sock) {
-      try {
-        sock.end(0);
-      } catch {
-        /* ignore */
-      }
-    }
-    sock = makeWASocket({
-      version,
-      auth: state,
-      printQRInTerminal: false,
-      logger,
-      browser: ["memecoin-trader-bot", "Chrome", "122.0.0.1"],
-      markOnlineOnConnect: true,
-    });
-    sock.ev.on("creds.update", saveCreds);
-    sock.ev.on("connection.update", handleConnectionUpdate);
-    sock.ev.on("messages.upsert", handleMessages);
-  } catch (e) {
-    console.error(`[${stamp()}] socket start failed: ${e.message}`);
-    scheduleReconnect();
-  }
-}
-
-function handleConnectionUpdate(update) {
-  if (update.qr) {
-    console.log(`[${stamp()}] QR generated — scan within ~60s (Linked Devices > Link a device)`);
-    qrcode.generate(update.qr, { small: true });
-  }
-  if (update.connection === "connecting") {
-    connectionState = "connecting";
-    console.log(`[${stamp()}] connecting...`);
-  }
-  if (update.connection === "open") {
-    connectionState = "open";
-    lastOpenAt = Date.now();
-    backoffMs = 5000;
-    console.log(`[${stamp()}] connected as ${sock.user ? sock.user.id : "unknown"}`);
-  }
-  if (update.connection === "close") {
-    const code = update.lastDisconnect && update.lastDisconnect.error;
-    const reason = code ? code.output && code.output.statusCode : null;
-    connectionState = "close";
-    console.log(
-      `[${stamp()}] connection closed (code=${reason ?? "n/a"})${reason === DisconnectReason.loggedOut ? " — logged out, remove bot/auth to re-pair" : ""}`
-    );
-    scheduleReconnect();
-  }
-}
-
-function scheduleReconnect() {
-  if (shuttingDown || reconnectTimer) return;
-  reconnectTimer = setTimeout(() => {
-    reconnectTimer = null;
-    startSocket();
-  }, backoffMs);
-  backoffMs = Math.min(backoffMs * 2, 60000);
+function initTelegram() {
+  bot = new TelegramBot(TOKEN, { polling: true });
+  bot.on("message", handleMessage);
+  bot.on("polling_error", (e) => console.error(`[${stamp()}] polling error: ${e.message}`));
+  bot.on("error", (e) => console.error(`[${stamp()}] api error: ${e.message}`));
 }
 
 /* ---------------- messages / commands ---------------- */
 
-/*
- * Seen-message dedupe.
- *
- * Baileys fires `messages.upsert` for self-chat messages (owner messaging
- * their own number) with `key.fromMe = true` — the sender IS our own JID.
- * There is no socket flag that enables this; `syncFullHistory` only pulls a
- * bulk history sync (async, `append` type) and `getMessage` is a retry-fetch
- * callback for failed sends. So the fix is purely in the listener.
- *
- * The dedupe set exists because the bot's own replies in the self-chat are
- * echoed back to it with the same message ID — without it, every reply would
- * re-trigger handleCommand forever.
- */
-const seenMessageIds = new Set();
-const SEEN_MAX = 500;
-
-function seenKey(key) {
-  return `${key.remoteJid}:${key.fromMe ? "1" : "0"}:${key.id}`;
+function parseCommand(text) {
+  return String(text || "").trim().toLowerCase().replace(/^\/+/, "").replace(/\s+/g, " ");
 }
 
-function isMessageSeen(key) {
-  return seenMessageIds.has(seenKey(key));
-}
-
-function markMessageSeen(key) {
-  if (seenMessageIds.size > SEEN_MAX) seenMessageIds.clear();
-  seenMessageIds.add(seenKey(key));
-}
-
-function extractText(msg) {
-  const m = msg.message || {};
-  return (
-    m.conversation ||
-    (m.extendedTextMessage && m.extendedTextMessage.text) ||
-    (m.imageMessage && m.imageMessage.caption) ||
-    (m.videoMessage && m.videoMessage.caption) ||
-    null
-  );
-}
-
-function isOwner(jid) {
-  if (!OWNER_JID || !jid) return false;
-  return lib.digitsOnly(jid.split("@")[0]) === ownerDigits;
-}
-
-async function sendText(jid, text) {
+async function sendText(chatId, text) {
+  if (!bot) return;
   try {
-    const sent = await sock.sendMessage(jid, { text });
-    if (sent && sent.key) markMessageSeen(sent.key);
+    await bot.sendMessage(chatId, text, { parse_mode: "Markdown" });
   } catch (e) {
-    console.error(`[${stamp()}] send failed: ${e.message}`);
+    try {
+      await bot.sendMessage(chatId, text);
+    } catch (e2) {
+      console.error(`[${stamp()}] send failed: ${e2.message}`);
+    }
   }
 }
 
-function parseCommand(text) {
-  return String(text || "").trim().toLowerCase().replace(/\s+/g, " ");
-}
-
-async function handleCommand(jid, text) {
+async function handleCommand(chatId, text) {
   const cmd = parseCommand(text);
   let reply;
   const dayStart = lib.etDayStartUtc(0);
@@ -242,31 +130,20 @@ async function handleCommand(jid, text) {
     default:
       reply = reports.helpReport();
   }
-  await sendText(jid, reply);
+  await sendText(chatId, reply);
 }
 
-async function handleMessages(upsert) {
-  if (upsert.type !== "notify") return;
-  for (const msg of upsert.messages) {
-    if (!msg || !msg.key) continue;
-    const jid = msg.key.remoteJid;
-    // The owner commands the bot by messaging their own number (self-chat).
-    // Those messages arrive with key.fromMe = true, so we must NOT skip
-    // fromMe messages when the chat is the owner's own JID. Everything else
-    // that came from us is ignored (no echo/group/other-device handling).
-    if (msg.key.fromMe && !(OWNER_JID && isOwner(jid))) continue;
-    if (!isOwner(jid)) continue;
-    if (isMessageSeen(msg.key)) continue;
-    markMessageSeen(msg.key);
-    const text = extractText(msg);
-    if (!text) continue;
-    console.log(`[${stamp()}] command from owner: "${text.trim().slice(0, 60)}"`);
-    try {
-      await handleCommand(jid, text);
-    } catch (e) {
-      console.error(`[${stamp()}] command failed: ${e.message}`);
-      await sendText(jid, `Command error: ${e.message}`);
-    }
+async function handleMessage(msg) {
+  if (!msg || !msg.text || !CHAT_ID) return;
+  if (Number(msg.chat.id) !== CHAT_ID) return;
+  const text = String(msg.text).trim();
+  if (!text) return;
+  console.log(`[${stamp()}] command from owner: "${text.slice(0, 60)}"`);
+  try {
+    await handleCommand(msg.chat.id, text);
+  } catch (e) {
+    console.error(`[${stamp()}] command failed: ${e.message}`);
+    await sendText(msg.chat.id, `Command error: ${e.message}`);
   }
 }
 
@@ -287,9 +164,9 @@ async function healthWatch() {
     return;
   }
   console.log(
-    `[${stamp()}] hb conn=${connectionState} A=${snap.A.alive ? "up" : "down"} B=${snap.B.alive ? "up" : "down"} browser=${snap.browserPc.ok ? "ok" : "down"}`
+    `[${stamp()}] hb A=${snap.A.alive ? "up" : "down"} B=${snap.B.alive ? "up" : "down"} browser=${snap.browserPc.ok ? "ok" : "down"}`
   );
-  if (!OWNER_JID) return;
+  if (!bot || !CHAT_ID) return;
   const now = Date.now();
   const items = [
     ["Strategy A", "A", snap.A.alive, `process run_paper_loop.py not found`],
@@ -303,14 +180,11 @@ async function healthWatch() {
       const shouldAlert = st.ok !== false || now - st.lastAlertAt > RE_ALERT_MS;
       if (shouldAlert) {
         st.lastAlertAt = now;
-        await sendText(
-          OWNER_JID,
-          `*ALERT — ${label} DOWN*\n${downDetail}\nChecked at ${lib.fmtEtTime(now)}.`
-        );
+        await sendText(CHAT_ID, `*ALERT — ${label} DOWN*\n${downDetail}\nChecked at ${lib.fmtEtTime(now)}.`);
         console.log(`[${stamp()}] alerted: ${label} down`);
       }
     } else if (st.ok === false) {
-      await sendText(OWNER_JID, `*${label} recovered* at ${lib.fmtEtTime(now)}.`);
+      await sendText(CHAT_ID, `*${label} recovered* at ${lib.fmtEtTime(now)}.`);
       console.log(`[${stamp()}] alerted: ${label} recovered`);
     }
     st.ok = alive;
@@ -320,7 +194,7 @@ async function healthWatch() {
 let lastGateId = null;
 
 function gateWatch() {
-  if (!OWNER_JID) return;
+  if (!bot || !CHAT_ID) return;
   let current;
   try {
     current = db.maxGateConfigId();
@@ -336,7 +210,7 @@ function gateWatch() {
   const newRows = db.gateConfigsSince(0).filter((r) => r.id > lastGateId);
   for (const row of newRows) {
     const msg = gateChangeMessage(row);
-    sendText(OWNER_JID, msg);
+    sendText(CHAT_ID, msg);
     console.log(`[${stamp()}] gate change alert: id ${row.id}`);
   }
   lastGateId = current;
@@ -367,11 +241,11 @@ function gateChangeMessage(row) {
 }
 
 async function dailySummaryTick() {
-  if (!OWNER_JID) return;
+  if (!bot || !CHAT_ID) return;
   const dayStart = lib.etDayStartUtc(0);
   try {
     const text = reports.summaryReport(dayStart);
-    await sendText(OWNER_JID, text);
+    await sendText(CHAT_ID, text);
     console.log(`[${stamp()}] midnight summary sent`);
   } catch (e) {
     console.error(`[${stamp()}] summary failed: ${e.message}`);
@@ -398,13 +272,18 @@ function stamp() {
 }
 
 async function main() {
-  if (!OWNER_JID) {
+  if (!TOKEN) {
     console.warn(
-      `[${stamp()}] WARNING: owner_number is blank in ${CONFIG_PATH} — bot ignores all messages. Fill it in and restart.`
+      `[${stamp()}] WARNING: telegram_token is blank in ${CONFIG_PATH} — bot idles without connecting. Fill it in and restart.`
     );
   }
-  console.log(`[${stamp()}] starting whatsapp bot (db=${DB_PATH}, auth=${AUTH_DIR})`);
-  await startSocket();
+  if (!CHAT_ID) {
+    console.warn(
+      `[${stamp()}] WARNING: telegram_chat_id is blank in ${CONFIG_PATH} — bot ignores all messages. Fill it in and restart.`
+    );
+  }
+  console.log(`[${stamp()}] starting telegram bot (db=${DB_PATH}${TOKEN ? "" : ", token blank"})`);
+  if (TOKEN) initTelegram();
 
   if (HEALTH_INTERVAL_MS > 0) {
     setInterval(healthWatch, HEALTH_INTERVAL_MS);
@@ -422,9 +301,9 @@ function shutdown() {
   if (shuttingDown) return;
   shuttingDown = true;
   console.log(`[${stamp()}] shutting down`);
-  if (sock) {
+  if (bot) {
     try {
-      sock.end(0);
+      bot.stopPolling();
     } catch {
       /* ignore */
     }

@@ -1,16 +1,14 @@
 {
   "name": "memecoin-trader-bot",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "private": true,
-  "description": "WhatsApp alerts + command bot for the memecoin paper trader (MT-510)",
+  "description": "Telegram alerts + command bot for the memecoin paper trader (MT-513)",
   "main": "bot.js",
   "scripts": {
     "start": "node bot.js",
     "test": "node --test"
   },
   "dependencies": {
-    "@whiskeysockets/baileys": "^6.7.0",
-    "pino": "^9.0.0",
-    "qrcode-terminal": "^0.12.0"
+    "node-telegram-bot-api": "^0.66.0"
   }
 }

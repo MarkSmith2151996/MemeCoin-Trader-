@@ -1,5 +1,6 @@
 {
-  "owner_number": "12488320822",
+  "telegram_token": "",
+  "telegram_chat_id": "",
   "db_path": "/home/dev/projects/memecoin-trader/data/trades.db",
   "daily_summary_hour": 0,
   "daily_summary_minute": 0,
