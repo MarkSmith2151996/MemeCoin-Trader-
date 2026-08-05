@@ -82,7 +82,7 @@ GATES = GateThresholds(
 MAX_MCAP_USD = 50_000
 
 MAX_DEV_HOLDINGS_PCT = 10.0
-MAX_TOP10_HOLDER_PCT = 95.0
+MAX_TOP10_HOLDER_PCT = 100.0
 MAX_MCAP_RUGCHECK = 50_000
 
 # Rug signal filters
@@ -465,7 +465,7 @@ async def screen_coin(
 
         warn_holder, hard_holder = _age_holder_tier(age_min)
         if report.top_holder_pct is not None:
-            if report.top_holder_pct < hard_holder:
+            if report.top_holder_pct <= hard_holder:
                 gates["holder_pass"] = True
 
         creator_pct = _extract_creator_pct(report)
