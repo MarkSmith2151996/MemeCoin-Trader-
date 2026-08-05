@@ -125,6 +125,16 @@ def test_fetch_entry_metadata_success() -> None:
     assert result["entry_price_change_1h"] == 0.25
     assert result["entry_price_change_5m"] == -0.03
     assert result["entry_fdv"] == 200000.0
+    assert result["dexscreener"] == {
+        "mcap": 123456.0,
+        "volume": {"h24": 50000.0, "h1": 1200.0},
+        "txns": {"h24": {"buys": 40, "sells": 10}, "h1": {"buys": 5, "sells": 1}},
+        "liquidity": {"usd": 25000.0},
+        "fdv": 200000.0,
+        "age_hours": result["entry_age_hours"],
+        "price_usd": None,
+        "price_change": {"h1": 0.25, "m5": -0.03},
+    }
     assert isinstance(result["entry_age_hours"], float)
     assert result["entry_age_hours"] >= 0
 

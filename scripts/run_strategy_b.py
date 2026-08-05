@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import json
 import logging
 import sys
 import time
@@ -31,7 +32,12 @@ import httpx
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 from src.core.config import load_settings
-from src.core.database import init_db, record_trade
+from src.core.database import (
+    init_db,
+    mark_strategy_candidate_entered,
+    record_strategy_candidate,
+    record_trade,
+)
 from src.core.models import Side, Trade
 from src.execution.price_provider import DexScreenerPriceProvider
 from src.execution.paper import PaperExecutionAdapter
@@ -39,16 +45,19 @@ from src.monitoring.alerts import send_imessage
 from src.risk.rugcheck import RugCheckClient
 from src.signals.grok_xsearch import get_mentions_with_timestamps, count_influencer_mentions
 from src.strategy.position_manager import PositionManager
+from src.strategy.gate_tuner import GateThresholds, GateTuner
 
 WRAPPED_SOL_MINT = "So11111111111111111111111111111111111111112"
 
 BROWSER_PC_URL = "http://localhost:8099"
-STRATEGY_B_DEXSCREENER_URL = (
-    "https://dexscreener.com/new-pairs/solana"
-    "?rankBy=trendingScoreH6&order=desc"
-    "&minLiq=1000&minMarketCap=5000&maxMarketCap=50000&maxAge=0.25"
-)
+# Browser rows are only discovery hints. DexScreener's URL age filters are
+# client-side and can be stale, so API pairCreatedAt is authoritative.
+STRATEGY_B_DEXSCREENER_URL = "https://dexscreener.com/new-pairs/solana"
 BROWSER_PC_WAIT_SECONDS = 8
+# API-side age filtering follows the widened Strategy B gate, rather than the
+# unreliable client-side maxAge query parameter.
+SOURCE_MAX_AGE_MINUTES = 30
+MAX_SOURCE_ROWS = 30
 
 PAPER_SIZE_SOL = 0.05
 MIN_MENTIONS = 3
@@ -64,11 +73,13 @@ TIME_STOP_MINUTES = 10
 REQUIRE_MENTIONS = False      # Set False to skip Grok entirely (on-chain only)
 USE_INFLUENCER_MENTIONS = False  # Set True to use influencer-weighted mentions instead of raw count
 
-MAX_AGE_MINUTES = 15
-MIN_MCAP_USD = 5_000
+GATES = GateThresholds(
+    max_age_minutes=30,
+    min_mcap_usd=2_000,
+    min_volume_usd=200,
+    min_buy_sell_ratio=0.4,
+)
 MAX_MCAP_USD = 50_000
-MIN_BUY_SELL_RATIO = 0.6
-MIN_VOLUME_USD = 500
 
 MAX_DEV_HOLDINGS_PCT = 10.0
 MAX_TOP10_HOLDER_PCT = 30.0
@@ -218,8 +229,61 @@ def parse_row(row: dict) -> dict:
     }
 
 
+async def _search_fresh_pair(ticker: str, http: httpx.AsyncClient) -> dict | None:
+    """Resolve a browser hint through search and return an API-aged Solana pair."""
+    try:
+        response = await http.get(
+            "https://api.dexscreener.com/latest/dex/search",
+            params={"q": ticker},
+            timeout=10.0,
+        )
+        response.raise_for_status()
+        pairs = response.json().get("pairs") or []
+    except Exception as exc:
+        log.debug("DexScreener search failed for %s: %s", ticker, exc)
+        return None
+
+    now_ms = time.time() * 1000
+    choices: list[tuple[float, dict]] = []
+    for pair in pairs:
+        if not isinstance(pair, dict) or pair.get("chainId") != "solana":
+            continue
+        quote = pair.get("quoteToken") or {}
+        if quote.get("address") != WRAPPED_SOL_MINT:
+            continue
+        created_ms = pair.get("pairCreatedAt")
+        if not isinstance(created_ms, (int, float)) or created_ms <= 0:
+            continue
+        age_minutes = max(0.0, (now_ms - created_ms) / 60_000)
+        if age_minutes <= SOURCE_MAX_AGE_MINUTES:
+            choices.append((age_minutes, pair))
+    if not choices:
+        return None
+
+    age_minutes, pair = min(choices, key=lambda item: item[0])
+    base = pair.get("baseToken") or {}
+    mint = base.get("address")
+    if not isinstance(mint, str) or not mint:
+        return None
+    txns = (pair.get("txns") or {}).get("h1") or {}
+    buys = int(txns.get("buys") or 0)
+    sells = int(txns.get("sells") or 0)
+    return {
+        "mint": mint,
+        "ticker": base.get("symbol") or ticker,
+        "usd_market_cap": float(pair.get("marketCap") or pair.get("fdv") or 0),
+        "created_timestamp": int(pair["pairCreatedAt"]),
+        "volume": float((pair.get("volume") or {}).get("h1") or 0),
+        "txns": buys + sells,
+        "buy_sell_ratio": buys / max(sells, 1),
+        "liquidity": float((pair.get("liquidity") or {}).get("usd") or 0),
+        "pair": pair,
+        "source_age_minutes": age_minutes,
+    }
+
+
 async def fetch_candidates(http: httpx.AsyncClient) -> list[dict]:
-    """Fetch fresh coins via browser-pc + DexScreener new-pairs URL."""
+    """Return only candidates whose API pair timestamps pass the live age gate."""
     try:
         resp = await http.post(
             f"{BROWSER_PC_URL}/capture",
@@ -229,8 +293,20 @@ async def fetch_candidates(http: httpx.AsyncClient) -> list[dict]:
         resp.raise_for_status()
         data = resp.json()
         rows = data.get("candidates", data.get("rows", []))
-        log.info("browser-pc returned %d rows", len(rows))
-        return rows
+        tickers = []
+        for row in rows:
+            ticker = row.get("name") or row.get("symbol") or row.get("token")
+            if isinstance(ticker, str) and ticker.strip() and ticker not in tickers:
+                tickers.append(ticker.strip())
+        candidates = await asyncio.gather(
+            *(_search_fresh_pair(ticker, http) for ticker in tickers[:MAX_SOURCE_ROWS]),
+        )
+        fresh = [candidate for candidate in candidates if candidate is not None]
+        log.info(
+            "browser-pc discovery rows=%d; DexScreener API fresh candidates=%d (all <= %.0fm)",
+            len(rows), len(fresh), SOURCE_MAX_AGE_MINUTES,
+        )
+        return fresh
     except Exception as e:
         log.warning("browser-pc error: %s", e)
         return []
@@ -313,15 +389,15 @@ async def screen_coin(
     if not isinstance(created_ts, (int, float)) or created_ts <= 0:
         return False, "no created_timestamp", gates
     age_min = (now.timestamp() - created_ts / 1000) / 60
-    if age_min > MAX_AGE_MINUTES:
-        return False, f"age={age_min:.1f}m > {MAX_AGE_MINUTES}m", gates
+    if age_min > GATES.max_age_minutes:
+        return False, f"age={age_min:.1f}m > {GATES.max_age_minutes:.0f}m", gates
     gates["age_pass"] = True
 
     mcap = coin.get("usd_market_cap")
     if not isinstance(mcap, (int, float)) or mcap <= 0:
         return False, f"age={age_min:.1f}m no usd_market_cap", gates
-    if mcap < MIN_MCAP_USD:
-        return False, f"age={age_min:.1f}m mcap=${mcap:.0f} < ${MIN_MCAP_USD}", gates
+    if mcap < GATES.min_mcap_usd:
+        return False, f"age={age_min:.1f}m mcap=${mcap:.0f} < ${GATES.min_mcap_usd:.0f}", gates
     if mcap > MAX_MCAP_USD:
         return False, f"age={age_min:.1f}m mcap=${mcap:.0f} > ${MAX_MCAP_USD}", gates
     gates["mcap_pass"] = True
@@ -330,26 +406,8 @@ async def screen_coin(
     vol = None
     bs_ratio = None
     try:
-        resp = await http.get(
-            "https://api.dexscreener.com/latest/dex/search",
-            params={"q": mint},
-            timeout=10.0,
-        )
-        resp.raise_for_status()
-        data = resp.json()
-        pairs = data.get("pairs") or []
-        pair = None
-        for p in pairs:
-            if not isinstance(p, dict):
-                continue
-            if p.get("chainId") != "solana":
-                continue
-            qt = p.get("quoteToken") or {}
-            if qt.get("address") == WRAPPED_SOL_MINT or qt.get("symbol") in ("WSOL", "SOL"):
-                pair = p
-                break
-
-        if pair:
+        pair = coin.get("pair")
+        if isinstance(pair, dict):
             h1 = (pair.get("txns") or {}).get("h1") or {}
             buys = int(h1.get("buys", 0))
             sells = int(h1.get("sells", 0))
@@ -361,7 +419,7 @@ async def screen_coin(
             if txns >= min_txns:
                 gates["txn_pass"] = True
 
-            if vol >= MIN_VOLUME_USD:
+            if vol >= GATES.min_volume_usd:
                 gates["volume_pass"] = True
 
             if mcap > 0 and vol > 0:
@@ -375,10 +433,10 @@ async def screen_coin(
                 gates["low_fees_pass"] = False
                 gates["low_fees_warn"] = True
 
-            if bs_ratio >= MIN_BUY_SELL_RATIO:
+            if bs_ratio >= GATES.min_buy_sell_ratio:
                 gates["buy_sell_pass"] = True
         else:
-            log.warning("DexScreener: no Solana/wSOL pair for %s", mint[:8])
+            log.warning("DexScreener: no API pair attached for %s", mint[:8])
     except Exception as exc:
         log.warning("DexScreener search failed for %s: %s", mint[:8], exc)
 
@@ -416,6 +474,7 @@ async def screen_coin(
             log.warning("RugCheck: no creator holdings for %s", mint[:8])
     else:
         log.warning("RugCheck: no report for %s", mint[:8])
+    coin["rugcheck_report"] = report
 
     # Build reason string
     fail_reasons = []
@@ -423,7 +482,7 @@ async def screen_coin(
         min_txns = _age_adjusted_min_txns(age_min)
         fail_reasons.append(f"txns={txns}<{min_txns}")
     if not gates["volume_pass"] and vol is not None:
-        fail_reasons.append(f"vol=${vol:.0f}<${MIN_VOLUME_USD}")
+        fail_reasons.append(f"vol=${vol:.0f}<${GATES.min_volume_usd:.0f}")
     if not gates["vol_mcap_pass"] and vol is not None and mcap > 0 and vol > 0:
         vol_ratio = vol / mcap
         label = "dead_volume" if vol_ratio < MIN_VOLUME_TO_MCAP_RATIO else "wash_trading"
@@ -432,7 +491,7 @@ async def screen_coin(
         estimated_fees = txns * 0.001
         fail_reasons.append(f"low_fees_warn({estimated_fees:.3f}SOL)")
     if not gates["buy_sell_pass"] and bs_ratio is not None:
-        fail_reasons.append(f"buys/sells={bs_ratio:.1f}<{MIN_BUY_SELL_RATIO}")
+        fail_reasons.append(f"buys/sells={bs_ratio:.1f}<{GATES.min_buy_sell_ratio:.1f}")
     if not gates["holder_pass"] and report.found and report.top_holder_pct is not None:
         _, hard_holder = _age_holder_tier(age_min)
         fail_reasons.append(f"top10={report.top_holder_pct:.1f}%>={hard_holder}%")
@@ -473,6 +532,64 @@ async def screen_coin(
     return all_pass, reason_str, gates
 
 
+def _pair_metadata(pair: dict) -> dict[str, object]:
+    """Store the DexScreener fields used to make this entry decision."""
+    created_ms = pair.get("pairCreatedAt")
+    age_minutes = None
+    if isinstance(created_ms, (int, float)) and created_ms > 0:
+        age_minutes = max(0.0, (time.time() * 1000 - created_ms) / 60_000)
+    return {
+        "dexscreener": {
+            "mcap": pair.get("marketCap"), "volume": pair.get("volume") or {},
+            "txns": pair.get("txns") or {}, "liquidity": pair.get("liquidity") or {},
+            "fdv": pair.get("fdv"), "age_minutes": age_minutes,
+            "price_usd": pair.get("priceUsd"), "price_change": pair.get("priceChange") or {},
+        },
+    }
+
+
+async def log_candidate(db_path: Path, coin: dict, gates: dict[str, bool], reason: str) -> int:
+    """Persist every API-aged candidate before dedupe or entry filtering."""
+    pair = coin.get("pair") or {}
+    h1 = (pair.get("txns") or {}).get("h1") or {}
+    report = coin.get("rugcheck_report")
+    passed = [name.removesuffix("_pass") for name, value in gates.items() if name.endswith("_pass") and value]
+    values = {
+        "age": coin.get("source_age_minutes"), "mcap": coin.get("usd_market_cap"),
+        "txns": int(h1.get("buys") or 0) + int(h1.get("sells") or 0),
+        "volume": (pair.get("volume") or {}).get("h1"),
+        "buy_sell": coin.get("buy_sell_ratio"),
+        "rugcheck": getattr(report, "provider_status", "skip"),
+        "holder": getattr(report, "top_holder_pct", None),
+        "creator": _extract_creator_pct(report) if report is not None else None,
+    }
+    sequence = (
+        ("age_pass", "age"), ("mcap_pass", "mcap"), ("txn_pass", "txns"),
+        ("volume_pass", "volume"), ("vol_mcap_pass", "volume"),
+        ("buy_sell_pass", "buy_sell"), ("rugcheck_pass", "rugcheck"),
+        ("holder_pass", "holder"), ("creator_pass", "creator"),
+    )
+    failed_gate, value_name = next(
+        ((gate, value) for gate, value in sequence if not gates.get(gate, False)), (None, None),
+    )
+    failed = {} if failed_gate is None else {
+        "gate": failed_gate.removesuffix("_pass"), "value": values[value_name], "reason": reason,
+    }
+    return await record_strategy_candidate(
+        db_path, strategy="B", mint_address=coin["mint"], ticker=coin.get("ticker"),
+        age_minutes=coin.get("source_age_minutes"), mcap_usd=coin.get("usd_market_cap"),
+        volume_usd=(pair.get("volume") or {}).get("h1"), txns_buys=int(h1.get("buys") or 0),
+        txns_sells=int(h1.get("sells") or 0), buy_sell_ratio=coin.get("buy_sell_ratio"),
+        liquidity_usd=(pair.get("liquidity") or {}).get("usd"), fdv=pair.get("fdv"),
+        price_usd=float(pair["priceUsd"]) if pair.get("priceUsd") else None,
+        price_change_5m=(pair.get("priceChange") or {}).get("m5"),
+        price_change_1h=(pair.get("priceChange") or {}).get("h1"),
+        rugcheck_result="pass" if report is not None and gates.get("rugcheck_pass") else "fail" if report is not None else "skip",
+        dev_holdings_pct=values["creator"], top10_holder_pct=values["holder"],
+        gates_passed=passed, gates_failed=failed,
+    )
+
+
 # ── Entry ────────────────────────────────────────────────────────────
 
 async def try_enter(
@@ -483,32 +600,38 @@ async def try_enter(
     manager: PositionManager,
     db_path: Path,
     size_multiplier: float = 1.0,
-) -> bool:
+    pair: dict | None = None,
+) -> str | None:
     existing = await manager.get_position(mint, mode="paper")
     if existing is not None:
-        return False
+        return None
 
     price = await mark_provider.get_current_price(mint)
     if price is None or price <= 0:
         log.warning("SKIP %s ticker=%s \u2014 no valid DexScreener price", mint[:16], ticker)
-        return False
+        return None
 
     size_sol = PAPER_SIZE_SOL * size_multiplier
     try:
         trade = await adapter.execute_swap(mint, Side.BUY, size_sol)
     except Exception as exc:
         log.warning("SKIP %s ticker=%s \u2014 execute_swap failed: %s", mint[:16], ticker, exc)
-        return False
+        return None
 
     if trade is None:
         log.warning("SKIP %s ticker=%s \u2014 execute_swap returned None", mint[:16], ticker)
-        return False
+        return None
+
+    if isinstance(pair, dict):
+        metadata = dict(trade.metadata or {})
+        metadata.update(_pair_metadata(pair))
+        trade.metadata = metadata
 
     try:
         await record_trade(db_path, trade)
     except Exception as exc:
         log.warning("SKIP %s ticker=%s \u2014 record_trade failed: %s", mint[:16], ticker, exc)
-        return False
+        return None
 
     try:
         from src.core.models import Signal, SignalSource, SignalType
@@ -519,10 +642,10 @@ async def try_enter(
             mint_address=mint,
             confidence=1.0,
         )
-        await manager.open_position(trade, dummy_signal)
+        position = await manager.open_position(trade, dummy_signal)
     except Exception as exc:
         log.warning("SKIP %s ticker=%s \u2014 open_position failed: %s", mint[:16], ticker, exc)
-        return False
+        return None
 
     log.info("ENTRY mint=%s ticker=%s price=%.8f SOL size=%.4f SOL", mint[:16], ticker, price, size_sol)
     send_imessage(
@@ -530,7 +653,7 @@ async def try_enter(
         f"Price: {price:.8f} SOL\n"
         f"Size: {size_sol} SOL"
     )
-    return True
+    return position.id
 
 
 # ── Monitoring ───────────────────────────────────────────────────────
@@ -539,6 +662,7 @@ async def monitor_positions(
     manager: PositionManager,
     mark_provider: DexScreenerPriceProvider,
     db_path: Path,
+    gate_tuner: GateTuner | None = None,
 ) -> None:
     positions = await manager.get_all_open(mode="paper")
     for pos in positions:
@@ -565,6 +689,8 @@ async def monitor_positions(
         if close_reason:
             trade = await _adapter_close(pos, close_price, close_reason, db_path)
             await manager.close_position(pos.mint_address, close_price, mode="paper")
+            if gate_tuner is not None and await gate_tuner.maybe_tune():
+                log.info("Auto-tuned Strategy B gates: %s", json.dumps(gate_tuner.thresholds.as_dict()))
             pnl_pct = ((current_price - pos.entry_price_sol) / pos.entry_price_sol) * 100 if pos.entry_price_sol else 0.0
             log.info(
                 "CLOSE [%s]: mint=%s entry=%.8f close=%.8f",
@@ -643,22 +769,18 @@ async def scan_loop(
                 }
                 main_blocker_count: dict[str, int] = {}
 
-                if len(open_positions) < MAX_OPEN:
-                    rows = await fetch_candidates(http)
-                    detailed["total"] = len(rows)
+                # Candidate telemetry is collected even at capacity; only entries are capped.
+                candidates = await fetch_candidates(http)
+                detailed["total"] = len(candidates)
+                if candidates:
 
-                    for row in rows:
-                        coin = parse_row(row)
+                    for coin in candidates:
                         ticker = coin["ticker"]
-
-                        mint = await resolve_mint(ticker, http)
-                        if not mint or mint in seen_mints:
-                            continue
-                        seen_mints[mint] = time.time()
-                        coin["mint"] = mint
+                        mint = coin["mint"]
 
                         passed, reason, gates = await screen_coin(coin, http, _rugcheck)
                         log.info("SCREEN %s (%s): %s", ticker, mint[:8], reason)
+                        candidate_id = await log_candidate(db_path, coin, gates, reason)
 
                         # Aggregate per-gate diagnostics
                         for gk in ("age_pass", "mcap_pass", "txn_pass", "volume_pass",
@@ -680,7 +802,16 @@ async def scan_loop(
                                     break
                             continue
 
+                        if mint in seen_mints:
+                            log.info("SKIP %s — already evaluated for entry this hour", ticker)
+                            continue
+                        seen_mints[mint] = time.time()
+
                         detailed["full_screen_pass"] += 1
+
+                        if len(await manager.get_all_open(mode="paper")) >= MAX_OPEN:
+                            log.info("SKIP %s — strategy capacity reached", ticker)
+                            continue
 
                         if REQUIRE_MENTIONS:
                             launched_at = datetime.fromtimestamp(
@@ -735,8 +866,12 @@ async def scan_loop(
                                 log.debug("Whale check failed (non-fatal): %s", e)
 
                         detailed["entry_attempts"] += 1
-                        ok = await try_enter(mint, ticker, mark_provider, adapter, manager, db_path, size_multiplier)
-                        if ok:
+                        position_id = await try_enter(
+                            mint, ticker, mark_provider, adapter, manager, db_path, size_multiplier,
+                            pair=coin.get("pair"),
+                        )
+                        if position_id:
+                            await mark_strategy_candidate_entered(db_path, candidate_id, position_id)
                             detailed["entered"] += 1
                             log.info("ENTRY mint=%s ticker=%s", mint[:16], ticker)
                         slots_used = len(await manager.get_all_open(mode="paper"))
@@ -792,10 +927,11 @@ async def monitor_loop(
     manager: PositionManager,
     mark_provider: DexScreenerPriceProvider,
     db_path: Path,
+    gate_tuner: GateTuner,
 ) -> None:
     while True:
         cycle_start = time.monotonic()
-        await monitor_positions(manager, mark_provider, db_path)
+        await monitor_positions(manager, mark_provider, db_path, gate_tuner)
         elapsed = time.monotonic() - cycle_start
         await asyncio.sleep(max(0.0, MONITOR_INTERVAL - elapsed))
 
@@ -808,10 +944,12 @@ async def main() -> None:
     settings = load_settings()
     db_path = DB_PATH
     await init_db(db_path)
+    gate_tuner = GateTuner(db_path, GATES)
+    await gate_tuner.ensure_initial_config()
 
     mark_provider = DexScreenerPriceProvider()
     adapter = PaperExecutionAdapter(price_provider=mark_provider)
-    manager = PositionManager(db_path, settings)
+    manager = PositionManager(db_path, settings, strategy="B")
 
     tracked_wallets: list = []
     if load_tracked_wallets is not None:
@@ -829,12 +967,15 @@ async def main() -> None:
         mode_label = f"RAW MENTIONS >= {MIN_MENTIONS} in first {MENTION_WINDOW_MINUTES}min"
 
     log.info(
-        "Strategy B started \u2014 mode: %s (browser-pc, all Solana DEXs, 0-15min). Scan every %ds, monitor every %ds.",
-        mode_label, SCAN_INTERVAL, MONITOR_INTERVAL,
+        "Strategy B started: mode=%s API-aged candidates<=%.0fmin scan=%ds monitor=%ds.",
+        mode_label, SOURCE_MAX_AGE_MINUTES, SCAN_INTERVAL, MONITOR_INTERVAL,
     )
+    if args.test:
+        await scan_loop(mark_provider, adapter, manager, db_path, tracked_wallets=tracked_wallets, test_mode=True)
+        return
     await asyncio.gather(
-        scan_loop(mark_provider, adapter, manager, db_path, tracked_wallets=tracked_wallets, test_mode=args.test),
-        monitor_loop(manager, mark_provider, db_path),
+        scan_loop(mark_provider, adapter, manager, db_path, tracked_wallets=tracked_wallets),
+        monitor_loop(manager, mark_provider, db_path, gate_tuner),
     )
 
 

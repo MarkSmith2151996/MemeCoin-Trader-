@@ -22,11 +22,13 @@ class PositionManager:
         *,
         use_persisted_positions: bool = True,
         persist_positions: bool = True,
+        strategy: str = "A",
     ) -> None:
         self.db = Path(db) if db is not None else None
         self.config = config
         self.use_persisted_positions = use_persisted_positions
         self.persist_positions = persist_positions
+        self.strategy = strategy
         self._cache: dict[tuple[str, str], Position] = {}
 
     async def open_position(self, trade: Trade, signal: Signal) -> Position:
@@ -90,8 +92,8 @@ class PositionManager:
 
         async with aiosqlite.connect(self.db) as conn:
             cursor = await conn.execute(
-                "SELECT partial_exits_json FROM positions WHERE status != ?",
-                (PositionStatus.CLOSED.value,),
+                "SELECT partial_exits_json FROM positions WHERE status != ? AND strategy = ?",
+                (PositionStatus.CLOSED.value, self.strategy),
             )
             rows = await cursor.fetchall()
 
@@ -228,8 +230,10 @@ class PositionManager:
 
         async with aiosqlite.connect(self.db) as conn:
             cursor = await conn.execute(
-                "SELECT partial_exits_json FROM positions WHERE mint_address = ? AND status != ? ORDER BY opened_at DESC",
-                (mint, PositionStatus.CLOSED.value),
+                """SELECT partial_exits_json FROM positions
+                   WHERE mint_address = ? AND status != ? AND strategy = ?
+                   ORDER BY opened_at DESC""",
+                (mint, PositionStatus.CLOSED.value, self.strategy),
             )
             rows = await cursor.fetchall()
         positions = [Position.model_validate_json(row[0]) for row in rows]
@@ -238,7 +242,7 @@ class PositionManager:
     async def _persist(self, position: Position) -> None:
         if self.db is None or not self.persist_positions:
             return
-        await record_position(self.db, position)
+        await record_position(self.db, position, strategy=self.strategy)
 
     @staticmethod
     def _signal_price(signal: Signal | None) -> float | None:

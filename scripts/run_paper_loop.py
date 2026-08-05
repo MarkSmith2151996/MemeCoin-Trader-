@@ -136,6 +136,7 @@ async def resolve_mint(name: str, client: httpx.AsyncClient) -> str | None:
 async def fetch_entry_metadata(
     mint: str,
     client: httpx.AsyncClient | None = None,
+    ticker: str | None = None,
 ) -> dict[str, object]:
     """Fetch current pair metadata from DexScreener search API for entry logging.
 
@@ -146,8 +147,8 @@ async def fetch_entry_metadata(
     try:
         if client is None:
             async with httpx.AsyncClient(timeout=10.0) as own_client:
-                return await _search_pair_metadata(mint, own_client)
-        return await _search_pair_metadata(mint, client)
+                return await _search_pair_metadata(mint, own_client, ticker=ticker)
+        return await _search_pair_metadata(mint, client, ticker=ticker)
     except Exception as exc:
         log.debug("DexScreener search failed for entry metadata %s: %s", mint[:16], exc)
         return {}
@@ -156,11 +157,13 @@ async def fetch_entry_metadata(
 async def _search_pair_metadata(
     mint: str,
     client: httpx.AsyncClient,
+    *,
+    ticker: str | None = None,
 ) -> dict[str, object]:
     """Search DexScreener for the mint and build the entry metadata dict."""
     resp = await client.get(
         DEXSCREENER_SEARCH_URL,
-        params={"q": mint},
+        params={"q": ticker or mint},
     )
     resp.raise_for_status()
     pairs = resp.json().get("pairs") or []
@@ -179,8 +182,19 @@ async def _search_pair_metadata(
         age_hours = None
         if isinstance(created_ms, (int, float)) and created_ms > 0:
             age_hours = max(0.0, (time.time() * 1000 - created_ms) / 3_600_000)
+        dexscreener = {
+            "mcap": pair.get("marketCap"),
+            "volume": pair.get("volume") or {},
+            "txns": pair.get("txns") or {},
+            "liquidity": pair.get("liquidity") or {},
+            "fdv": pair.get("fdv"),
+            "age_hours": age_hours,
+            "price_usd": pair.get("priceUsd"),
+            "price_change": pair.get("priceChange") or {},
+        }
         return {
             "quote_provider": "paper",
+            "dexscreener": dexscreener,
             "entry_mcap": pair.get("marketCap"),
             "entry_volume_24h": (pair.get("volume") or {}).get("h24"),
             "entry_volume_1h": (pair.get("volume") or {}).get("h1"),
@@ -202,6 +216,7 @@ async def try_enter(
     manager: PositionManager,
     db_path: Path,
     size_multiplier: float = 1.0,
+    ticker: str | None = None,
 ) -> bool:
     """Price via DexScreener and record a paper entry. Returns True if entry recorded."""
     existing = await manager.get_position(mint, mode="paper")
@@ -250,7 +265,7 @@ async def try_enter(
         return False
 
     try:
-        entry_metadata = await fetch_entry_metadata(mint)
+        entry_metadata = await fetch_entry_metadata(mint, ticker=ticker)
         if entry_metadata:
             merged = dict(trade.metadata or {})
             merged.update(entry_metadata)
@@ -422,7 +437,10 @@ async def scan_loop(
                                 "CONFIRM: mint=%s ticker=%s age=%.0fs screen=%.8f current=%.8f",
                                 mint[:16], pend["ticker"], age, pend["price"], current_price,
                             )
-                            ok = await try_enter(mint, mark_provider, adapter, manager, db_path, pend.get("size_multiplier", 1.0))
+                            ok = await try_enter(
+                                mint, mark_provider, adapter, manager, db_path,
+                                pend.get("size_multiplier", 1.0), ticker=pend["ticker"],
+                            )
                             if ok:
                                 log.info("ENTRY [confirmed]: mint=%s ticker=%s", mint[:16], pend["ticker"])
                             else:

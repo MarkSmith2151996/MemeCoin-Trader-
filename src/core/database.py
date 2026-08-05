@@ -59,7 +59,8 @@ SCHEMA = (
       realized_pnl_sol REAL NOT NULL,
       partial_exits_json TEXT NOT NULL,
       close_price_sol REAL,
-      peak_price_sol REAL
+      peak_price_sol REAL,
+      strategy TEXT DEFAULT 'A'
     )
     """,
     """
@@ -167,6 +168,48 @@ SCHEMA = (
     CREATE INDEX IF NOT EXISTS idx_price_snapshots_mint_observed
     ON price_snapshots (mint_address, observed_at)
     """,
+    """
+    CREATE TABLE IF NOT EXISTS candidate_log (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      scan_time TEXT NOT NULL,
+      strategy TEXT NOT NULL,
+      mint_address TEXT NOT NULL,
+      ticker TEXT,
+      age_minutes REAL,
+      mcap_usd REAL,
+      volume_usd REAL,
+      txns_buys INTEGER,
+      txns_sells INTEGER,
+      buy_sell_ratio REAL,
+      liquidity_usd REAL,
+      fdv REAL,
+      price_usd REAL,
+      price_change_5m REAL,
+      price_change_1h REAL,
+      rugcheck_result TEXT,
+      dev_holdings_pct REAL,
+      top10_holder_pct REAL,
+      gates_passed TEXT,
+      gates_failed TEXT,
+      entered BOOLEAN DEFAULT FALSE,
+      position_id TEXT
+    )
+    """,
+    """
+    CREATE INDEX IF NOT EXISTS idx_candidate_log_strategy_scan
+    ON candidate_log (strategy, scan_time)
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS gate_config (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      strategy TEXT NOT NULL,
+      updated_at TEXT NOT NULL,
+      config_json TEXT NOT NULL,
+      reason TEXT,
+      sample_size INTEGER,
+      metrics_json TEXT
+    )
+    """,
 )
 
 
@@ -184,6 +227,11 @@ async def init_db(path: str | Path) -> None:
             await db.execute("ALTER TABLE positions ADD COLUMN peak_price_sol REAL")
         except aiosqlite.OperationalError:
             pass
+        try:
+            await db.execute("ALTER TABLE positions ADD COLUMN strategy TEXT DEFAULT 'A'")
+        except aiosqlite.OperationalError:
+            pass
+        await db.execute("UPDATE positions SET strategy = 'A' WHERE strategy IS NULL OR strategy = ''")
         await db.commit()
 
 
@@ -442,11 +490,15 @@ def _allowed_value(value: str | None, allowed: set[str], fallback: str) -> str:
     return value if isinstance(value, str) and value in allowed else fallback
 
 
-async def record_position(path: str | Path, position: Position) -> None:
+async def record_position(path: str | Path, position: Position, *, strategy: str = "A") -> None:
     async with aiosqlite.connect(path) as db:
         await db.execute(
             """
-            INSERT OR REPLACE INTO positions VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            INSERT OR REPLACE INTO positions (
+                id, mint_address, entry_trade_id, amount_sol, token_amount, entry_price_sol,
+                status, opened_at, closed_at, realized_pnl_sol, partial_exits_json,
+                close_price_sol, peak_price_sol, strategy
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 position.id,
@@ -462,7 +514,70 @@ async def record_position(path: str | Path, position: Position) -> None:
                 position.model_dump_json(),
                 position.close_price_sol,
                 position.peak_price_sol,
+                strategy,
             ),
+        )
+        await db.commit()
+
+
+async def record_strategy_candidate(
+    path: str | Path,
+    *,
+    strategy: str,
+    mint_address: str,
+    ticker: str | None,
+    age_minutes: float | None,
+    mcap_usd: float | None,
+    volume_usd: float | None,
+    txns_buys: int | None,
+    txns_sells: int | None,
+    buy_sell_ratio: float | None,
+    liquidity_usd: float | None,
+    fdv: float | None,
+    price_usd: float | None,
+    price_change_5m: float | None,
+    price_change_1h: float | None,
+    rugcheck_result: str,
+    dev_holdings_pct: float | None,
+    top10_holder_pct: float | None,
+    gates_passed: list[str],
+    gates_failed: dict[str, object],
+) -> int:
+    """Persist one strategy candidate, including candidates rejected by gates."""
+
+    async with aiosqlite.connect(path) as db:
+        cursor = await db.execute(
+            """
+            INSERT INTO candidate_log (
+                scan_time, strategy, mint_address, ticker, age_minutes, mcap_usd, volume_usd,
+                txns_buys, txns_sells, buy_sell_ratio, liquidity_usd, fdv, price_usd,
+                price_change_5m, price_change_1h, rugcheck_result, dev_holdings_pct,
+                top10_holder_pct, gates_passed, gates_failed
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                datetime.now(UTC).isoformat(), strategy, mint_address, ticker, age_minutes,
+                mcap_usd, volume_usd, txns_buys, txns_sells, buy_sell_ratio, liquidity_usd,
+                fdv, price_usd, price_change_5m, price_change_1h, rugcheck_result,
+                dev_holdings_pct, top10_holder_pct, json.dumps(gates_passed),
+                json.dumps(gates_failed),
+            ),
+        )
+        await db.commit()
+        return int(cursor.lastrowid)
+
+
+async def mark_strategy_candidate_entered(
+    path: str | Path,
+    candidate_id: int,
+    position_id: str,
+) -> None:
+    """Link an entered candidate row to the resulting persisted position."""
+
+    async with aiosqlite.connect(path) as db:
+        await db.execute(
+            "UPDATE candidate_log SET entered = TRUE, position_id = ? WHERE id = ?",
+            (position_id, candidate_id),
         )
         await db.commit()
 
