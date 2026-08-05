@@ -133,6 +133,35 @@ function scheduleReconnect() {
 
 /* ---------------- messages / commands ---------------- */
 
+/*
+ * Seen-message dedupe.
+ *
+ * Baileys fires `messages.upsert` for self-chat messages (owner messaging
+ * their own number) with `key.fromMe = true` — the sender IS our own JID.
+ * There is no socket flag that enables this; `syncFullHistory` only pulls a
+ * bulk history sync (async, `append` type) and `getMessage` is a retry-fetch
+ * callback for failed sends. So the fix is purely in the listener.
+ *
+ * The dedupe set exists because the bot's own replies in the self-chat are
+ * echoed back to it with the same message ID — without it, every reply would
+ * re-trigger handleCommand forever.
+ */
+const seenMessageIds = new Set();
+const SEEN_MAX = 500;
+
+function seenKey(key) {
+  return `${key.remoteJid}:${key.fromMe ? "1" : "0"}:${key.id}`;
+}
+
+function isMessageSeen(key) {
+  return seenMessageIds.has(seenKey(key));
+}
+
+function markMessageSeen(key) {
+  if (seenMessageIds.size > SEEN_MAX) seenMessageIds.clear();
+  seenMessageIds.add(seenKey(key));
+}
+
 function extractText(msg) {
   const m = msg.message || {};
   return (
@@ -151,7 +180,8 @@ function isOwner(jid) {
 
 async function sendText(jid, text) {
   try {
-    await sock.sendMessage(jid, { text });
+    const sent = await sock.sendMessage(jid, { text });
+    if (sent && sent.key) markMessageSeen(sent.key);
   } catch (e) {
     console.error(`[${stamp()}] send failed: ${e.message}`);
   }
@@ -218,9 +248,16 @@ async function handleCommand(jid, text) {
 async function handleMessages(upsert) {
   if (upsert.type !== "notify") return;
   for (const msg of upsert.messages) {
-    if (!msg || msg.key.fromMe) continue;
+    if (!msg || !msg.key) continue;
     const jid = msg.key.remoteJid;
+    // The owner commands the bot by messaging their own number (self-chat).
+    // Those messages arrive with key.fromMe = true, so we must NOT skip
+    // fromMe messages when the chat is the owner's own JID. Everything else
+    // that came from us is ignored (no echo/group/other-device handling).
+    if (msg.key.fromMe && !(OWNER_JID && isOwner(jid))) continue;
     if (!isOwner(jid)) continue;
+    if (isMessageSeen(msg.key)) continue;
+    markMessageSeen(msg.key);
     const text = extractText(msg);
     if (!text) continue;
     console.log(`[${stamp()}] command from owner: "${text.trim().slice(0, 60)}"`);
