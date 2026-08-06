@@ -62,6 +62,7 @@ ENTRY_CONFIRM_WINDOW_S = 90
 EARLY_EXIT_GREEN_PCT = 0.01
 BLOCKED_UTC_HOURS = frozenset({0, 7, 19, 20})
 SATURDAY_SIZE_MULTIPLIER = 0.5
+REPEAT_LOSER_COOLDOWN_MINUTES = 120
 RUGCHECK_ENABLED = True
 
 DB_PATH = Path("data/trades.db")
@@ -230,7 +231,7 @@ async def try_enter(
     """Price via DexScreener and record a paper entry. Returns True if entry recorded."""
     from datetime import UTC, datetime
 
-    from src.core.database import has_losing_close, record_entry_skip
+    from src.core.database import has_recent_losing_close, record_entry_skip
 
     open_positions = await manager.get_all_open(mode="paper")
     if len(open_positions) + len(pending_entries) >= MAX_OPEN_POSITIONS:
@@ -252,12 +253,14 @@ async def try_enter(
             log.debug("candidate_log write failed (non-fatal): %s", exc)
         return False
 
-    if await has_losing_close(db_path, mint):
-        log.warning("SKIP %s — repeat_loser: mint previously closed at a loss", mint)
+    if await has_recent_losing_close(db_path, mint, cooldown_minutes=REPEAT_LOSER_COOLDOWN_MINUTES):
+        log.warning("SKIP %s — repeat_loser: mint closed at a loss within the %dh cooldown",
+                    mint, REPEAT_LOSER_COOLDOWN_MINUTES // 60)
         try:
             await record_entry_skip(
                 db_path, strategy="A", mint_address=mint, ticker=ticker,
-                gate="repeat_loser", reason="previous close had negative PnL",
+                gate="repeat_loser",
+                reason=f"losing close within {REPEAT_LOSER_COOLDOWN_MINUTES // 60}h cooldown",
             )
         except Exception as exc:
             log.debug("candidate_log write failed (non-fatal): %s", exc)

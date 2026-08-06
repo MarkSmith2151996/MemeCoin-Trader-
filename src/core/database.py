@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from uuid import uuid4
 
@@ -595,6 +595,31 @@ async def has_losing_close(path: str | Path, mint_address: str) -> bool:
             "SELECT 1 FROM positions WHERE mint_address = ? AND status = ?"
             " AND realized_pnl_sol < 0 LIMIT 1",
             (mint_address, PositionStatus.CLOSED.value),
+        )
+        return await cursor.fetchone() is not None
+
+
+async def has_recent_losing_close(
+    path: str | Path,
+    mint_address: str,
+    cooldown_minutes: int = 120,
+) -> bool:
+    """Return True if a losing close for this mint happened within the cooldown window.
+
+    Strategy A uses this as a re-entry cooldown: a mint that lost money is
+    blocked only briefly (2h by default) so a thin candidate pool is not
+    permanently starved, while an immediate re-entry into a dumping token
+    is still prevented. `closed_at` is stored as an ISO-8601 UTC string, so
+    lexicographic comparison against a same-format cutoff is correct.
+    """
+
+    since = (datetime.now(UTC) - timedelta(minutes=cooldown_minutes)).isoformat()
+    async with aiosqlite.connect(path) as db:
+        cursor = await db.execute(
+            "SELECT 1 FROM positions WHERE mint_address = ? AND status = ?"
+            " AND realized_pnl_sol < 0 AND closed_at IS NOT NULL"
+            " AND closed_at >= ? LIMIT 1",
+            (mint_address, PositionStatus.CLOSED.value, since),
         )
         return await cursor.fetchone() is not None
 

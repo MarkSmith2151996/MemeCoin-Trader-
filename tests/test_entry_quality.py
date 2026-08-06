@@ -6,7 +6,8 @@ Covers the six improvements from the MT-515 analysis across Strategy A
   2. Trailing stop only arms after peak > entry + 2%
   3. Time-of-day gates (blocked UTC hours) with candidate_log rows
   4. Post-entry confirmation: early_exit_no_green at 90s without +1%
-  5. No re-entry on mints that previously closed at a loss
+  5. No re-entry on losing mints: Strategy A applies a 2h cooldown
+     (`has_recent_losing_close`), Strategy B keeps the permanent ban
   6. Concurrent position caps enforced at entry
 
 All tests are offline — no real network or RugCheck calls.
@@ -24,7 +25,7 @@ import pytest
 
 import scripts.run_paper_loop as paper_loop
 import scripts.run_strategy_b as strategy_b
-from src.core.database import has_losing_close, init_db, record_entry_skip
+from src.core.database import has_losing_close, has_recent_losing_close, init_db, record_entry_skip
 from src.core.models import Position, Side, Trade
 
 # ── Fixtures / fakes ─────────────────────────────────────────────────
@@ -111,14 +112,16 @@ def db(tmp_path: Path) -> Path:
     return path
 
 
-def seed_closed_position(db_path: Path, mint: str, pnl: float, *, strategy: str = "A") -> None:
+def seed_closed_position(
+    db_path: Path, mint: str, pnl: float, *, strategy: str = "A", closed_at: str | None = None,
+) -> None:
     with sqlite3.connect(db_path) as db:
         db.execute(
             """INSERT INTO positions (
                 id, mint_address, entry_trade_id, amount_sol, token_amount, entry_price_sol,
-                status, opened_at, realized_pnl_sol, partial_exits_json, strategy
-            ) VALUES (?, ?, 't', 1, 1, 1, 'CLOSED', 'now', ?, '{}', ?)""",
-            (f"{mint}-seed", mint, pnl, strategy),
+                status, opened_at, closed_at, realized_pnl_sol, partial_exits_json, strategy
+            ) VALUES (?, ?, 't', 1, 1, 1, 'CLOSED', 'now', ?, ?, '{}', ?)""",
+            (f"{mint}-seed", mint, closed_at, pnl, strategy),
         )
         db.commit()
 
@@ -308,8 +311,30 @@ def test_has_losing_close_ignores_open_positions(db: Path) -> None:
     assert asyncio.run(has_losing_close(db, "OpenLoser")) is False
 
 
-def test_strategy_a_repeat_loser_blocked(db: Path) -> None:
-    seed_closed_position(db, "Loser", pnl=-0.002)
+def test_has_recent_losing_close_cooldown_window(db: Path) -> None:
+    assert asyncio.run(has_recent_losing_close(db, "UnknownMint")) is False
+    now = datetime.now(UTC)
+    seed_closed_position(db, "FreshLoser", pnl=-0.002, closed_at=now.isoformat())
+    seed_closed_position(db, "OldLoser", pnl=-0.002,
+                         closed_at=(now - timedelta(hours=3)).isoformat())
+    seed_closed_position(db, "Winner", pnl=+0.1, closed_at=now.isoformat())
+    seed_closed_position(db, "NoTimestamp", pnl=-0.002, closed_at=None)
+    assert asyncio.run(has_recent_losing_close(db, "FreshLoser")) is True
+    assert asyncio.run(has_recent_losing_close(db, "OldLoser")) is False
+    assert asyncio.run(has_recent_losing_close(db, "Winner")) is False
+    assert asyncio.run(has_recent_losing_close(db, "NoTimestamp")) is False
+
+
+def test_has_recent_losing_close_honors_custom_cooldown(db: Path) -> None:
+    now = datetime.now(UTC)
+    seed_closed_position(db, "TwoHourOld", pnl=-0.002,
+                         closed_at=(now - timedelta(hours=2, minutes=1)).isoformat())
+    assert asyncio.run(has_recent_losing_close(db, "TwoHourOld", cooldown_minutes=120)) is False
+    assert asyncio.run(has_recent_losing_close(db, "TwoHourOld", cooldown_minutes=180)) is True
+
+
+def test_strategy_a_repeat_loser_fresh_loss_blocked(db: Path) -> None:
+    seed_closed_position(db, "Loser", pnl=-0.002, closed_at=datetime.now(UTC).isoformat())
     manager = FakeManager()
     ok = asyncio.run(
         paper_loop.try_enter("Loser", FakePrice(1.0), FakeAdapter(), manager, db, ticker="TST"),
@@ -317,6 +342,31 @@ def test_strategy_a_repeat_loser_blocked(db: Path) -> None:
     assert ok is False
     assert candidate_log_rows(db, "A", "repeat_loser")
     assert manager.closed_with == []
+
+
+def test_strategy_a_repeat_loser_allowed_after_cooldown(
+    db: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    seed_closed_position(db, "OldLoser", pnl=-0.002,
+                         closed_at=(datetime.now(UTC) - timedelta(hours=3)).isoformat())
+    monkeypatch.setattr(paper_loop, "RUGCHECK_ENABLED", False)
+    monkeypatch.setattr(paper_loop, "BLOCKED_UTC_HOURS", frozenset())
+
+    async def no_metadata(*args, **kwargs) -> dict:
+        return {}
+
+    monkeypatch.setattr(paper_loop, "fetch_entry_metadata", no_metadata)
+    adapter = FakeAdapter()
+    manager = FakeManager()
+    ok = asyncio.run(
+        paper_loop.try_enter("OldLoser", FakePrice(1.0), adapter, manager, db, ticker="TST"),
+    )
+    assert ok is True
+    assert candidate_log_rows(db, "A", "repeat_loser") == []
+    expected_size = paper_loop.PAPER_SIZE_SOL
+    if datetime.now(UTC).weekday() == 5:
+        expected_size *= paper_loop.SATURDAY_SIZE_MULTIPLIER
+    assert adapter.sizes == [expected_size]
 
 
 def test_strategy_b_repeat_loser_blocked(db: Path) -> None:
