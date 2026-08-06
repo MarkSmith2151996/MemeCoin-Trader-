@@ -30,6 +30,7 @@ from src.core.database import init_db, record_trade
 from src.core.models import Side, Trade
 from src.execution.price_provider import DexScreenerPriceProvider
 from src.execution.paper import PaperExecutionAdapter
+from src.monitoring.position_snapshots import snapshot_loop
 from src.strategy.position_manager import PositionManager
 from src.monitoring.alerts import send_imessage
 from src.risk.rugcheck import RugCheckClient
@@ -637,6 +638,7 @@ async def main() -> None:
     await asyncio.gather(
         scan_loop(mark_provider, adapter, manager, db_path, tracked_wallets),
         monitor_loop(manager, mark_provider, db_path),
+        snapshot_loop(manager, mark_provider, db_path),
     )
 
 

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import math
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -153,6 +154,7 @@ SCHEMA = (
     """
     CREATE TABLE IF NOT EXISTS price_snapshots (
       id TEXT PRIMARY KEY,
+      position_id TEXT,
       mint_address TEXT NOT NULL,
       price_sol REAL,
       price_usd REAL,
@@ -161,7 +163,8 @@ SCHEMA = (
       fdv_usd REAL,
       pair_address TEXT,
       dex_id TEXT,
-      observed_at TEXT NOT NULL
+      observed_at TEXT NOT NULL,
+      timestamp TEXT
     )
     """,
     """
@@ -231,6 +234,20 @@ async def init_db(path: str | Path) -> None:
             await db.execute("ALTER TABLE positions ADD COLUMN strategy TEXT DEFAULT 'A'")
         except aiosqlite.OperationalError:
             pass
+        try:
+            await db.execute("ALTER TABLE price_snapshots ADD COLUMN position_id TEXT")
+        except aiosqlite.OperationalError:
+            pass
+        try:
+            await db.execute("ALTER TABLE price_snapshots ADD COLUMN timestamp TEXT")
+        except aiosqlite.OperationalError:
+            pass
+        await db.execute(
+            "UPDATE price_snapshots SET timestamp = observed_at WHERE timestamp IS NULL",
+        )
+        await db.execute(
+            "CREATE INDEX IF NOT EXISTS idx_snapshots_position ON price_snapshots(position_id)",
+        )
         await db.execute("UPDATE positions SET strategy = 'A' WHERE strategy IS NULL OR strategy = ''")
         await db.commit()
 
@@ -788,6 +805,68 @@ async def record_price_snapshot(
                 dex_id,
                 datetime.now(UTC).isoformat(),
             ),
+        )
+        await db.commit()
+
+
+async def record_position_price_snapshot(
+    path: str | Path,
+    *,
+    position_id: str,
+    mint_address: str,
+    price_sol: float,
+    observed_at: datetime | None = None,
+) -> None:
+    """Persist one valid open-position mark without affecting historical snapshots."""
+
+    if not position_id.strip():
+        raise ValueError("position_id is required")
+    if not mint_address.strip():
+        raise ValueError("mint_address is required")
+    if not math.isfinite(price_sol) or price_sol <= 0:
+        raise ValueError("price_sol must be finite and positive")
+
+    timestamp = observed_at or datetime.now(UTC)
+    if timestamp.tzinfo is None:
+        timestamp = timestamp.replace(tzinfo=UTC)
+    timestamp_text = timestamp.astimezone(UTC).isoformat()
+    async with aiosqlite.connect(path) as db:
+        await db.execute(
+            """
+            INSERT INTO price_snapshots (
+                id, position_id, mint_address, price_sol, observed_at, timestamp
+            ) VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            (
+                str(uuid4()),
+                position_id,
+                mint_address,
+                price_sol,
+                timestamp_text,
+                timestamp_text,
+            ),
+        )
+        await db.commit()
+
+
+async def prune_position_price_snapshots(
+    path: str | Path,
+    *,
+    retention_days: int = 7,
+    now: datetime | None = None,
+) -> None:
+    """Delete expired position-linked marks while retaining historical backfill rows."""
+
+    cutoff = (now or datetime.now(UTC)) - timedelta(days=retention_days)
+    if cutoff.tzinfo is None:
+        cutoff = cutoff.replace(tzinfo=UTC)
+    async with aiosqlite.connect(path) as db:
+        await db.execute(
+            """
+            DELETE FROM price_snapshots
+            WHERE position_id IS NOT NULL AND timestamp < ?
+            """,
+            (cutoff.astimezone(UTC).isoformat(),),
         )
         await db.commit()
 

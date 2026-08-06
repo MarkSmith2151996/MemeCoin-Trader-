@@ -42,6 +42,7 @@ from src.core.models import Side, Trade
 from src.execution.price_provider import DexScreenerPriceProvider
 from src.execution.paper import PaperExecutionAdapter
 from src.monitoring.alerts import send_imessage
+from src.monitoring.position_snapshots import snapshot_loop
 from src.risk.rugcheck import RugCheckClient
 from src.signals.grok_xsearch import get_mentions_with_timestamps, count_influencer_mentions
 from src.strategy.position_manager import PositionManager
@@ -1045,6 +1046,7 @@ async def main() -> None:
     await asyncio.gather(
         scan_loop(mark_provider, adapter, manager, db_path, tracked_wallets=tracked_wallets),
         monitor_loop(manager, mark_provider, db_path, gate_tuner),
+        snapshot_loop(manager, mark_provider, db_path),
     )
 
 
