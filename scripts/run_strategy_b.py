@@ -17,6 +17,15 @@ Run:
     timeout 120 python3 scripts/run_strategy_b.py --test  # 2-minute test
 """
 
+# ── Position sizing (MT-522) ─────────────────────────────────────────
+# Entry size = PAPER_SIZE_SOL (0.05 SOL) * size_multiplier.
+# size_multiplier starts at 1.0 and can be modified by:
+#   - Saturday halving: * 0.5 when utc_now.weekday() == 5 (-> 0.025 SOL).
+#   - Whale conviction sizing: ACTIVE — scan_loop calls get_whale_signal()
+#     and applies WHALE_SIZE_MULTIPLIERS (0/1/2/3+ whales -> 1.0/2.0/4.0/6.0x,
+#     src/signals/whale_tracker.py:319) when the import succeeds.
+# Sizing is NOT driven by conviction score, liquidity tiers, or gate scores.
+
 from __future__ import annotations
 
 import argparse

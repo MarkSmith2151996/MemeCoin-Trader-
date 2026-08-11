@@ -12,6 +12,16 @@ Monitor cycle (every 30s):
 Run: python scripts/run_paper_loop.py
 """
 
+# ── Position sizing (MT-522) ─────────────────────────────────────────
+# Entry size = PAPER_SIZE_SOL (0.01 SOL) * size_multiplier.
+# size_multiplier is always 1.0 in practice:
+#   - Saturday halving: * 0.5 when utc_now.weekday() == 5 (-> 0.005 SOL).
+#   - Whale conviction sizing (2x/4x/6x in src/signals/whale_tracker.py)
+#     is DISABLED since MT-521: the get_whale_signal call block and
+#     load_tracked_wallets loading block are commented out, so the
+#     multiplier passed to try_enter() never changes from 1.0.
+# Sizing is NOT driven by conviction score, liquidity tiers, or gate scores.
+
 from __future__ import annotations
 
 import asyncio
