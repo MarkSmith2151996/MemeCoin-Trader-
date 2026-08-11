@@ -1,7 +1,7 @@
 """Three-layer paper trading loop with split cycles.
 
 Scan cycle (every 3 min):
-  1. browser-pc  → scan Profile B DexScreener URL → coin names
+  1. browser-pc  → scan Profile B + Profile C DexScreener URLs → coin names
   2. DexScreener search API → name → mint address
   3. JupiterClient.get_quote() → entry price
   4. Record paper entry (max 4 open positions, 0.05 SOL each)
@@ -55,6 +55,19 @@ CAPTURE_URL = (
     "&min24HTxns=500&min24HBuys=300&min24HVol=500000"
     "&min1HChg=20&profile=0"
 )
+# MT-527: Profile C — relaxed second query to widen the candidate pool.
+# Same quality floor (mcap 100K-10M, dexIds, buy-side balance at B's 5:3
+# txn:buy ratio), but looser age/liq/vol/txn/price-change bounds:
+#   30 min - 2 h old, $25K+ liq, $200K+ 24h vol, 200+ 24h txns, +10% 1h.
+CAPTURE_URL_C = (
+    "https://dexscreener.com/new-pairs/solana?"
+    "rankBy=trendingScoreH6&order=desc"
+    "&dexIds=pumpswap,raydium"
+    "&minLiq=25000&minMarketCap=100000&maxMarketCap=10000000"
+    "&minAge=0.5&maxAge=2"
+    "&min24HTxns=200&min24HBuys=120&min24HVol=200000"
+    "&min1HChg=10&profile=0"
+)
 DEXSCREENER_SEARCH_URL = "https://api.dexscreener.com/latest/dex/search"
 WRAPPED_SOL_MINT = "So11111111111111111111111111111111111111112"
 
@@ -96,12 +109,12 @@ except ImportError:
     log.warning("whale_tracker sizing unavailable — whale conviction sizing disabled")
 
 
-def scan_candidates() -> list[str]:
-    """Call browser-pc, return list of coin names from Profile B URL."""
+def scan_candidates(url: str = CAPTURE_URL) -> list[str]:
+    """Call browser-pc, return list of coin names from a Profile DexScreener URL."""
     try:
         resp = requests.post(
             f"{BROWSER_PC_URL}/capture",
-            json={"url": CAPTURE_URL, "wait": 4},
+            json={"url": url, "wait": 4},
             timeout=45,
         )
         resp.raise_for_status()
@@ -240,6 +253,7 @@ async def try_enter(
     db_path: Path,
     size_multiplier: float = 1.0,
     ticker: str | None = None,
+    profile: str = "B",
 ) -> bool:
     """Price via DexScreener and record a paper entry. Returns True if entry recorded."""
     from datetime import UTC, datetime
@@ -260,7 +274,7 @@ async def try_enter(
         try:
             await record_entry_skip(
                 db_path, strategy="A", mint_address=mint, ticker=ticker,
-                gate="time_gate", reason=f"utc_hour={utc_now.hour}",
+                gate="time_gate", reason=f"utc_hour={utc_now.hour}", profile=profile,
             )
         except Exception as exc:
             log.debug("candidate_log write failed (non-fatal): %s", exc)
@@ -274,6 +288,7 @@ async def try_enter(
                 db_path, strategy="A", mint_address=mint, ticker=ticker,
                 gate="repeat_loser",
                 reason=f"losing close within {REPEAT_LOSER_COOLDOWN_MINUTES // 60}h cooldown",
+                profile=profile,
             )
         except Exception as exc:
             log.debug("candidate_log write failed (non-fatal): %s", exc)
@@ -333,10 +348,11 @@ async def try_enter(
 
     try:
         entry_metadata = await fetch_entry_metadata(mint, ticker=ticker)
+        merged = dict(trade.metadata or {})
+        merged["entry_profile"] = profile
         if entry_metadata:
-            merged = dict(trade.metadata or {})
             merged.update(entry_metadata)
-            trade.metadata = merged
+        trade.metadata = merged
     except Exception as exc:
         log.warning("ENTRY METADATA SKIP — mint=%s metadata fetch failed: %s", mint[:16], exc)
 
@@ -360,11 +376,12 @@ async def try_enter(
         log.warning("SKIP %s — open_position failed: %s", mint, exc)
         return False
 
-    log.info("ENTRY: mint=%s price=%.8f SOL size=%.4f SOL", mint, price, size_sol)
+    log.info("ENTRY: mint=%s price=%.8f SOL size=%.4f SOL profile=%s", mint, price, size_sol, profile)
     send_imessage(
         f"\U0001f7e2 [STRATEGY A] ENTERED {mint[:8]}\n"
         f"Price: {price:.8f} SOL\n"
-        f"Size: {size_sol} SOL"
+        f"Size: {size_sol} SOL\n"
+        f"Profile: {profile}"
     )
     return True
 
@@ -517,12 +534,14 @@ async def confirm_pending_entry(
         return
 
     log.info(
-        "CONFIRM: mint=%s ticker=%s age=%.0fs screen=%.8f current=%.8f",
+        "CONFIRM: mint=%s ticker=%s age=%.0fs screen=%.8f current=%.8f profile=%s",
         mint[:16], pend["ticker"], age, pend["price"], current_price,
+        pend.get("profile", "B"),
     )
     ok = await try_enter(
         mint, mark_provider, adapter, manager, db_path,
         pend.get("size_multiplier", 1.0), ticker=pend["ticker"],
+        profile=pend.get("profile", "B"),
     )
     if ok:
         log.info("ENTRY [confirmed]: mint=%s ticker=%s", mint[:16], pend["ticker"])
@@ -570,50 +589,56 @@ async def scan_loop(
             log.info("Open positions: %d / %d", len(open_positions), MAX_OPEN_POSITIONS)
 
             if slots_available > 0:
-                names = scan_candidates()
-                log.info("Candidates from browser-pc: %s", names)
                 scheduled = 0
-                for name in names:
-                    if scheduled >= slots_available:
-                        break
-                    mint = await resolve_mint(name, http)
-                    if mint is None or mint in seen_mints:
-                        if mint in seen_mints:
-                            log.debug("SKIP %s — already seen this session", name)
-                        continue
-                    seen_mints.add(mint)
+                profile_urls: list[tuple[str, str]] = [
+                    ("B", CAPTURE_URL),
+                    ("C", CAPTURE_URL_C),
+                ]
+                for profile, capture_url in profile_urls:
+                    names = scan_candidates(capture_url)
+                    log.info("Candidates from browser-pc (Profile %s): %s", profile, names)
+                    for name in names:
+                        if scheduled >= slots_available:
+                            break
+                        mint = await resolve_mint(name, http)
+                        if mint is None or mint in seen_mints:
+                            if mint in seen_mints:
+                                log.debug("SKIP %s — already seen this session (Profile %s)", name, profile)
+                            continue
+                        seen_mints.add(mint)
 
-                    size_multiplier = 1.0
-                    # MT-521: whale tracker disabled — ~12 Helius /v0/addresses/{addr}/transactions
-                    # calls per 3-minute cycle (~1M credits/day), zero decisions influenced across
-                    # 2,200+ trades. Code kept intact for re-enable when Helius integration is
-                    # built into the entry pipeline:
-                    # if get_whale_signal is not None and mint is not None:
-                    #     try:
-                    #         whale_data = await get_whale_signal(mint, tracked_wallets, http)
-                    #         whale_count = whale_data.get("whale_count", 0)
-                    #         size_multiplier = whale_data.get("size_multiplier", 1.0)
-                    #         if whale_count > 0:
-                    #             log.info("🐋 WHALE SIGNAL: %d whale(s) in %s — size multiplier: %.1fx", whale_count, name, size_multiplier)
-                    #     except Exception as e:
-                    #         log.debug("Whale check failed (non-fatal): %s", e)
+                        size_multiplier = 1.0
+                        # MT-521: whale tracker disabled — ~12 Helius /v0/addresses/{addr}/transactions
+                        # calls per 3-minute cycle (~1M credits/day), zero decisions influenced across
+                        # 2,200+ trades. Code kept intact for re-enable when Helius integration is
+                        # built into the entry pipeline:
+                        # if get_whale_signal is not None and mint is not None:
+                        #     try:
+                        #         whale_data = await get_whale_signal(mint, tracked_wallets, http)
+                        #         whale_count = whale_data.get("whale_count", 0)
+                        #         size_multiplier = whale_data.get("size_multiplier", 1.0)
+                        #         if whale_count > 0:
+                        #             log.info("🐋 WHALE SIGNAL: %d whale(s) in %s — size multiplier: %.1fx", whale_count, name, size_multiplier)
+                        #     except Exception as e:
+                        #         log.debug("Whale check failed (non-fatal): %s", e)
 
-                    screen_price = await mark_provider.get_current_price(mint)
-                    if screen_price is None or screen_price <= 0:
-                        log.warning("SKIP %s — no valid DexScreener price for pending", name)
-                        continue
-                    pending_entries[mint] = {
-                        "price": screen_price,
-                        "time": time.time(),
-                        "ticker": name,
-                        "size_multiplier": size_multiplier,
-                    }
-                    log.info(
-                        "PENDING: mint=%s ticker=%s price=%.8f SOL — will confirm in 45s",
-                        mint[:16], name, screen_price,
-                    )
-                    schedule_pending_confirmation(mint, mark_provider, adapter, manager, db_path)
-                    scheduled += 1
+                        screen_price = await mark_provider.get_current_price(mint)
+                        if screen_price is None or screen_price <= 0:
+                            log.warning("SKIP %s — no valid DexScreener price for pending", name)
+                            continue
+                        pending_entries[mint] = {
+                            "price": screen_price,
+                            "time": time.time(),
+                            "ticker": name,
+                            "size_multiplier": size_multiplier,
+                            "profile": profile,
+                        }
+                        log.info(
+                            "PENDING: mint=%s ticker=%s price=%.8f SOL profile=%s — will confirm in 45s",
+                            mint[:16], name, screen_price, profile,
+                        )
+                        schedule_pending_confirmation(mint, mark_provider, adapter, manager, db_path)
+                        scheduled += 1
 
             elapsed = time.monotonic() - cycle_start
             await asyncio.sleep(max(0.0, SCAN_INTERVAL_S - elapsed))

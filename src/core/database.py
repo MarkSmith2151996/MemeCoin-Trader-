@@ -214,7 +214,8 @@ SCHEMA = (
       gates_passed TEXT,
       gates_failed TEXT,
       entered BOOLEAN DEFAULT FALSE,
-      position_id TEXT
+      position_id TEXT,
+      profile TEXT DEFAULT 'B'
     )
     """,
     """
@@ -260,6 +261,10 @@ async def init_db(path: str | Path) -> None:
             pass
         try:
             await db.execute("ALTER TABLE price_snapshots ADD COLUMN timestamp TEXT")
+        except aiosqlite.OperationalError:
+            pass
+        try:
+            await db.execute("ALTER TABLE candidate_log ADD COLUMN profile TEXT DEFAULT 'B'")
         except aiosqlite.OperationalError:
             pass
         await db.execute(
@@ -579,6 +584,7 @@ async def record_strategy_candidate(
     top10_holder_pct: float | None,
     gates_passed: list[str],
     gates_failed: dict[str, object],
+    profile: str = "B",
 ) -> int:
     """Persist one strategy candidate, including candidates rejected by gates."""
 
@@ -589,15 +595,15 @@ async def record_strategy_candidate(
                 scan_time, strategy, mint_address, ticker, age_minutes, mcap_usd, volume_usd,
                 txns_buys, txns_sells, buy_sell_ratio, liquidity_usd, fdv, price_usd,
                 price_change_5m, price_change_1h, rugcheck_result, dev_holdings_pct,
-                top10_holder_pct, gates_passed, gates_failed
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                top10_holder_pct, gates_passed, gates_failed, profile
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 datetime.now(UTC).isoformat(), strategy, mint_address, ticker, age_minutes,
                 mcap_usd, volume_usd, txns_buys, txns_sells, buy_sell_ratio, liquidity_usd,
                 fdv, price_usd, price_change_5m, price_change_1h, rugcheck_result,
                 dev_holdings_pct, top10_holder_pct, json.dumps(gates_passed),
-                json.dumps(gates_failed),
+                json.dumps(gates_failed), profile,
             ),
         )
         await db.commit()
@@ -669,6 +675,7 @@ async def record_entry_skip(
     ticker: str | None,
     gate: str,
     reason: str,
+    profile: str = "B",
 ) -> int:
     """Persist an entry-level gate skip (time_gate, repeat_loser, ...) to candidate_log."""
 
@@ -676,12 +683,12 @@ async def record_entry_skip(
         cursor = await db.execute(
             """
             INSERT INTO candidate_log (
-                scan_time, strategy, mint_address, ticker, gates_passed, gates_failed
-            ) VALUES (?, ?, ?, ?, ?, ?)
+                scan_time, strategy, mint_address, ticker, gates_passed, gates_failed, profile
+            ) VALUES (?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 datetime.now(UTC).isoformat(), strategy, mint_address, ticker,
-                json.dumps([]), json.dumps({"gate": gate, "reason": reason}),
+                json.dumps([]), json.dumps({"gate": gate, "reason": reason}), profile,
             ),
         )
         await db.commit()
