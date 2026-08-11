@@ -55,12 +55,14 @@ FAST_POLL_DROP_PCT = 0.05
 CONFIRMATION_DELAY_S = 45
 MAX_OPEN_POSITIONS = 4
 PAPER_SIZE_SOL = 0.01
-TRAILING_STOP_PCT = 0.04
-TRAILING_ARM_PCT = 0.02
-HARD_STOP_PCT = 0.10
+MAX_TOP10_HOLDER_PCT = 80.0
+TRAILING_STOP_PCT = 3.0
+TRAILING_ARM_PCT = 2.0
+TAKE_PROFIT_PCT = 60.0
+HARD_STOP_PCT = 8.0
 TIME_STOP_MINUTES = 30
 ENTRY_CONFIRM_WINDOW_S = 90
-EARLY_EXIT_GREEN_PCT = 0.01
+EARLY_EXIT_GREEN_PCT = 2.0
 BLOCKED_UTC_HOURS = frozenset({0, 7, 19, 20})
 SATURDAY_SIZE_MULTIPLIER = 0.5
 REPEAT_LOSER_COOLDOWN_MINUTES = 120
@@ -296,8 +298,11 @@ async def try_enter(
             log.warning("SKIP %s — liquidity not locked", mint)
         elif result.liquidity_locked is None:
             log.warning("SKIP %s — liquidity lock status unknown (soft warn)", mint)
-        if result.top_holder_pct is not None and result.top_holder_pct >= 80:
-            log.warning("SKIP %s — top 10 holder concentration %.1f%% >= 80%%", mint, result.top_holder_pct)
+        if result.top_holder_pct is not None and result.top_holder_pct >= MAX_TOP10_HOLDER_PCT:
+            log.warning(
+                "SKIP %s — top 10 holder concentration %.1f%% >= %.0f%%",
+                mint, result.top_holder_pct, MAX_TOP10_HOLDER_PCT,
+            )
             return False
 
     price = await mark_provider.get_current_price(mint)
@@ -400,22 +405,22 @@ async def monitor_positions(
         if entry:
             drop_from_entry = (entry - current_price) / entry
             pct_from_entry = (current_price - entry) / entry
-            if drop_from_entry >= HARD_STOP_PCT:
+            if drop_from_entry >= HARD_STOP_PCT / 100:
                 close_reason = "hard_stop"
-                close_price = entry * (1.0 - HARD_STOP_PCT)
-            elif pct_from_entry >= 0.60:
+                close_price = entry * (1.0 - HARD_STOP_PCT / 100)
+            elif pct_from_entry >= TAKE_PROFIT_PCT / 100:
                 close_reason = "take_profit"
                 close_price = current_price
             elif (
-                peak > entry * (1.0 + TRAILING_ARM_PCT)
-                and (peak - current_price) / peak >= TRAILING_STOP_PCT
+                peak > entry * (1.0 + TRAILING_ARM_PCT / 100)
+                and (peak - current_price) / peak >= TRAILING_STOP_PCT / 100
             ):
                 close_reason = "trailing_stop"
                 close_price = current_price
         if (
             close_reason is None
             and age_min * 60 >= ENTRY_CONFIRM_WINDOW_S
-            and peak <= entry * (1.0 + EARLY_EXIT_GREEN_PCT)
+            and peak <= entry * (1.0 + EARLY_EXIT_GREEN_PCT / 100)
         ):
             close_reason = "early_exit_no_green"
             close_price = current_price

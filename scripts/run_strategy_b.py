@@ -57,7 +57,11 @@ STRATEGY_B_DEXSCREENER_URL = "https://dexscreener.com/new-pairs/solana"
 BROWSER_PC_WAIT_SECONDS = 8
 # API-side age filtering follows the widened Strategy B gate, rather than the
 # unreliable client-side maxAge query parameter.
-SOURCE_MAX_AGE_MINUTES = 30
+MAX_AGE_MINUTES = 20
+MIN_MCAP_USD = 1_000
+MIN_VOLUME_USD = 500
+MIN_TXNS = 3
+SOURCE_MAX_AGE_MINUTES = MAX_AGE_MINUTES
 MAX_SOURCE_ROWS = 30
 
 PAPER_SIZE_SOL = 0.05
@@ -68,8 +72,10 @@ SCAN_INTERVAL = 60
 MONITOR_INTERVAL = 30
 FAST_MONITOR_INTERVAL_S = 5
 FAST_POLL_DROP_PCT = 0.05
-TAKE_PROFIT_MULT = 2.0
-HARD_STOP_MULT = 0.70
+TRAILING_STOP_PCT = 4.0
+TRAILING_ARM_PCT = 2.0
+TAKE_PROFIT_PCT = 80.0
+HARD_STOP_PCT = 10.0
 TIME_STOP_MINUTES = 10
 ENTRY_CONFIRM_WINDOW_S = 90
 EARLY_EXIT_GREEN_PCT = 0.01
@@ -81,9 +87,9 @@ REQUIRE_MENTIONS = False      # Set False to skip Grok entirely (on-chain only)
 USE_INFLUENCER_MENTIONS = False  # Set True to use influencer-weighted mentions instead of raw count
 
 GATES = GateThresholds(
-    max_age_minutes=30,
-    min_mcap_usd=2_000,
-    min_volume_usd=200,
+    max_age_minutes=MAX_AGE_MINUTES,
+    min_mcap_usd=MIN_MCAP_USD,
+    min_volume_usd=MIN_VOLUME_USD,
     min_buy_sell_ratio=0.4,
 )
 MAX_MCAP_USD = 50_000
@@ -135,15 +141,18 @@ peak_prices: dict[str, float] = {}  # mint -> highest price seen
 
 def _age_adjusted_min_txns(age_min: float) -> int:
     """Age-aware minimum transaction threshold for paper mode."""
+    age_minimum: int
     if age_min < 1.0:
-        return 3
-    if age_min < 3.0:
-        return 5
-    if age_min < 5.0:
-        return 8
-    if age_min < 10.0:
-        return 12
-    return 16  # 10-15 minutes
+        age_minimum = 3
+    elif age_min < 3.0:
+        age_minimum = 5
+    elif age_min < 5.0:
+        age_minimum = 8
+    elif age_min < 10.0:
+        age_minimum = 12
+    else:
+        age_minimum = 16
+    return max(MIN_TXNS, age_minimum)
 
 
 def _age_holder_tier(age_min: float) -> tuple[float, float]:
@@ -732,17 +741,23 @@ async def monitor_positions(
         close_price = current_price
 
         if entry:
-            if current_price >= entry * TAKE_PROFIT_MULT:
+            if current_price >= entry * (1 + TAKE_PROFIT_PCT / 100):
                 close_reason = "take_profit"
-                close_price = entry * TAKE_PROFIT_MULT
-            elif current_price <= entry * HARD_STOP_MULT:
+                close_price = entry * (1 + TAKE_PROFIT_PCT / 100)
+            elif current_price <= entry * (1 - HARD_STOP_PCT / 100):
                 close_reason = "hard_stop"
-                close_price = entry * HARD_STOP_MULT
+                close_price = entry * (1 - HARD_STOP_PCT / 100)
+            elif (
+                peak > entry * (1 + TRAILING_ARM_PCT / 100)
+                and (peak - current_price) / peak >= TRAILING_STOP_PCT / 100
+            ):
+                close_reason = "trailing_stop"
+                close_price = current_price
 
         if (
             close_reason is None
             and age_min * 60 >= ENTRY_CONFIRM_WINDOW_S
-            and peak <= entry * (1.0 + EARLY_EXIT_GREEN_PCT)
+            and peak <= entry * (1.0 + EARLY_EXIT_GREEN_PCT / 100)
         ):
             close_reason = "early_exit_no_green"
 
