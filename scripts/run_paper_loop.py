@@ -4,7 +4,7 @@ Scan cycle (every 3 min):
   1. browser-pc  → scan Profile B DexScreener URL → coin names
   2. DexScreener search API → name → mint address
   3. JupiterClient.get_quote() → entry price
-  4. Record paper entry (max 4 open positions, 0.01 SOL each)
+  4. Record paper entry (max 4 open positions, 0.05 SOL each)
 
 Monitor cycle (every 30s):
   5. Re-mark and close open positions (trailing stop / hard stop / time stop)
@@ -12,10 +12,10 @@ Monitor cycle (every 30s):
 Run: python scripts/run_paper_loop.py
 """
 
-# ── Position sizing (MT-522) ─────────────────────────────────────────
-# Entry size = PAPER_SIZE_SOL (0.01 SOL) * size_multiplier.
+# ── Position sizing (MT-522/MT-523) ─────────────────────────────────
+# Entry size = PAPER_SIZE_SOL (0.05 SOL since MT-523; was 0.01 SOL) * size_multiplier.
 # size_multiplier is always 1.0 in practice:
-#   - Saturday halving: * 0.5 when utc_now.weekday() == 5 (-> 0.005 SOL).
+#   - Saturday halving: * 0.5 when utc_now.weekday() == 5 (-> 0.025 SOL).
 #   - Whale conviction sizing (2x/4x/6x in src/signals/whale_tracker.py)
 #     is DISABLED since MT-521: the get_whale_signal call block and
 #     load_tracked_wallets loading block are commented out, so the
@@ -64,7 +64,7 @@ FAST_MONITOR_INTERVAL_S = 5
 FAST_POLL_DROP_PCT = 0.05
 CONFIRMATION_DELAY_S = 45
 MAX_OPEN_POSITIONS = 4
-PAPER_SIZE_SOL = 0.01
+PAPER_SIZE_SOL = 0.05
 MAX_TOP10_HOLDER_PCT = 80.0
 TRAILING_STOP_PCT = 3.0
 TRAILING_ARM_PCT = 2.0
