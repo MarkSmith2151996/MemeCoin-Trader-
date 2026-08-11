@@ -53,6 +53,12 @@ async def snapshot_loop(manager, mark_provider, db_path: Path) -> None:
 
     while True:
         cycle_start = time.monotonic()
-        await snapshot_open_positions(manager, mark_provider, db_path)
+        # A snapshot failure must never take down the trading runtime: the loop is
+        # gathered with the strategy's main loop, so any uncaught exception here
+        # would kill the whole process. Log and continue instead.
+        try:
+            await snapshot_open_positions(manager, mark_provider, db_path)
+        except Exception as exc:  # noqa: BLE001 - isolation boundary for a background worker
+            log.warning("Snapshot cycle failed (continuing): %s", exc)
         elapsed = time.monotonic() - cycle_start
         await asyncio.sleep(max(0.0, SNAPSHOT_INTERVAL_S - elapsed))

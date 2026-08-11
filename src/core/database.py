@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import math
+import sqlite3
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -860,15 +862,26 @@ async def prune_position_price_snapshots(
     cutoff = (now or datetime.now(UTC)) - timedelta(days=retention_days)
     if cutoff.tzinfo is None:
         cutoff = cutoff.replace(tzinfo=UTC)
-    async with aiosqlite.connect(path) as db:
-        await db.execute(
-            """
-            DELETE FROM price_snapshots
-            WHERE position_id IS NOT NULL AND timestamp < ?
-            """,
-            (cutoff.astimezone(UTC).isoformat(),),
-        )
-        await db.commit()
+    # Both runtimes prune on the same cadence; the DELETE can collide with the other
+    # runtime's writes. Wait on the lock (10s) and retry so a transient collision never
+    # kills the snapshot loop.
+    for attempt in range(3):
+        try:
+            async with aiosqlite.connect(path, timeout=10.0) as db:
+                await db.execute("PRAGMA busy_timeout=10000")
+                await db.execute(
+                    """
+                    DELETE FROM price_snapshots
+                    WHERE position_id IS NOT NULL AND timestamp < ?
+                    """,
+                    (cutoff.astimezone(UTC).isoformat(),),
+                )
+                await db.commit()
+            return
+        except sqlite3.OperationalError as exc:
+            if "locked" not in str(exc).lower() or attempt == 2:
+                raise
+            await asyncio.sleep(2 * (attempt + 1))
 
 
 async def get_distinct_mints(path: str | Path) -> list[str]:
