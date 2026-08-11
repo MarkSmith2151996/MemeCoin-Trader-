@@ -18,6 +18,7 @@
  */
 const path = require("node:path");
 const fs = require("node:fs");
+const { spawnSync } = require("node:child_process");
 const TelegramBot = require("node-telegram-bot-api");
 
 const lib = require("./lib");
@@ -240,8 +241,25 @@ function gateChangeMessage(row) {
   return lines.join("\n");
 }
 
+/** Recompute daily_stats (MT-526) before the midnight summary sends. */
+function refreshDailyStats() {
+  try {
+    const script = path.join(PROJECT_ROOT, "scripts", "run_daily_stats.py");
+    const res = spawnSync("python3", [script, "--today"], { timeout: 30000, encoding: "utf8" });
+    if (res.status !== 0) {
+      const detail = String(res.stderr || "").trim().split("\n").slice(-3).join(" ");
+      console.error(`[${stamp()}] daily stats refresh failed (${res.status}): ${detail}`);
+    } else {
+      console.log(`[${stamp()}] daily stats refreshed`);
+    }
+  } catch (e) {
+    console.error(`[${stamp()}] daily stats refresh error: ${e.message}`);
+  }
+}
+
 async function dailySummaryTick() {
   if (!bot || !CHAT_ID) return;
+  refreshDailyStats();
   const dayStart = lib.etDayStartUtc(0);
   try {
     const text = reports.summaryReport(dayStart);

@@ -100,6 +100,12 @@ function makeFixtureDb() {
       id INTEGER PRIMARY KEY, strategy TEXT, updated_at TEXT, config_json TEXT,
       reason TEXT, sample_size INTEGER, metrics_json TEXT
     );
+    CREATE TABLE daily_stats (
+      date TEXT PRIMARY KEY, strategy_a_trades INTEGER, strategy_a_pnl_sol REAL,
+      strategy_a_win_rate REAL, strategy_b_trades INTEGER, strategy_b_pnl_sol REAL,
+      strategy_b_win_rate REAL, total_pnl_sol REAL, cumulative_pnl_sol REAL,
+      max_drawdown_sol REAL, sharpe_ratio REAL
+    );
   `);
   c.close();
   return p;
@@ -188,18 +194,68 @@ test("statusReport shows funnel and tuner state", () => {
   fs.rmSync(path.dirname(p), { recursive: true, force: true });
 });
 
+test("summaryReport performance section falls back without daily_stats rows", () => {
+  const p = makeFixtureDb();
+  const { dayStart } = seedFixture(p);
+  db.initDb(p);
+  const out = reports.summaryReport(dayStart);
+  assert.match(out, /\*Performance\*/);
+  assert.match(out, /Cumulative PnL: -0\.03 SOL/); // all-time from positions
+  assert.match(out, /Drawdown from peak: n\/a/);
+  assert.match(out, /7-day Sharpe: n\/a/);
+  assert.match(out, /Streak: n\/a/);
+  fs.rmSync(path.dirname(p), { recursive: true, force: true });
+});
+
+test("summaryReport performance section reads daily_stats rows", () => {
+  const p = makeFixtureDb();
+  seedFixture(p);
+  const c = new DatabaseSync(p);
+  const ins = c.prepare(
+    "INSERT INTO daily_stats (date, strategy_a_trades, strategy_a_pnl_sol, strategy_a_win_rate, strategy_b_trades, strategy_b_pnl_sol, strategy_b_win_rate, total_pnl_sol, cumulative_pnl_sol, max_drawdown_sol, sharpe_ratio) VALUES (?,?,?,?,?,?,?,?,?,?,?)"
+  );
+  ins.run("2026-08-08", 1, 0.1, 1.0, 0, 0, 0, 0.1, 0.1, 0, null);
+  ins.run("2026-08-09", 0, 0, 0, 1, -0.04, 0, -0.04, 0.06, 0.04, 1.2345);
+  ins.run("2026-08-10", 0, 0, 0, 1, 0.02, 1.0, 0.02, 0.08, 0.04, 0.5);
+  c.close();
+  db.initDb(p);
+  const out = reports.summaryReport(lib.etDayStartUtc(0));
+  assert.match(out, /\*Performance\*/);
+  assert.match(out, /Cumulative PnL: \+0\.08 SOL/);
+  assert.match(out, /Drawdown from peak: -0\.0200 SOL/);
+  assert.match(out, /7-day Sharpe: 0\.50/);
+  assert.match(out, /Streak: 1 green day/);
+  fs.rmSync(path.dirname(p), { recursive: true, force: true });
+});
+
+test("streakLabel ignores an untraded today row at the midnight wire", () => {
+  const todayStr = reports.etDateString(Date.now());
+  const yesterday = new Date(Date.now() - 86400000).toISOString().slice(0, 10);
+  const rows = [
+    { date: yesterday, strategy_a_trades: 1, strategy_b_trades: 0, total_pnl_sol: 0.02 },
+    { date: todayStr, strategy_a_trades: 0, strategy_b_trades: 0, total_pnl_sol: 0 },
+  ];
+  assert.strictEqual(reports.streakLabel(rows), "1 green day");
+  const tradedToday = [
+    { date: yesterday, strategy_a_trades: 1, strategy_b_trades: 0, total_pnl_sol: 0.02 },
+    { date: todayStr, strategy_a_trades: 1, strategy_b_trades: 0, total_pnl_sol: 0 },
+  ];
+  assert.strictEqual(reports.streakLabel(tradedToday), "0 (flat)");
+});
+
 test("gatesReport parses both strategy scripts", () => {
   const p = makeFixtureDb();
   seedFixture(p);
   db.initDb(p);
   const out = reports.gatesReport();
   assert.match(out, /\*Strategy A \(run_paper_loop\.py\)\*/);
-  assert.match(out, /Trailing stop: 4%/);
-  assert.match(out, /Hard stop: 10%/);
+  assert.match(out, /Trailing stop: 3%/);
+  assert.match(out, /Hard stop: 8%/);
   assert.match(out, /\*Strategy B \(run_strategy_b\.py\)\*/);
   assert.match(out, /Tuner config id 1/);
   assert.match(out, /min mcap: \$2,000/);
-  assert.match(out, /Take profit: 2x/);
+  assert.match(out, /Take profit: 80%/);
+  assert.match(out, /Hard stop: 10%/);
   assert.match(out, /Holder tiers/);
   fs.rmSync(path.dirname(p), { recursive: true, force: true });
 });

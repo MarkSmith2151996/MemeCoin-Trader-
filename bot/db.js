@@ -85,6 +85,19 @@ function tickerForMint(mint) {
   return r && r.ticker ? r.ticker : null;
 }
 
+/** All daily_stats rows ordered by date (oldest first). [] if table missing. */
+function dailyStats() {
+  try {
+    return all(
+      "SELECT date, strategy_a_trades, strategy_a_pnl_sol, strategy_a_win_rate, " +
+        "strategy_b_trades, strategy_b_pnl_sol, strategy_b_win_rate, total_pnl_sol, " +
+        "cumulative_pnl_sol, max_drawdown_sol, sharpe_ratio FROM daily_stats ORDER BY date"
+    );
+  } catch (e) {
+    return [];
+  }
+}
+
 function lastTradeTimeMs() {
   const r = get("SELECT executed_at FROM trades ORDER BY executed_at DESC LIMIT 1");
   return r ? parseIsoSafe(r.executed_at) : null;
@@ -151,6 +164,7 @@ module.exports = {
   closedInWindow,
   closeReasonForMint,
   tickerForMint,
+  dailyStats,
   lastTradeTimeMs,
   funnelForStrategy,
   latestGateConfig,

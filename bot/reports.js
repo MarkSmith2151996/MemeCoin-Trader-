@@ -148,6 +148,67 @@ function statusReport(dayStartUtc) {
   return lines.join("\n");
 }
 
+/** ET date string YYYY-MM-DD for a UTC instant. */
+function etDateString(ms) {
+  const p = lib.etParts(new Date(ms));
+  return `${p.y}-${String(p.m).padStart(2, "0")}-${String(p.d).padStart(2, "0")}`;
+}
+
+/**
+ * Consecutive green/red days from the daily_stats series (MT-526).
+ * A trailing row for the current ET day that has not traded yet (the
+ * midnight wire) does not break the streak of the day that just ended.
+ */
+function streakLabel(rows) {
+  const effective = [...rows];
+  if (effective.length) {
+    const last = effective[effective.length - 1];
+    const isToday = last.date === etDateString(Date.now());
+    const tradedToday = (last.strategy_a_trades || 0) + (last.strategy_b_trades || 0) > 0;
+    if (isToday && !tradedToday && (last.total_pnl_sol || 0) === 0) effective.pop();
+  }
+  if (!effective.length) return "n/a";
+  const lastTotal = effective[effective.length - 1].total_pnl_sol || 0;
+  if (lastTotal === 0) return "0 (flat)";
+  const green = lastTotal > 0;
+  let days = 0;
+  for (let i = effective.length - 1; i >= 0; i--) {
+    const v = effective[i].total_pnl_sol || 0;
+    if (v === 0) break;
+    if ((v > 0) === green) days++;
+    else break;
+  }
+  return `${days} ${green ? "green" : "red"} day${days === 1 ? "" : "s"}`;
+}
+
+/** Performance block for the daily summary (MT-526). */
+function performanceLines() {
+  const rows = db.dailyStats();
+  const allClosed = db.closedPositions();
+  const allTime = () => allClosed.reduce((s, r) => s + (r.realized_pnl_sol || 0), 0);
+  const lines = ["*Performance*"];
+  if (!rows.length) {
+    lines.push(`Cumulative PnL: ${lib.fmtSolShort(allTime())}`);
+    lines.push("Drawdown from peak: n/a");
+    lines.push("7-day Sharpe: n/a");
+    lines.push("Streak: n/a");
+    return lines;
+  }
+  const last = rows[rows.length - 1];
+  const cumulative = last.cumulative_pnl_sol != null ? last.cumulative_pnl_sol : allTime();
+  let peak = -Infinity;
+  for (const r of rows) {
+    if (r.cumulative_pnl_sol != null) peak = Math.max(peak, r.cumulative_pnl_sol);
+  }
+  const drawdown = Number.isFinite(peak) && peak > cumulative ? peak - cumulative : 0;
+  const sharpe = last.sharpe_ratio != null && Number.isFinite(last.sharpe_ratio) ? last.sharpe_ratio.toFixed(2) : "n/a";
+  lines.push(`Cumulative PnL: ${lib.fmtSolShort(cumulative)}`);
+  lines.push(`Drawdown from peak: ${lib.fmtSol(-drawdown)}`);
+  lines.push(`7-day Sharpe: ${sharpe}`);
+  lines.push(`Streak: ${streakLabel(rows)}`);
+  return lines;
+}
+
 /** Full day summary (midnight wire + "today" command). */
 function summaryReport(dayStartUtc) {
   const dayEnd = dayStartUtc + DAY_MS;
@@ -176,6 +237,8 @@ function summaryReport(dayStartUtc) {
   }
   lines.push(`*Combined*`);
   lines.push(`Today: ${lib.fmtSolShort(todayPnl)} | All-time: ${lib.fmtSolShort(allTimePnl)} | Open: ${openCount}`);
+  lines.push("");
+  lines.push(...performanceLines());
   lines.push("");
   lines.push(`*System*`);
   const snap = sys.healthSnapshot();
@@ -260,8 +323,8 @@ function gatesReport() {
   const aTime = lib.pyNum(aConsts.TIME_STOP_MINUTES);
   const aSize = lib.pyNum(aConsts.PAPER_SIZE_SOL);
   const aMaxOpen = lib.pyNum(aConsts.MAX_OPEN_POSITIONS);
-  if (aTrail != null) lines.push(`Trailing stop: ${(aTrail * 100).toFixed(0)}%`);
-  if (aHard != null) lines.push(`Hard stop: ${(aHard * 100).toFixed(0)}%`);
+  if (aTrail != null) lines.push(`Trailing stop: ${aTrail.toFixed(0)}%`);
+  if (aHard != null) lines.push(`Hard stop: ${aHard.toFixed(0)}%`);
   if (aTime != null) lines.push(`Time stop: ${aTime}m`);
   if (aSize != null) lines.push(`Position size: ${aSize} SOL`);
   if (aMaxOpen != null) lines.push(`Max open: ${aMaxOpen}`);
@@ -286,8 +349,8 @@ function gatesReport() {
   const bMaxMcap = lib.pyNum(bConsts.MAX_MCAP_USD);
   const bDev = lib.pyNum(bConsts.MAX_DEV_HOLDINGS_PCT);
   const bHolder = lib.pyNum(bConsts.MAX_TOP10_HOLDER_PCT);
-  const bTp = lib.pyNum(bConsts.TAKE_PROFIT_MULT);
-  const bHardStop = lib.pyNum(bConsts.HARD_STOP_MULT);
+  const bTp = lib.pyNum(bConsts.TAKE_PROFIT_PCT);
+  const bHardStop = lib.pyNum(bConsts.HARD_STOP_PCT);
   const bTime = lib.pyNum(bConsts.TIME_STOP_MINUTES);
   const bSize = lib.pyNum(bConsts.PAPER_SIZE_SOL);
   const bMaxOpen = lib.pyNum(bConsts.MAX_OPEN);
@@ -295,8 +358,8 @@ function gatesReport() {
   if (bMaxMcap != null) lines.push(`Max mcap: ${lib.fmtUsd(bMaxMcap)}`);
   if (bDev != null) lines.push(`Max dev holdings: ${bDev}%`);
   if (bHolder != null) lines.push(`Top-10 holder max: ${bHolder}%`);
-  if (bTp != null) lines.push(`Take profit: ${bTp}x`);
-  if (bHardStop != null) lines.push(`Hard stop: ${bHardStop}x`);
+  if (bTp != null) lines.push(`Take profit: ${bTp.toFixed(0)}%`);
+  if (bHardStop != null) lines.push(`Hard stop: ${bHardStop.toFixed(0)}%`);
   if (bTime != null) lines.push(`Time stop: ${bTime}m`);
   if (bSize != null) lines.push(`Position size: ${bSize} SOL`);
   if (bMaxOpen != null) lines.push(`Max open: ${bMaxOpen}`);
@@ -332,5 +395,8 @@ module.exports = {
   last5Report,
   gatesReport,
   helpReport,
+  performanceLines,
+  streakLabel,
+  etDateString,
   TUNER_START_CLOSES,
 };

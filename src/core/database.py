@@ -31,6 +31,23 @@ class CandidateObservation:
     repeat_label: str
 
 
+DAILY_STATS_SCHEMA = """
+    CREATE TABLE IF NOT EXISTS daily_stats (
+      date TEXT PRIMARY KEY,
+      strategy_a_trades INTEGER,
+      strategy_a_pnl_sol REAL,
+      strategy_a_win_rate REAL,
+      strategy_b_trades INTEGER,
+      strategy_b_pnl_sol REAL,
+      strategy_b_win_rate REAL,
+      total_pnl_sol REAL,
+      cumulative_pnl_sol REAL,
+      max_drawdown_sol REAL,
+      sharpe_ratio REAL
+    )
+    """
+
+
 SCHEMA = (
     """
     CREATE TABLE IF NOT EXISTS trades (
@@ -204,6 +221,7 @@ SCHEMA = (
     CREATE INDEX IF NOT EXISTS idx_candidate_log_strategy_scan
     ON candidate_log (strategy, scan_time)
     """,
+    DAILY_STATS_SCHEMA,
     """
     CREATE TABLE IF NOT EXISTS gate_config (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
