@@ -17,13 +17,14 @@ Run:
     timeout 120 python3 scripts/run_strategy_b.py --test  # 2-minute test
 """
 
-# ── Position sizing (MT-522) ─────────────────────────────────────────
+# ── Position sizing (MT-522/MT-524) ─────────────────────────────────
 # Entry size = PAPER_SIZE_SOL (0.05 SOL) * size_multiplier.
-# size_multiplier starts at 1.0 and can be modified by:
+# size_multiplier is always 1.0 in practice:
 #   - Saturday halving: * 0.5 when utc_now.weekday() == 5 (-> 0.025 SOL).
-#   - Whale conviction sizing: ACTIVE — scan_loop calls get_whale_signal()
-#     and applies WHALE_SIZE_MULTIPLIERS (0/1/2/3+ whales -> 1.0/2.0/4.0/6.0x,
-#     src/signals/whale_tracker.py:319) when the import succeeds.
+#   - Whale conviction sizing: DISABLED since MT-524 — the get_whale_signal
+#     call block and load_tracked_wallets loading block are commented out
+#     (WHALE_SIZE_MULTIPLIERS 1.0/2.0/4.0/6.0x in src/signals/whale_tracker.py:319),
+#     so the multiplier passed to try_enter() never changes from 1.0.
 # Sizing is NOT driven by conviction score, liquidity tiers, or gate scores.
 
 from __future__ import annotations
@@ -134,7 +135,7 @@ log = logging.getLogger("strategy_b")
 logging.getLogger("httpx").setLevel(logging.WARNING)
 
 try:
-    from src.signals.whale_tracker import get_whale_signal, load_tracked_wallets
+    from src.signals.whale_tracker import get_whale_signal, load_tracked_wallets  # noqa: F401 — kept for MT-524 re-enable
 except ImportError:
     get_whale_signal = None
     load_tracked_wallets = None
@@ -842,6 +843,7 @@ async def scan_loop(
             try:
                 cycle_start = time.monotonic()
                 log.info("--- Strategy B Scan ---")
+                log.info("whale tracker disabled — re-enable when Helius integration is built into entry pipeline.")
                 open_positions = await manager.get_all_open(mode="paper")
                 log.info("Open positions: %d / %d", len(open_positions), MAX_OPEN)
 
@@ -948,15 +950,20 @@ async def scan_loop(
                             )
 
                         size_multiplier = 1.0
-                        if get_whale_signal is not None:
-                            try:
-                                whale_data = await get_whale_signal(mint, tracked_wallets, http)
-                                whale_count = whale_data.get("whale_count", 0)
-                                size_multiplier = whale_data.get("size_multiplier", 1.0)
-                                if whale_count > 0:
-                                    log.info("🐋 WHALE SIGNAL: %d whale(s) in %s \u2014 size multiplier: %.1fx", whale_count, ticker, size_multiplier)
-                            except Exception as e:
-                                log.debug("Whale check failed (non-fatal): %s", e)
+                        # MT-524: whale conviction sizing disabled project-wide — the
+                        # signal proved useless for trade decisions while burning Helius
+                        # credits. Code kept intact for re-enable when Helius integration
+                        # is built into the entry pipeline (WHALE_SIZE_MULTIPLIERS in
+                        # src/signals/whale_tracker.py:319).
+                        # if get_whale_signal is not None:
+                        #     try:
+                        #         whale_data = await get_whale_signal(mint, tracked_wallets, http)
+                        #         whale_count = whale_data.get("whale_count", 0)
+                        #         size_multiplier = whale_data.get("size_multiplier", 1.0)
+                        #         if whale_count > 0:
+                        #             log.info("🐋 WHALE SIGNAL: %d whale(s) in %s — size multiplier: %.1fx", whale_count, ticker, size_multiplier)
+                        #     except Exception as e:
+                        #         log.debug("Whale check failed (non-fatal): %s", e)
 
                         detailed["entry_attempts"] += 1
                         position_id = await try_enter(
@@ -1046,12 +1053,14 @@ async def main() -> None:
     manager = PositionManager(db_path, settings, strategy="B")
 
     tracked_wallets: list = []
-    if load_tracked_wallets is not None:
-        try:
-            tracked_wallets = load_tracked_wallets()
-            log.info("Loaded %d tracked whale wallets", len(tracked_wallets))
-        except Exception:
-            log.warning("Failed to load tracked wallets — whale sizing disabled")
+    # MT-524: tracked wallet loading disabled alongside the whale tracker (no Helius calls
+    # in load_tracked_wallets itself, but no reason to load 50 wallets while unused).
+    # if load_tracked_wallets is not None:
+    #     try:
+    #         tracked_wallets = load_tracked_wallets()
+    #         log.info("Loaded %d tracked whale wallets", len(tracked_wallets))
+    #     except Exception:
+    #         log.warning("Failed to load tracked wallets — whale sizing disabled")
 
     if not REQUIRE_MENTIONS:
         mode_label = "ON-CHAIN ONLY (Grok disabled)"
