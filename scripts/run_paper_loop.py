@@ -79,7 +79,7 @@ log = logging.getLogger("paper_loop")
 logging.getLogger("httpx").setLevel(logging.WARNING)
 
 try:
-    from src.signals.whale_tracker import get_whale_signal, load_tracked_wallets
+    from src.signals.whale_tracker import get_whale_signal, load_tracked_wallets  # noqa: F401 — kept for MT-521 re-enable
 except ImportError:
     get_whale_signal = None
     load_tracked_wallets = None
@@ -554,6 +554,7 @@ async def scan_loop(
             cycle_start = time.monotonic()
 
             log.info("--- Scan cycle ---")
+            log.info("whale tracker disabled — re-enable when Helius integration is built into entry pipeline.")
             open_positions = await manager.get_all_open(mode="paper")
             slots_available = MAX_OPEN_POSITIONS - len(open_positions) - len(pending_entries)
             log.info("Open positions: %d / %d", len(open_positions), MAX_OPEN_POSITIONS)
@@ -573,15 +574,19 @@ async def scan_loop(
                     seen_mints.add(mint)
 
                     size_multiplier = 1.0
-                    if get_whale_signal is not None and mint is not None:
-                        try:
-                            whale_data = await get_whale_signal(mint, tracked_wallets, http)
-                            whale_count = whale_data.get("whale_count", 0)
-                            size_multiplier = whale_data.get("size_multiplier", 1.0)
-                            if whale_count > 0:
-                                log.info("🐋 WHALE SIGNAL: %d whale(s) in %s — size multiplier: %.1fx", whale_count, name, size_multiplier)
-                        except Exception as e:
-                            log.debug("Whale check failed (non-fatal): %s", e)
+                    # MT-521: whale tracker disabled — ~12 Helius /v0/addresses/{addr}/transactions
+                    # calls per 3-minute cycle (~1M credits/day), zero decisions influenced across
+                    # 2,200+ trades. Code kept intact for re-enable when Helius integration is
+                    # built into the entry pipeline:
+                    # if get_whale_signal is not None and mint is not None:
+                    #     try:
+                    #         whale_data = await get_whale_signal(mint, tracked_wallets, http)
+                    #         whale_count = whale_data.get("whale_count", 0)
+                    #         size_multiplier = whale_data.get("size_multiplier", 1.0)
+                    #         if whale_count > 0:
+                    #             log.info("🐋 WHALE SIGNAL: %d whale(s) in %s — size multiplier: %.1fx", whale_count, name, size_multiplier)
+                    #     except Exception as e:
+                    #         log.debug("Whale check failed (non-fatal): %s", e)
 
                     screen_price = await mark_provider.get_current_price(mint)
                     if screen_price is None or screen_price <= 0:
@@ -631,13 +636,16 @@ async def main() -> None:
     adapter = PaperExecutionAdapter(price_provider=mark_provider)
     manager = PositionManager(db_path, settings)
 
+    # MT-521: tracked wallet loading disabled alongside the whale tracker (no Helius calls
+    # in load_tracked_wallets itself, but no reason to load 50 wallets while unused).
+    # tracked_wallets: list = []
+    # if load_tracked_wallets is not None:
+    #     try:
+    #         tracked_wallets = load_tracked_wallets()
+    #         log.info("Loaded %d tracked whale wallets", len(tracked_wallets))
+    #     except Exception:
+    #         log.warning("Failed to load tracked wallets — whale sizing disabled")
     tracked_wallets: list = []
-    if load_tracked_wallets is not None:
-        try:
-            tracked_wallets = load_tracked_wallets()
-            log.info("Loaded %d tracked whale wallets", len(tracked_wallets))
-        except Exception:
-            log.warning("Failed to load tracked wallets — whale sizing disabled")
 
     log.info("Paper loop started. Scan every %ds, monitor every %ds.", SCAN_INTERVAL_S, MONITOR_INTERVAL_S)
     await asyncio.gather(
