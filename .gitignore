@@ -13,5 +13,7 @@ data/*.db
 data/*.sqlite
 data/*.sqlite3
 !data/.gitkeep
+data/dune/*.csv
+analysis/dune_backtest_output/
 shared/
 bot/node_modules/
