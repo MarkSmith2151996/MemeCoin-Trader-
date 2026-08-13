@@ -4,9 +4,10 @@ from __future__ import annotations
 
 import csv
 import json
+from datetime import datetime
 from pathlib import Path
 
-from scripts.dune_backtest import run
+from scripts.dune_backtest import Graduation, Swap, post_graduation_path, read_swaps, run
 
 
 def write_csv(path: Path, columns: list[str], rows: list[dict[str, object]]) -> None:
@@ -57,3 +58,38 @@ def test_dune_backtest_filters_gates_and_replays_exit_order(tmp_path: Path) -> N
     assert rows["fails"]["gate_passed"] == "False"
     saved = json.loads((output / "summary.json").read_text(encoding="utf-8"))
     assert saved["dune_backtest"]["total_realized_pnl_sol_at_0_05_size"] < 0
+
+
+def test_read_swaps_accepts_query_b_usd_price_schema(tmp_path: Path) -> None:
+    swaps = tmp_path / "token_swaps.csv"
+    write_csv(swaps, ["mint_address", "timestamp", "price_usd"], [{
+        "mint_address": "dune-query-b",
+        "timestamp": "2026-08-07 19:43:07.000 UTC",
+        "price_usd": "0.0000274355",
+    }])
+
+    result = read_swaps(swaps)
+
+    assert result["dune-query-b"][0].price == 0.0000274355
+    assert result["dune-query-b"][0].timestamp.isoformat() == "2026-08-07T19:43:07+00:00"
+
+
+def test_post_graduation_path_excludes_pre_signal_swaps() -> None:
+    graduation = Graduation(
+        mint_address="mint",
+        graduation_timestamp=datetime.fromisoformat("2026-08-01T00:00:00+00:00"),
+        age_minutes=None,
+        market_cap_usd=None,
+        volume_usd=None,
+        buys=None,
+        sells=None,
+        liquidity_proxy_usd=None,
+    )
+    swaps = [
+        Swap("mint", datetime.fromisoformat("2026-07-31T23:59:59+00:00"), 1),
+        Swap("mint", datetime.fromisoformat("2026-08-01T00:00:00+00:00"), 2),
+        Swap("mint", datetime.fromisoformat("2026-08-01T02:00:00+00:00"), 3),
+        Swap("mint", datetime.fromisoformat("2026-08-01T02:00:01+00:00"), 4),
+    ]
+
+    assert [swap.price for swap in post_graduation_path(graduation, swaps)] == [2, 3]

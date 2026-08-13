@@ -12,6 +12,7 @@ import csv
 import json
 import math
 import sqlite3
+import statistics
 from collections import Counter, defaultdict
 from dataclasses import asdict, dataclass
 from datetime import UTC, datetime
@@ -56,7 +57,7 @@ class Graduation:
 class Swap:
     mint_address: str
     timestamp: datetime
-    price_sol: float
+    price: float
 
 
 def _value(row: dict[str, str], *names: str) -> str | None:
@@ -86,7 +87,7 @@ def _integer(value: str | None) -> int | None:
 def _timestamp(value: str | None) -> datetime | None:
     if not value:
         return None
-    cleaned = value.strip().replace("Z", "+00:00")
+    cleaned = value.strip().replace(" UTC", "+00:00").replace("Z", "+00:00")
     try:
         result = datetime.fromisoformat(cleaned)
     except ValueError:
@@ -150,7 +151,9 @@ def read_swaps(path: Path) -> dict[str, list[Swap]]:
         for row in reader:
             mint = _value(row, "mint_address", "mint")
             timestamp = _timestamp(_value(row, "timestamp", "block_time"))
-            price = _number(_value(row, "price_sol", "price_in_sol"))
+            # Query B 8318399 returns USD prices. Exit decisions use only the
+            # price ratio, so USD and SOL price paths replay identically here.
+            price = _number(_value(row, "price_sol", "price_in_sol", "price_usd"))
             if mint and timestamp and price is not None and price > 0:
                 grouped[mint].append(Swap(mint, timestamp, price))
     for swaps in grouped.values():
@@ -194,37 +197,37 @@ def replay_exit(mint: str, swaps: Iterable[Swap]) -> dict[str, object] | None:
     if not prices:
         return None
     entry = prices[0]
-    peak = entry.price_sol
+    peak = entry.price
     close = prices[-1]
     reason = "open_at_end"
     for swap in prices:
-        peak = max(peak, swap.price_sol)
+        peak = max(peak, swap.price)
         elapsed = (swap.timestamp - entry.timestamp).total_seconds()
-        if swap.price_sol >= entry.price_sol * (1 + TAKE_PROFIT_PCT / 100):
-            close = Swap(mint, swap.timestamp, entry.price_sol * (1 + TAKE_PROFIT_PCT / 100))
+        if swap.price >= entry.price * (1 + TAKE_PROFIT_PCT / 100):
+            close = Swap(mint, swap.timestamp, entry.price * (1 + TAKE_PROFIT_PCT / 100))
             reason = "take_profit"
             break
-        if swap.price_sol <= entry.price_sol * (1 - HARD_STOP_PCT / 100):
-            close = Swap(mint, swap.timestamp, entry.price_sol * (1 - HARD_STOP_PCT / 100))
+        if swap.price <= entry.price * (1 - HARD_STOP_PCT / 100):
+            close = Swap(mint, swap.timestamp, entry.price * (1 - HARD_STOP_PCT / 100))
             reason = "hard_stop"
             break
-        if (peak > entry.price_sol * (1 + TRAILING_ARM_PCT / 100)
-                and (peak - swap.price_sol) / peak >= TRAILING_STOP_PCT / 100):
+        if (peak > entry.price * (1 + TRAILING_ARM_PCT / 100)
+                and (peak - swap.price) / peak >= TRAILING_STOP_PCT / 100):
             close = swap
             reason = "trailing_stop"
             break
-        if elapsed >= EARLY_EXIT_SECONDS and peak <= entry.price_sol * (1 + EARLY_EXIT_GREEN_PCT / 100):
+        if elapsed >= EARLY_EXIT_SECONDS and peak <= entry.price * (1 + EARLY_EXIT_GREEN_PCT / 100):
             close = swap
             reason = "early_exit_no_green"
             break
-    pnl_pct = (close.price_sol / entry.price_sol - 1) * 100
+    pnl_pct = (close.price / entry.price - 1) * 100
     return {
         "mint_address": mint,
         "entry_timestamp": entry.timestamp.isoformat(),
-        "entry_price_sol": entry.price_sol,
+        "entry_price": entry.price,
         "exit_timestamp": close.timestamp.isoformat(),
-        "exit_price_sol": close.price_sol,
-        "peak_price_sol": peak,
+        "exit_price": close.price,
+        "peak_price": peak,
         "exit_reason": reason,
         "pnl_pct": pnl_pct,
         "pnl_sol_at_0_05_size": PAPER_SIZE_SOL * pnl_pct / 100,
@@ -262,6 +265,18 @@ def write_csv(path: Path, rows: list[dict[str, object]]) -> None:
         writer.writerows(rows)
 
 
+def post_graduation_path(graduation: Graduation, swaps: Iterable[Swap]) -> list[Swap]:
+    """Return only the exported two-hour window beginning at graduation."""
+    if graduation.graduation_timestamp is None:
+        return list(swaps)
+    window_end = graduation.graduation_timestamp.timestamp() + 2 * 60 * 60
+    return [
+        swap for swap in swaps
+        if graduation.graduation_timestamp <= swap.timestamp
+        and swap.timestamp.timestamp() <= window_end
+    ]
+
+
 def run(graduations_path: Path, swaps_path: Path, output_dir: Path, paper_db: Path) -> dict[str, object]:
     graduations = read_graduations(graduations_path)
     swaps_by_mint = read_swaps(swaps_path)
@@ -287,7 +302,11 @@ def run(graduations_path: Path, swaps_path: Path, output_dir: Path, paper_db: Pa
             **gates,
         }
         if passed:
-            replay = replay_exit(graduation.mint_address, swaps_by_mint.get(graduation.mint_address, []))
+            path = post_graduation_path(
+                graduation,
+                swaps_by_mint.get(graduation.mint_address, []),
+            )
+            replay = replay_exit(graduation.mint_address, path)
             if replay is None:
                 row["exit_reason"] = "no_valid_price_path"
             else:
@@ -303,6 +322,11 @@ def run(graduations_path: Path, swaps_path: Path, output_dir: Path, paper_db: Pa
     write_csv(output_dir / "per_trade_results.csv", rows)
     passed_rows = [row for row in rows if row["gate_passed"]]
     comparable = len(closed_pnls)
+    per_trade_sharpe = None
+    if len(closed_pnls) >= 2:
+        volatility = statistics.stdev(closed_pnls)
+        if volatility:
+            per_trade_sharpe = statistics.mean(closed_pnls) / volatility
     summary = {
         "input": {
             "graduations_csv": str(graduations_path),
@@ -332,15 +356,17 @@ def run(graduations_path: Path, swaps_path: Path, output_dir: Path, paper_db: Pa
             "win_rate_closed_only": (
                 sum(pnl > 0 for pnl in closed_pnls) / comparable if comparable else None
             ),
+            "per_trade_sharpe_unannualized": per_trade_sharpe,
             "exit_reasons": dict(exit_counts),
             "unrealized_open_at_two_hours": exit_counts["open_at_end"],
         },
         "paper_trading_comparison": paper_comparison(paper_db),
         "limitations": [
-            "Entries are the first recorded post-graduation wSOL swap, not a simulated live quote.",
+            "Entries are the first recorded swap within the exported two-hour post-graduation window, not a simulated live quote.",
             "The Dune export cannot reproduce Strategy B RugCheck, holder, creator, Grok, UTC-hour, or repeat-loser gates.",
             "Market cap is the Query A 1B-supply estimate; liquidity_added_usd_proxy is first-trade notional, not a pool reserve snapshot.",
             "Only exits reached within the two-hour export are included in realized backtest PnL; open_at_end paths are reported separately.",
+            "Sharpe is calculated from closed-trade SOL PnL without annualization; it is unavailable with fewer than two closed paths or zero variance.",
         ],
     }
     (output_dir / "summary.json").write_text(json.dumps(summary, indent=2) + "\n", encoding="utf-8")
