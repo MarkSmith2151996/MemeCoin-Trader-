@@ -38,6 +38,7 @@ import time
 from datetime import UTC, datetime
 from pathlib import Path
 
+import aiosqlite
 import httpx
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
@@ -67,8 +68,10 @@ STRATEGY_B_DEXSCREENER_URL = "https://dexscreener.com/new-pairs/solana"
 BROWSER_PC_WAIT_SECONDS = 8
 # API-side age filtering follows the widened Strategy B gate, rather than the
 # unreliable client-side maxAge query parameter.
-MAX_AGE_MINUTES = 20
-MIN_MCAP_USD = 1_000
+# MT-537: auto-tuner paused, so these constants ARE the live gate values.
+# Frozen manually after the tuner oscillated (mcap dropped to $1,250 garbage tier).
+MAX_AGE_MINUTES = 22
+MIN_MCAP_USD = 5_000
 MIN_VOLUME_USD = 500
 MIN_TXNS = 3
 SOURCE_MAX_AGE_MINUTES = MAX_AGE_MINUTES
@@ -89,7 +92,8 @@ HARD_STOP_PCT = 10.0
 TIME_STOP_MINUTES = 10
 ENTRY_CONFIRM_WINDOW_S = 90
 EARLY_EXIT_GREEN_PCT = 0.01
-BLOCKED_UTC_HOURS = frozenset({0, 7, 19, 20})
+# MT-537: UTC 21 added to the MT-516 blocked list (20:00-21:59 dead zone).
+BLOCKED_UTC_HOURS = frozenset({0, 7, 19, 20, 21})
 SATURDAY_SIZE_MULTIPLIER = 0.5
 
 # Mode flags
@@ -100,7 +104,7 @@ GATES = GateThresholds(
     max_age_minutes=MAX_AGE_MINUTES,
     min_mcap_usd=MIN_MCAP_USD,
     min_volume_usd=MIN_VOLUME_USD,
-    min_buy_sell_ratio=0.4,
+    min_buy_sell_ratio=0.5,
 )
 MAX_MCAP_USD = 50_000
 
@@ -779,8 +783,9 @@ async def monitor_positions(
             peak_prices.pop(pos.mint_address, None)
             trade = await _adapter_close(pos, close_price, close_reason, db_path)
             await manager.close_position(pos.mint_address, close_price, mode="paper", peak_price_sol=peak)
-            if gate_tuner is not None and await gate_tuner.maybe_tune():
-                log.info("Auto-tuned Strategy B gates: %s", json.dumps(gate_tuner.thresholds.as_dict()))
+            # AUTO-TUNER PAUSED — oscillating, not converging. See MT-537.
+            # if gate_tuner is not None and await gate_tuner.maybe_tune():
+            #     log.info("Auto-tuned Strategy B gates: %s", json.dumps(gate_tuner.thresholds.as_dict()))
             pnl_pct = ((close_price - pos.entry_price_sol) / pos.entry_price_sol) * 100 if pos.entry_price_sol else 0.0
             log.info(
                 "CLOSE [%s]: mint=%s entry=%.8f close=%.8f",
@@ -1037,6 +1042,29 @@ async def monitor_loop(
         await asyncio.sleep(max(0.0, interval - elapsed))
 
 
+async def record_manual_freeze(db_path: Path) -> None:
+    """MT-537: persist the frozen gate thresholds as a manual_freeze row.
+
+    Idempotent — only inserts when no manual_freeze row exists for strategy B,
+    so restarts never duplicate the record. The bot's /gates report reads it.
+    """
+    async with aiosqlite.connect(db_path) as db:
+        cursor = await db.execute(
+            "SELECT 1 FROM gate_config WHERE strategy = 'B' AND reason = 'manual_freeze' LIMIT 1",
+        )
+        exists = await cursor.fetchone()
+        await cursor.close()
+        if exists is None:
+            await db.execute(
+                """INSERT INTO gate_config
+                   (strategy, updated_at, config_json, reason, sample_size, metrics_json)
+                   VALUES ('B', ?, ?, 'manual_freeze', 0, '{}')""",
+                (datetime.now(UTC).isoformat(), json.dumps(GATES.as_dict())),
+            )
+            await db.commit()
+            log.info("Recorded manual_freeze gate config: %s", json.dumps(GATES.as_dict()))
+
+
 async def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--test", action="store_true", help="Run one cycle and exit (2-minute test)")
@@ -1047,6 +1075,7 @@ async def main() -> None:
     await init_db(db_path)
     gate_tuner = GateTuner(db_path, GATES)
     await gate_tuner.ensure_initial_config()
+    await record_manual_freeze(db_path)
 
     mark_provider = DexScreenerPriceProvider()
     adapter = PaperExecutionAdapter(price_provider=mark_provider)
