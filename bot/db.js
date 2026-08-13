@@ -42,8 +42,10 @@ function closedPositions() {
     .sort((a, b) => (parseIsoSafe(b.closed_at) || 0) - (parseIsoSafe(a.closed_at) || 0));
 }
 
-function openPositionCount() {
-  const r = get("SELECT COUNT(*) AS n FROM positions WHERE status = 'OPEN'");
+function openPositionCount(strategy = null) {
+  const r = strategy
+    ? get("SELECT COUNT(*) AS n FROM positions WHERE status = 'OPEN' AND strategy = ?", [strategy])
+    : get("SELECT COUNT(*) AS n FROM positions WHERE status = 'OPEN'");
   return r ? r.n : 0;
 }
 

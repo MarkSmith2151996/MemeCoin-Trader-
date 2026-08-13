@@ -103,27 +103,23 @@ async function handleCommand(chatId, text) {
     case cmd === "gates":
       reply = reports.gatesReport();
       break;
-    case /^kill a$/.test(cmd):
     case /^kill b$/.test(cmd): {
-      const strategy = cmd.endsWith("a") ? "A" : "B";
-      const r = sys.killLoop(strategy);
+      const r = sys.killLoop("B");
       await waitMs(1500);
-      const alive = sys.processAlive(sys.LOOP_CMD[strategy].pattern) != null;
+      const alive = sys.processAlive(sys.LOOP_CMD.B.pattern) != null;
       reply =
-        `*Strategy ${strategy}*\n` +
+        "*Strategy B*\n" +
         `${r.ok ? "Kill signal sent." : `Failed: ${r.message}`}\n` +
         `Process: ${alive ? "STILL RUNNING" : "stopped"}.\n` +
-        `Note: the external watchdog restarts it within ~3 min unless you send "start ${strategy}" first.`;
+        'Note: the external watchdog restarts it within ~3 min unless you send "start B" first.';
       break;
     }
-    case /^start a$/.test(cmd):
     case /^start b$/.test(cmd): {
-      const strategy = cmd.endsWith("a") ? "A" : "B";
-      const r = sys.startLoop(strategy, PROJECT_ROOT);
+      const r = sys.startLoop("B", PROJECT_ROOT);
       await waitMs(2500);
-      const pid = sys.processAlive(sys.LOOP_CMD[strategy].pattern);
+      const pid = sys.processAlive(sys.LOOP_CMD.B.pattern);
       reply =
-        `*Strategy ${strategy}*\n` +
+        "*Strategy B*\n" +
         (r.ok ? "Launch requested." : `Failed: ${r.message}`) +
         `\nProcess: ${pid != null ? `ALIVE (pid ${pid})` : "not up yet — check again in a minute."}`;
       break;
@@ -151,7 +147,6 @@ async function handleMessage(msg) {
 /* ---------------- auto-alerts ---------------- */
 
 const healthState = {
-  A: { ok: null, lastAlertAt: 0 },
   B: { ok: null, lastAlertAt: 0 },
   browserPc: { ok: null, lastAlertAt: 0 },
 };
@@ -165,12 +160,11 @@ async function healthWatch() {
     return;
   }
   console.log(
-    `[${stamp()}] hb A=${snap.A.alive ? "up" : "down"} B=${snap.B.alive ? "up" : "down"} browser=${snap.browserPc.ok ? "ok" : "down"}`
+    `[${stamp()}] hb B=${snap.B.alive ? "up" : "down"} browser=${snap.browserPc.ok ? "ok" : "down"}`
   );
   if (!bot || !CHAT_ID) return;
   const now = Date.now();
   const items = [
-    ["Strategy A", "A", snap.A.alive, `process run_paper_loop.py not found`],
     ["Strategy B", "B", snap.B.alive, `process run_strategy_b.py not found`],
     ["browser-pc", "browserPc", snap.browserPc.ok, `health endpoint down (${snap.browserPc.detail})`],
   ];

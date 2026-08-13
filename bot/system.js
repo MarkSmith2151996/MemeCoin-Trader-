@@ -4,7 +4,6 @@ const fs = require("node:fs");
 const path = require("node:path");
 
 const LOOP_CMD = {
-  A: { pattern: "run_paper_loop.py", script: "scripts/run_paper_loop.py", log: "/home/dev/paper_loop.log" },
   B: { pattern: "run_strategy_b.py", script: "scripts/run_strategy_b.py", log: "/home/dev/strategy_b.log" },
 };
 
@@ -38,14 +37,13 @@ function browserPcHealth() {
   }
 }
 
-/** Overall health snapshot for both loops + browser-pc. */
+/** Overall health snapshot for the active loop + browser-pc. */
 function healthSnapshot() {
   const snap = {
-    A: { alive: false, pid: null },
     B: { alive: false, pid: null },
     browserPc: { ok: false, detail: "unreachable" },
   };
-  for (const k of ["A", "B"]) {
+  for (const k of ["B"]) {
     const pid = processAlive(LOOP_CMD[k].pattern);
     snap[k].alive = pid != null;
     snap[k].pid = pid;

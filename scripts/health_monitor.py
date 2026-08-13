@@ -90,7 +90,6 @@ class HealthMonitor:
             self.report_failure("browser-pc", browser.detail, recovered)
 
         for name, pattern, restart in (
-            ("Strategy A", "run_paper_loop.py", self.restart_strategy_a),
             ("Strategy B", "run_strategy_b.py", self.restart_strategy_b),
             ("Telegram bot", "node bot.js", self.restart_telegram_bot),
         ):
@@ -265,15 +264,6 @@ class HealthMonitor:
             except OSError:
                 continue
         return pids
-
-    def restart_strategy_a(self) -> CheckResult:
-        return self.start_process(
-            "Strategy A",
-            ["python3", "scripts/run_paper_loop.py"],
-            PROJECT_ROOT,
-            Path("/home/dev/paper_loop.log"),
-            "run_paper_loop.py",
-        )
 
     def restart_strategy_b(self) -> CheckResult:
         return self.start_process(

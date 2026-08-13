@@ -16,10 +16,9 @@ function tickerOrShort(mint) {
 }
 
 function strategyBreakdown(positions) {
-  const byStrategy = { A: [], B: [] };
+  const byStrategy = { B: [] };
   for (const p of positions) {
-    const key = (p.strategy || "A").toUpperCase();
-    (byStrategy[key] || (byStrategy[key] = [])).push(p);
+    if ((p.strategy || "A").toUpperCase() === "B") byStrategy.B.push(p);
   }
   const out = {};
   for (const [key, rows] of Object.entries(byStrategy)) {
@@ -49,19 +48,17 @@ function pnlReport(dayStartUtc) {
   const dayClosed = db.closedInWindow(dayStartUtc, dayEnd);
   const allClosed = db.closedPositions();
   const br = strategyBreakdown(dayClosed);
-  const a = br.A || { closed: 0, pnl: 0, winRate: 0, best: null, worst: null };
   const b = br.B || { closed: 0, pnl: 0, winRate: 0, best: null, worst: null };
-  const todayPnl = dayClosed.reduce((s, r) => s + (r.realized_pnl_sol || 0), 0);
-  const allTimePnl = allClosed.reduce((s, r) => s + (r.realized_pnl_sol || 0), 0);
-  const openCount = db.openPositionCount();
+  const todayPnl = b.pnl;
+  const allTimePnl = allClosed
+    .filter((r) => (r.strategy || "A").toUpperCase() === "B")
+    .reduce((s, r) => s + (r.realized_pnl_sol || 0), 0);
+  const openCount = db.openPositionCount("B");
 
   const lines = [];
   lines.push(`*Today's PnL — ${lib.fmtEtDate(dayStartUtc)}*`);
   lines.push("");
-  for (const [label, s] of [
-    ["Strategy A", a],
-    ["Strategy B", b],
-  ]) {
+  for (const [label, s] of [["Strategy B", b]]) {
     lines.push(`*${label}*`);
     lines.push(`Closed: ${s.closed} trade${s.closed === 1 ? "" : "s"} | PnL: ${lib.fmtSolShort(s.pnl)}`);
     lines.push(`Win rate: ${lib.pct(s.winRate)}`);
@@ -82,7 +79,6 @@ function checkReport() {
   const lines = [];
   lines.push(`*Health Check — ${lib.fmtEtTime(Date.now())}*`);
   lines.push("");
-  lines.push(`Strategy A: ${snap.A.alive ? `ALIVE (pid ${snap.A.pid})` : "DEAD"}`);
   lines.push(`Strategy B: ${snap.B.alive ? `ALIVE (pid ${snap.B.pid})` : "DEAD"}`);
   lines.push(`browser-pc: ${snap.browserPc.ok ? "ok" : `DOWN (${snap.browserPc.detail})`}`);
   lines.push("");
@@ -91,8 +87,7 @@ function checkReport() {
   lines.push("");
   lines.push(`*Errors in last hour*`);
   const sources = [
-    ["Strategy A log", sys.LOOP_CMD.A.log],
-    ["Strategy B log", "/tmp/strategy_b.log"],
+    ["Strategy B log", sys.LOOP_CMD.B.log],
     ["browser-pc log", "/tmp/browser_service.log"],
   ];
   let total = 0;
@@ -113,16 +108,14 @@ function statusReport(dayStartUtc) {
   let totalCandidates = 0;
   let totalEntered = 0;
   const blockers = new Map();
-  for (const strategy of ["A", "B"]) {
-    const f = db.funnelForStrategy(strategy, dayStartUtc);
-    totalCandidates += f.candidates;
-    totalEntered += f.entered;
-    for (const [g, c] of f.blockers) blockers.set(g, (blockers.get(g) || 0) + c);
-    lines.push(
-      `${strategy}: ${f.candidates} candidates | ${f.entered} entered | ${f.candidates - f.entered} rejected` +
-        (f.mainBlocker ? ` (blocker: ${f.mainBlocker})` : "")
-    );
-  }
+  const f = db.funnelForStrategy("B", dayStartUtc);
+  totalCandidates = f.candidates;
+  totalEntered = f.entered;
+  for (const [g, c] of f.blockers) blockers.set(g, c);
+  lines.push(
+    `B: ${f.candidates} candidates | ${f.entered} entered | ${f.candidates - f.entered} rejected` +
+      (f.mainBlocker ? ` (blocker: ${f.mainBlocker})` : "")
+  );
   lines.push(`Total: ${totalCandidates} scanned | ${totalEntered} entered`);
   lines.push("");
   lines.push(`*Auto-tuner (Strategy B)*`);
@@ -215,19 +208,17 @@ function summaryReport(dayStartUtc) {
   const dayClosed = db.closedInWindow(dayStartUtc, dayEnd);
   const allClosed = db.closedPositions();
   const br = strategyBreakdown(dayClosed);
-  const a = br.A || { closed: 0, pnl: 0, winRate: 0, best: null, worst: null };
   const b = br.B || { closed: 0, pnl: 0, winRate: 0, best: null, worst: null };
-  const todayPnl = dayClosed.reduce((s, r) => s + (r.realized_pnl_sol || 0), 0);
-  const allTimePnl = allClosed.reduce((s, r) => s + (r.realized_pnl_sol || 0), 0);
-  const openCount = db.openPositionCount();
+  const todayPnl = b.pnl;
+  const allTimePnl = allClosed
+    .filter((r) => (r.strategy || "A").toUpperCase() === "B")
+    .reduce((s, r) => s + (r.realized_pnl_sol || 0), 0);
+  const openCount = db.openPositionCount("B");
 
   const lines = [];
   lines.push(`*Daily Summary — ${lib.fmtEtDate(dayStartUtc)}*`);
   lines.push("");
-  for (const [label, s] of [
-    ["Strategy A", a],
-    ["Strategy B", b],
-  ]) {
+  for (const [label, s] of [["Strategy B", b]]) {
     lines.push(`*${label}*`);
     lines.push(`Closed: ${s.closed} | PnL: ${lib.fmtSolShort(s.pnl)} | Win rate: ${lib.pct(s.winRate)}`);
     if (s.best && s.worst) {
@@ -242,7 +233,6 @@ function summaryReport(dayStartUtc) {
   lines.push("");
   lines.push(`*System*`);
   const snap = sys.healthSnapshot();
-  lines.push(`Strategy A: ${snap.A.alive ? "ALIVE" : "DOWN"}`);
   lines.push(`Strategy B: ${snap.B.alive ? "ALIVE" : "DOWN"}`);
   lines.push(`browser-pc: ${snap.browserPc.ok ? "ok" : "DOWN"}`);
   lines.push(`Helius: ${heliusLine()}`);
@@ -269,12 +259,10 @@ function summaryReport(dayStartUtc) {
   let candidates = 0;
   let entered = 0;
   const blockers = new Map();
-  for (const s of ["A", "B"]) {
-    const f = db.funnelForStrategy(s, dayStartUtc);
-    candidates += f.candidates;
-    entered += f.entered;
-    for (const [g, c] of f.blockers) blockers.set(g, (blockers.get(g) || 0) + c);
-  }
+  const f = db.funnelForStrategy("B", dayStartUtc);
+  candidates = f.candidates;
+  entered = f.entered;
+  for (const [g, c] of f.blockers) blockers.set(g, c);
   lines.push(`Candidates scanned: ${candidates}`);
   lines.push(`Entered: ${entered} | Rejected: ${candidates - entered}`);
   if (blockers.size) {
@@ -309,27 +297,10 @@ function last5Report() {
   return lines.join("\n");
 }
 
-/** Current gate thresholds for both strategies. */
+/** Current gate thresholds for the active strategy. */
 function gatesReport() {
   const lines = ["*Gate Thresholds*", ""];
-  const aConsts = lib.parseScriptConstants(path.join(SCRIPT_DIR, "run_paper_loop.py"));
   const bConsts = lib.parseScriptConstants(path.join(SCRIPT_DIR, "run_strategy_b.py"));
-
-  const aHolder = aConsts.HOLDER_MAX_PCT || 80;
-  lines.push("*Strategy A (run_paper_loop.py)*");
-  lines.push(`Top-10 holder max: ${aHolder}%`);
-  const aTrail = lib.pyNum(aConsts.TRAILING_STOP_PCT);
-  const aHard = lib.pyNum(aConsts.HARD_STOP_PCT);
-  const aTime = lib.pyNum(aConsts.TIME_STOP_MINUTES);
-  const aSize = lib.pyNum(aConsts.PAPER_SIZE_SOL);
-  const aMaxOpen = lib.pyNum(aConsts.MAX_OPEN_POSITIONS);
-  if (aTrail != null) lines.push(`Trailing stop: ${aTrail.toFixed(0)}%`);
-  if (aHard != null) lines.push(`Hard stop: ${aHard.toFixed(0)}%`);
-  if (aTime != null) lines.push(`Time stop: ${aTime}m`);
-  if (aSize != null) lines.push(`Position size: ${aSize} SOL`);
-  if (aMaxOpen != null) lines.push(`Max open: ${aMaxOpen}`);
-  lines.push("");
-
   lines.push("*Strategy B (run_strategy_b.py)*");
   const cfg = db.latestGateConfig("B");
   if (cfg) {
@@ -376,13 +347,12 @@ function helpReport() {
   return [
     "*Available commands*",
     "",
-    "pnl — today's PnL by strategy",
+    "pnl — today's Strategy B PnL",
     "check — loop health, last trade, recent errors",
     "status — gate funnel + auto-tuner state",
     "today — full day summary",
     "last 5 — last 5 closed trades",
     "gates — current gate thresholds",
-    "kill A / start A — stop/start Strategy A",
     "kill B / start B — stop/start Strategy B",
   ].join("\n");
 }

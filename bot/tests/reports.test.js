@@ -158,13 +158,12 @@ test("pnlReport splits strategies and filters to today", () => {
   const { dayStart } = seedFixture(p);
   db.initDb(p);
   const out = reports.pnlReport(dayStart);
-  assert.match(out, /\*Strategy A\*/);
   assert.match(out, /\*Strategy B\*/);
-  assert.match(out, /Closed: 1 trade/); // A today
-  assert.match(out, /\+0\.01 SOL/); // A best today
+  assert.doesNotMatch(out, /Strategy A/);
+  assert.match(out, /Closed: 2 trades/); // B today
   assert.match(out, /-0\.02 SOL/); // B today = -0.05 + 0.03
   assert.match(out, /Win rate: 50%/); // B: 1 win of 2
-  assert.match(out, /All-time: -0\.03 SOL/); // +0.01 -0.05 +0.03 -0.02
+  assert.match(out, /All-time: -0\.02 SOL/); // B only
   assert.match(out, /Open positions: 1/);
   fs.rmSync(path.dirname(p), { recursive: true, force: true });
 });
@@ -243,14 +242,12 @@ test("streakLabel ignores an untraded today row at the midnight wire", () => {
   assert.strictEqual(reports.streakLabel(tradedToday), "0 (flat)");
 });
 
-test("gatesReport parses both strategy scripts", () => {
+test("gatesReport parses the active strategy script", () => {
   const p = makeFixtureDb();
   seedFixture(p);
   db.initDb(p);
   const out = reports.gatesReport();
-  assert.match(out, /\*Strategy A \(run_paper_loop\.py\)\*/);
-  assert.match(out, /Trailing stop: 3%/);
-  assert.match(out, /Hard stop: 8%/);
+  assert.doesNotMatch(out, /Strategy A|run_paper_loop\.py/);
   assert.match(out, /\*Strategy B \(run_strategy_b\.py\)\*/);
   assert.match(out, /Tuner config id 1/);
   assert.match(out, /min mcap: \$2,000/);
@@ -260,9 +257,10 @@ test("gatesReport parses both strategy scripts", () => {
   fs.rmSync(path.dirname(p), { recursive: true, force: true });
 });
 
-test("helpReport lists all commands", () => {
+test("helpReport lists Strategy B commands", () => {
   const out = reports.helpReport();
-  for (const c of ["pnl", "check", "status", "today", "last 5", "gates", "kill A / start A", "kill B / start B"]) {
+  for (const c of ["pnl", "check", "status", "today", "last 5", "gates", "kill B / start B"]) {
     assert.match(out, new RegExp(c.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
   }
+  assert.doesNotMatch(out, /Strategy A|kill A|start A/);
 });
