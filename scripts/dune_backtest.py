@@ -116,14 +116,22 @@ def read_graduations(path: Path) -> list[Graduation]:
             mint = _value(row, "mint_address", "mint")
             if not mint:
                 continue
+            market_cap = _number(_value(
+                row, "market_cap_usd_at_graduation", "market_cap_usd", "mcap_usd",
+            ))
+            min_price_usd = _number(_value(row, "min_price_usd"))
             results.append(Graduation(
                 mint_address=mint,
-                graduation_timestamp=_timestamp(_value(row, "graduation_timestamp")),
+                graduation_timestamp=_timestamp(_value(row, "graduation_timestamp", "first_trade")),
                 age_minutes=_number(_value(row, "age_minutes_at_graduation", "age_minutes")),
-                market_cap_usd=_number(_value(
-                    row, "market_cap_usd_at_graduation", "market_cap_usd", "mcap_usd",
+                # Query A V1 exposes token price but not token supply. Pump.fun
+                # conventionally uses 1B supply, so retain this as an estimate.
+                market_cap_usd=market_cap if market_cap is not None else (
+                    min_price_usd * 1_000_000_000 if min_price_usd is not None else None
+                ),
+                volume_usd=_number(_value(
+                    row, "volume_usd_first_30m", "volume_usd", "total_volume_usd",
                 )),
-                volume_usd=_number(_value(row, "volume_usd_first_30m", "volume_usd")),
                 buys=_integer(_value(row, "buy_count_first_30m", "buys", "buy_count")),
                 sells=_integer(_value(row, "sell_count_first_30m", "sells", "sell_count")),
                 liquidity_proxy_usd=_number(_value(
@@ -343,7 +351,7 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--input-dir", type=Path, default=DEFAULT_INPUT_DIR)
     parser.add_argument("--graduations", type=Path, help="Query A CSV (default: input-dir/graduated_tokens.csv)")
-    parser.add_argument("--swaps", type=Path, help="Query B CSV (default: input-dir/graduated_token_swaps.csv)")
+    parser.add_argument("--swaps", type=Path, help="Query B CSV (default: input-dir/token_swaps.csv)")
     parser.add_argument("--output-dir", type=Path, default=DEFAULT_OUTPUT_DIR)
     parser.add_argument("--paper-db", type=Path, default=DEFAULT_PAPER_DB)
     return parser.parse_args()
@@ -352,7 +360,7 @@ def parse_args() -> argparse.Namespace:
 def main() -> None:
     args = parse_args()
     graduations = args.graduations or args.input_dir / "graduated_tokens.csv"
-    swaps = args.swaps or args.input_dir / "graduated_token_swaps.csv"
+    swaps = args.swaps or args.input_dir / "token_swaps.csv"
     missing = [str(path) for path in (graduations, swaps) if not path.is_file()]
     if missing:
         raise SystemExit("Missing Dune CSV export(s): " + ", ".join(missing))
