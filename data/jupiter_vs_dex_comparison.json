@@ -1,0 +1,370 @@
+[
+  {
+    "run_idx": 1,
+    "captured_at": "2026-08-14T19:02:27.603505+00:00",
+    "jupiter": {
+      "by_source": {
+        "recent": 30,
+        "organic5m": 100,
+        "trending5m": 75
+      },
+      "total_unique": 205,
+      "gate_passed": [
+        {
+          "source": "trending5m",
+          "mint": "9BgngP6c4hJzcw9bKF5uqrDzCt12pSooo8PBibAPpump",
+          "symbol": "jerboa",
+          "name": "long-eared jerboa",
+          "age_minutes": 2.0857991833333336,
+          "mcap": 16958.991015259417,
+          "fdv": 16958.991015259417,
+          "volume_5m_usd": 38644.60197280136,
+          "num_buys": 767,
+          "num_sells": 471,
+          "buy_sell_ratio": 1.6284501061571126,
+          "organic_score": 0,
+          "mint_authority_disabled": true,
+          "freeze_authority_disabled": true,
+          "is_sus": null,
+          "holder_count": 246,
+          "liquidity": 6396.507733272758
+        }
+      ],
+      "gate_pass_count": 1
+    },
+    "dexscreener": {
+      "error": "browser-pc capture failed (Cloudflare/security page?): dexscreener.com\nPerforming security verification\n\nThis website uses a security service to protect against malicious bots. This page is displayed while the website verifies you are not a bot.\n\nRay ID: ",
+      "total": 0,
+      "gate_pass_count": 0,
+      "gate_passed": []
+    },
+    "overlap": {
+      "both": [],
+      "jupiter_only": [
+        "9BgngP6c4hJzcw9bKF5uqrDzCt12pSooo8PBibAPpump"
+      ],
+      "dexscreener_only": [],
+      "overlap_pct": null
+    }
+  },
+  {
+    "run_idx": 2,
+    "captured_at": "2026-08-14T19:09:04.779263+00:00",
+    "jupiter": {
+      "by_source": {
+        "recent": 30,
+        "organic5m": 100,
+        "trending5m": 77
+      },
+      "total_unique": 207,
+      "gate_passed": [
+        {
+          "source": "recent",
+          "mint": "AHCjjNGBo7CK6jTb4ju7znzqXcx2FDnwu4HbDALNEXpS",
+          "symbol": "LINK",
+          "name": "ChainLink Token",
+          "age_minutes": 1.2639688333333334,
+          "mcap": 15931.90746134561,
+          "fdv": 15931.90746134561,
+          "volume_5m_usd": 30722.096573121424,
+          "num_buys": 334,
+          "num_sells": 158,
+          "buy_sell_ratio": 2.1139240506329116,
+          "organic_score": 0,
+          "mint_authority_disabled": true,
+          "freeze_authority_disabled": true,
+          "is_sus": null,
+          "holder_count": 183,
+          "liquidity": 10071.483798282221
+        },
+        {
+          "source": "recent",
+          "mint": "H5NikX3mGFfxM5bN6jy9zQEss1qMH4iZvu9dWECVFyYp",
+          "symbol": "Snoovatars",
+          "name": "Reddit Snoovatars",
+          "age_minutes": 1.5639688333333335,
+          "mcap": 14673.77596017492,
+          "fdv": 14673.77596017492,
+          "volume_5m_usd": 1989.1394411446495,
+          "num_buys": 200,
+          "num_sells": 78,
+          "buy_sell_ratio": 2.5641025641025643,
+          "organic_score": 0,
+          "mint_authority_disabled": true,
+          "freeze_authority_disabled": true,
+          "is_sus": null,
+          "holder_count": 135,
+          "liquidity": 721.8904171442979
+        },
+        {
+          "source": "trending5m",
+          "mint": "3zcFX7bhxU42VSt3EHvZYyTWruGUt6EppT92SjiWpump",
+          "symbol": "Avatars",
+          "name": "Reddit Avatars",
+          "age_minutes": 4.297302166666666,
+          "mcap": 10070.802390783754,
+          "fdv": 10070.802390783754,
+          "volume_5m_usd": 34224.06427185447,
+          "num_buys": 646,
+          "num_sells": 631,
+          "buy_sell_ratio": 1.0237717908082409,
+          "organic_score": 0,
+          "mint_authority_disabled": true,
+          "freeze_authority_disabled": true,
+          "is_sus": null,
+          "holder_count": 126,
+          "liquidity": 4930.519499031765
+        }
+      ],
+      "gate_pass_count": 3
+    },
+    "dexscreener": {
+      "error": null,
+      "total": 7,
+      "gate_pass_count": 3,
+      "gate_passed": [
+        {
+          "source": "dexscreener",
+          "mint": "9dJS9nXQSxJYr8wDNuTmn2CjNCxo5Pjhxc4g6goQjpyx",
+          "symbol": "Gringott",
+          "name": "Gringott",
+          "age_minutes": 20.420703678385415,
+          "mcap": 46081.0,
+          "fdv": 46081.0,
+          "volume_5m_usd": 240636.15,
+          "num_buys": 3997,
+          "num_sells": 2260,
+          "buy_sell_ratio": 1.7685840707964602,
+          "organic_score": null,
+          "mint_authority_disabled": null,
+          "freeze_authority_disabled": null,
+          "is_sus": null,
+          "holder_count": null,
+          "liquidity": 0.0
+        },
+        {
+          "source": "dexscreener",
+          "mint": "FFdcYikoHdw6qAiqdFvCXm6JBxu9sat6fhsaxQmDY6jM",
+          "symbol": "honse",
+          "name": "honse",
+          "age_minutes": 8.470703678385417,
+          "mcap": 24524.0,
+          "fdv": 24524.0,
+          "volume_5m_usd": 231170.39,
+          "num_buys": 3609,
+          "num_sells": 1470,
+          "buy_sell_ratio": 2.4551020408163264,
+          "organic_score": null,
+          "mint_authority_disabled": null,
+          "freeze_authority_disabled": null,
+          "is_sus": null,
+          "holder_count": null,
+          "liquidity": 25789.82
+        },
+        {
+          "source": "dexscreener",
+          "mint": "7taq7JycG3ZfUUfFf9QbcH8XVP5QrMTifr1g6Un7i7GS",
+          "symbol": "cc",
+          "name": "cc",
+          "age_minutes": 1.7373703450520834,
+          "mcap": 13206.62,
+          "fdv": 13206.62,
+          "volume_5m_usd": 1678.98,
+          "num_buys": 166,
+          "num_sells": 63,
+          "buy_sell_ratio": 2.634920634920635,
+          "organic_score": null,
+          "mint_authority_disabled": null,
+          "freeze_authority_disabled": null,
+          "is_sus": null,
+          "holder_count": null,
+          "liquidity": 0.0
+        }
+      ]
+    },
+    "overlap": {
+      "both": [],
+      "jupiter_only": [
+        "3zcFX7bhxU42VSt3EHvZYyTWruGUt6EppT92SjiWpump",
+        "AHCjjNGBo7CK6jTb4ju7znzqXcx2FDnwu4HbDALNEXpS",
+        "H5NikX3mGFfxM5bN6jy9zQEss1qMH4iZvu9dWECVFyYp"
+      ],
+      "dexscreener_only": [
+        "7taq7JycG3ZfUUfFf9QbcH8XVP5QrMTifr1g6Un7i7GS",
+        "9dJS9nXQSxJYr8wDNuTmn2CjNCxo5Pjhxc4g6goQjpyx",
+        "FFdcYikoHdw6qAiqdFvCXm6JBxu9sat6fhsaxQmDY6jM"
+      ],
+      "overlap_pct": 0.0
+    }
+  },
+  {
+    "run_idx": 3,
+    "captured_at": "2026-08-14T19:19:27.771641+00:00",
+    "jupiter": {
+      "by_source": {
+        "recent": 30,
+        "organic5m": 100,
+        "trending5m": 74
+      },
+      "total_unique": 204,
+      "gate_passed": [
+        {
+          "source": "recent",
+          "mint": "Ah9ScTfbik2s5GvzPJNgSucW3PMAgT1sT8AY1zr9pump",
+          "symbol": "IZZY",
+          "name": "Isabella Cognita",
+          "age_minutes": 0.17975843333333333,
+          "mcap": 8947.686369046123,
+          "fdv": 8947.686369046123,
+          "volume_5m_usd": 3243.8205293796514,
+          "num_buys": 38,
+          "num_sells": 12,
+          "buy_sell_ratio": 3.1666666666666665,
+          "organic_score": 0,
+          "mint_authority_disabled": true,
+          "freeze_authority_disabled": true,
+          "is_sus": null,
+          "holder_count": 11,
+          "liquidity": 4656.2499249258835
+        },
+        {
+          "source": "recent",
+          "mint": "7rsyHbBarmv2hmybYEoYsV9Ej5VrChko1yXoA9C535pL",
+          "symbol": "IZZY",
+          "name": "Isabella Cognita",
+          "age_minutes": 0.3130917666666667,
+          "mcap": 6878.470556259078,
+          "fdv": 6878.470556259078,
+          "volume_5m_usd": 7562.705773354168,
+          "num_buys": 60,
+          "num_sells": 38,
+          "buy_sell_ratio": 1.5789473684210527,
+          "organic_score": 0,
+          "mint_authority_disabled": true,
+          "freeze_authority_disabled": true,
+          "is_sus": null,
+          "holder_count": 32,
+          "liquidity": 4140.693300464097
+        },
+        {
+          "source": "recent",
+          "mint": "DygrJURwMajCALtc6AczeaidjRi8GMsZVtnNRo5epump",
+          "symbol": "$tren.ch",
+          "name": "Trenches",
+          "age_minutes": 0.5630917666666666,
+          "mcap": 7459.089182801525,
+          "fdv": 7459.089182801525,
+          "volume_5m_usd": 1997.8873763342617,
+          "num_buys": 3,
+          "num_sells": 0,
+          "buy_sell_ratio": 3.0,
+          "organic_score": 0,
+          "mint_authority_disabled": true,
+          "freeze_authority_disabled": true,
+          "is_sus": null,
+          "holder_count": 4,
+          "liquidity": 4237.353628340589
+        },
+        {
+          "source": "recent",
+          "mint": "2w1YKqcDTyqXorg3WGyUKRA4V4aoGhFyRJnsmGetpump",
+          "symbol": "IZZY",
+          "name": "Isabella Cognita",
+          "age_minutes": 0.6130917666666666,
+          "mcap": 10445.875253794815,
+          "fdv": 10445.875253794815,
+          "volume_5m_usd": 15097.10457212506,
+          "num_buys": 177,
+          "num_sells": 132,
+          "buy_sell_ratio": 1.3409090909090908,
+          "organic_score": 0,
+          "mint_authority_disabled": true,
+          "freeze_authority_disabled": true,
+          "is_sus": null,
+          "holder_count": 65,
+          "liquidity": 5755.150444183426
+        },
+        {
+          "source": "trending5m",
+          "mint": "4orPtYYCTpCZbmhLiNkQ1mcQG7hgpHynYCV3ppC7pump",
+          "symbol": "ISABELLA",
+          "name": "Isabella Cognita",
+          "age_minutes": 5.113091766666667,
+          "mcap": 20669.653652018307,
+          "fdv": 20669.653652018307,
+          "volume_5m_usd": 201814.04231806973,
+          "num_buys": 2541,
+          "num_sells": 2363,
+          "buy_sell_ratio": 1.075327972915785,
+          "organic_score": 0,
+          "mint_authority_disabled": true,
+          "freeze_authority_disabled": true,
+          "is_sus": null,
+          "holder_count": 503,
+          "liquidity": 4038.668954509274
+        }
+      ],
+      "gate_pass_count": 5
+    },
+    "dexscreener": {
+      "error": null,
+      "total": 5,
+      "gate_pass_count": 2,
+      "gate_passed": [
+        {
+          "source": "dexscreener",
+          "mint": "62gHgRpbQrx82YsmM2jnbTwkcFMteNmUd6fax6x1FJU7",
+          "symbol": "Burqa",
+          "name": "Burqa",
+          "age_minutes": 8.822991324869792,
+          "mcap": 23914.0,
+          "fdv": 23914.0,
+          "volume_5m_usd": 146485.13,
+          "num_buys": 3464,
+          "num_sells": 1277,
+          "buy_sell_ratio": 2.7126076742364917,
+          "organic_score": null,
+          "mint_authority_disabled": null,
+          "freeze_authority_disabled": null,
+          "is_sus": null,
+          "holder_count": null,
+          "liquidity": 25154.86
+        },
+        {
+          "source": "dexscreener",
+          "mint": "FFdcYikoHdw6qAiqdFvCXm6JBxu9sat6fhsaxQmDY6jM",
+          "symbol": "honse",
+          "name": "honse",
+          "age_minutes": 18.856324658203125,
+          "mcap": 26281.0,
+          "fdv": 26281.0,
+          "volume_5m_usd": 411383.32,
+          "num_buys": 5410,
+          "num_sells": 2598,
+          "buy_sell_ratio": 2.082371054657429,
+          "organic_score": null,
+          "mint_authority_disabled": null,
+          "freeze_authority_disabled": null,
+          "is_sus": null,
+          "holder_count": null,
+          "liquidity": 0.0
+        }
+      ]
+    },
+    "overlap": {
+      "both": [],
+      "jupiter_only": [
+        "2w1YKqcDTyqXorg3WGyUKRA4V4aoGhFyRJnsmGetpump",
+        "4orPtYYCTpCZbmhLiNkQ1mcQG7hgpHynYCV3ppC7pump",
+        "7rsyHbBarmv2hmybYEoYsV9Ej5VrChko1yXoA9C535pL",
+        "Ah9ScTfbik2s5GvzPJNgSucW3PMAgT1sT8AY1zr9pump",
+        "DygrJURwMajCALtc6AczeaidjRi8GMsZVtnNRo5epump"
+      ],
+      "dexscreener_only": [
+        "62gHgRpbQrx82YsmM2jnbTwkcFMteNmUd6fax6x1FJU7",
+        "FFdcYikoHdw6qAiqdFvCXm6JBxu9sat6fhsaxQmDY6jM"
+      ],
+      "overlap_pct": 0.0
+    }
+  }
+]
