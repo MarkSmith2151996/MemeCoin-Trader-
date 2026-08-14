@@ -1,0 +1,975 @@
+{
+  "generated_at": "2026-08-14T22:28:08Z",
+  "task": "MT-548",
+  "method": "Jupiter GET /tokens/v2/search?query={mint} (x-api-key) vs DexScreener GET /latest/dex/search?q={mint}; 250ms spacing, alternating order",
+  "db_path": "/home/dev/projects/memecoin-trader/data/trades.db",
+  "mints_checked": 50,
+  "drift_firstPool_stats": {
+    "n": 50,
+    "mean": 0.0,
+    "median": 0.0,
+    "max": 0.0,
+    "gt_10": 0,
+    "gt_22": 0
+  },
+  "drift_graduated_stats": {
+    "n": 28,
+    "mean": 5.51,
+    "median": 2.13,
+    "max": 58.87,
+    "gt_10": 3,
+    "gt_22": 2
+  },
+  "results": {
+    "6EnEMm3At9C84U26hEcJjC6dwUkacaq6BArzaMwypump": {
+      "mint_address": "6EnEMm3At9C84U26hEcJjC6dwUkacaq6BArzaMwypump",
+      "jupiter": {
+        "found": true,
+        "error": null,
+        "firstPoolCreatedAt": "2026-08-14T06:45:40Z",
+        "firstPoolCreatedAtMs": 1786689940000,
+        "graduatedAt": "2026-08-14T07:13:29Z",
+        "graduatedAtMs": 1786691609000,
+        "graduatedPool": "Dz5k9brcVSgjEbbCBs52Zg2PH7mauex7RLeY9fjkz8qK",
+        "launchpad": "pump.fun"
+      },
+      "dexscreener": {
+        "error": null,
+        "pairCreatedAtMs": 1786689940000
+      },
+      "drift_first_minutes": 0.0,
+      "drift_graduated_minutes": 27.816666666666666
+    },
+    "GWB4bgUusTUpWV4PvyFvTtfC153HeA1p926kB556unnb": {
+      "mint_address": "GWB4bgUusTUpWV4PvyFvTtfC153HeA1p926kB556unnb",
+      "jupiter": {
+        "found": true,
+        "error": null,
+        "firstPoolCreatedAt": "2026-08-14T06:42:10Z",
+        "firstPoolCreatedAtMs": 1786689730000,
+        "graduatedAt": null,
+        "graduatedAtMs": null,
+        "graduatedPool": null,
+        "launchpad": null
+      },
+      "dexscreener": {
+        "error": null,
+        "pairCreatedAtMs": 1786689730000
+      },
+      "drift_first_minutes": 0.0,
+      "drift_graduated_minutes": null
+    },
+    "334nwnh1cUr1SHA2vXqyZMSghKZ6cBBrzt2wSmfvKmQP": {
+      "mint_address": "334nwnh1cUr1SHA2vXqyZMSghKZ6cBBrzt2wSmfvKmQP",
+      "jupiter": {
+        "found": true,
+        "error": null,
+        "firstPoolCreatedAt": "2026-08-14T06:35:42Z",
+        "firstPoolCreatedAtMs": 1786689342000,
+        "graduatedAt": null,
+        "graduatedAtMs": null,
+        "graduatedPool": null,
+        "launchpad": null
+      },
+      "dexscreener": {
+        "error": null,
+        "pairCreatedAtMs": 1786689342000
+      },
+      "drift_first_minutes": 0.0,
+      "drift_graduated_minutes": null
+    },
+    "C4avJvx4k9ifWcsqE63ZPm3Tgc4CtMkxHNWuPejeEVsK": {
+      "mint_address": "C4avJvx4k9ifWcsqE63ZPm3Tgc4CtMkxHNWuPejeEVsK",
+      "jupiter": {
+        "found": true,
+        "error": null,
+        "firstPoolCreatedAt": "2026-08-14T06:35:38Z",
+        "firstPoolCreatedAtMs": 1786689338000,
+        "graduatedAt": "2026-08-14T06:36:08Z",
+        "graduatedAtMs": 1786689368000,
+        "graduatedPool": "J3mSVA8J5TPX9MgTmAoN2tXmVPePEtd4U4Avuyx8MHiu",
+        "launchpad": "met-dbc"
+      },
+      "dexscreener": {
+        "error": null,
+        "pairCreatedAtMs": 1786689338000
+      },
+      "drift_first_minutes": 0.0,
+      "drift_graduated_minutes": 0.5
+    },
+    "DRmKh6J9uu2JotmmbAG7sMfFfghCmUGpPcPoxiUdx9NX": {
+      "mint_address": "DRmKh6J9uu2JotmmbAG7sMfFfghCmUGpPcPoxiUdx9NX",
+      "jupiter": {
+        "found": true,
+        "error": null,
+        "firstPoolCreatedAt": "2026-08-14T06:30:57Z",
+        "firstPoolCreatedAtMs": 1786689057000,
+        "graduatedAt": "2026-08-14T06:34:11Z",
+        "graduatedAtMs": 1786689251000,
+        "graduatedPool": "LKB38dR2Htbbbr13ubTJceYuzChE5AixkzRnrmjF4mB",
+        "launchpad": "met-dbc"
+      },
+      "dexscreener": {
+        "error": null,
+        "pairCreatedAtMs": 1786689057000
+      },
+      "drift_first_minutes": 0.0,
+      "drift_graduated_minutes": 3.2333333333333334
+    },
+    "EakpLEz8mgcoRSLsbvxuKNwBLSNvmuEfQyv6RY4EdyqL": {
+      "mint_address": "EakpLEz8mgcoRSLsbvxuKNwBLSNvmuEfQyv6RY4EdyqL",
+      "jupiter": {
+        "found": true,
+        "error": null,
+        "firstPoolCreatedAt": "2026-08-14T06:22:50Z",
+        "firstPoolCreatedAtMs": 1786688570000,
+        "graduatedAt": null,
+        "graduatedAtMs": null,
+        "graduatedPool": null,
+        "launchpad": null
+      },
+      "dexscreener": {
+        "error": null,
+        "pairCreatedAtMs": 1786688570000
+      },
+      "drift_first_minutes": 0.0,
+      "drift_graduated_minutes": null
+    },
+    "558FkhDQbjkRMHhvxDPeGbUqLAutXzyFf255R4P6w9F5": {
+      "mint_address": "558FkhDQbjkRMHhvxDPeGbUqLAutXzyFf255R4P6w9F5",
+      "jupiter": {
+        "found": true,
+        "error": null,
+        "firstPoolCreatedAt": "2026-08-14T06:19:17Z",
+        "firstPoolCreatedAtMs": 1786688357000,
+        "graduatedAt": null,
+        "graduatedAtMs": null,
+        "graduatedPool": null,
+        "launchpad": null
+      },
+      "dexscreener": {
+        "error": null,
+        "pairCreatedAtMs": 1786688357000
+      },
+      "drift_first_minutes": 0.0,
+      "drift_graduated_minutes": null
+    },
+    "7aQNdbQ9UXLFMnMgZeNkZXBSvZcmND9pFbReKKxCpump": {
+      "mint_address": "7aQNdbQ9UXLFMnMgZeNkZXBSvZcmND9pFbReKKxCpump",
+      "jupiter": {
+        "found": true,
+        "error": null,
+        "firstPoolCreatedAt": "2026-08-14T06:06:39Z",
+        "firstPoolCreatedAtMs": 1786687599000,
+        "graduatedAt": "2026-08-14T06:17:33Z",
+        "graduatedAtMs": 1786688253000,
+        "graduatedPool": "5uVSAxduhfprrJwtTZgNGEX46zPZ7qC2s8H897jdGUMt",
+        "launchpad": "pump.fun"
+      },
+      "dexscreener": {
+        "error": null,
+        "pairCreatedAtMs": 1786687599000
+      },
+      "drift_first_minutes": 0.0,
+      "drift_graduated_minutes": 10.9
+    },
+    "21LmmemW4uKFAH515D1cyRQ25ZWJZ9SmjZSde6YjMoKV": {
+      "mint_address": "21LmmemW4uKFAH515D1cyRQ25ZWJZ9SmjZSde6YjMoKV",
+      "jupiter": {
+        "found": true,
+        "error": null,
+        "firstPoolCreatedAt": "2026-08-14T06:07:21Z",
+        "firstPoolCreatedAtMs": 1786687641000,
+        "graduatedAt": "2026-08-14T06:08:07Z",
+        "graduatedAtMs": 1786687687000,
+        "graduatedPool": "3R8oz1Ro3DF2GEPkTq5kZKA2oB6dGqyrUBbZERptJ3a3",
+        "launchpad": "met-dbc"
+      },
+      "dexscreener": {
+        "error": null,
+        "pairCreatedAtMs": 1786687641000
+      },
+      "drift_first_minutes": 0.0,
+      "drift_graduated_minutes": 0.7666666666666667
+    },
+    "4dLX2vUYSGohLSWLpq3Sr6ctEToc79M3jBThBUoCjSm1": {
+      "mint_address": "4dLX2vUYSGohLSWLpq3Sr6ctEToc79M3jBThBUoCjSm1",
+      "jupiter": {
+        "found": true,
+        "error": null,
+        "firstPoolCreatedAt": "2026-08-14T06:04:41Z",
+        "firstPoolCreatedAtMs": 1786687481000,
+        "graduatedAt": "2026-08-14T06:07:53Z",
+        "graduatedAtMs": 1786687673000,
+        "graduatedPool": "H3ba3XfBchaMqgSKkuHc1TEDv8eixTPWDCHZYHuVcr4K",
+        "launchpad": "met-dbc"
+      },
+      "dexscreener": {
+        "error": null,
+        "pairCreatedAtMs": 1786687481000
+      },
+      "drift_first_minutes": 0.0,
+      "drift_graduated_minutes": 3.2
+    },
+    "GvgU5Bx2xZBaHXtNu3DZ7CuAHGHcLtaJLtL3224qVCUn": {
+      "mint_address": "GvgU5Bx2xZBaHXtNu3DZ7CuAHGHcLtaJLtL3224qVCUn",
+      "jupiter": {
+        "found": true,
+        "error": null,
+        "firstPoolCreatedAt": "2026-08-14T05:58:18Z",
+        "firstPoolCreatedAtMs": 1786687098000,
+        "graduatedAt": null,
+        "graduatedAtMs": null,
+        "graduatedPool": null,
+        "launchpad": null
+      },
+      "dexscreener": {
+        "error": null,
+        "pairCreatedAtMs": 1786687098000
+      },
+      "drift_first_minutes": 0.0,
+      "drift_graduated_minutes": null
+    },
+    "DL9YdRrjBdU8rNPzpssgnnmFg37XSj8pWGJnfYnnyNhs": {
+      "mint_address": "DL9YdRrjBdU8rNPzpssgnnmFg37XSj8pWGJnfYnnyNhs",
+      "jupiter": {
+        "found": true,
+        "error": null,
+        "firstPoolCreatedAt": "2026-08-14T05:56:56Z",
+        "firstPoolCreatedAtMs": 1786687016000,
+        "graduatedAt": null,
+        "graduatedAtMs": null,
+        "graduatedPool": null,
+        "launchpad": null
+      },
+      "dexscreener": {
+        "error": null,
+        "pairCreatedAtMs": 1786687016000
+      },
+      "drift_first_minutes": 0.0,
+      "drift_graduated_minutes": null
+    },
+    "4w4fwCjwJ2kxyBVSS7UzrK2LaYzDAmaMDYzudbPQpump": {
+      "mint_address": "4w4fwCjwJ2kxyBVSS7UzrK2LaYzDAmaMDYzudbPQpump",
+      "jupiter": {
+        "found": true,
+        "error": null,
+        "firstPoolCreatedAt": "2026-08-14T05:56:36Z",
+        "firstPoolCreatedAtMs": 1786686996000,
+        "graduatedAt": null,
+        "graduatedAtMs": null,
+        "graduatedPool": null,
+        "launchpad": "pump.fun"
+      },
+      "dexscreener": {
+        "error": null,
+        "pairCreatedAtMs": 1786686996000
+      },
+      "drift_first_minutes": 0.0,
+      "drift_graduated_minutes": null
+    },
+    "GDywv4M73wc2DZfHkKrTScBYyrzC7Qc8g8kvfgh186uL": {
+      "mint_address": "GDywv4M73wc2DZfHkKrTScBYyrzC7Qc8g8kvfgh186uL",
+      "jupiter": {
+        "found": true,
+        "error": null,
+        "firstPoolCreatedAt": "2026-08-14T05:54:14Z",
+        "firstPoolCreatedAtMs": 1786686854000,
+        "graduatedAt": null,
+        "graduatedAtMs": null,
+        "graduatedPool": null,
+        "launchpad": null
+      },
+      "dexscreener": {
+        "error": null,
+        "pairCreatedAtMs": 1786686854000
+      },
+      "drift_first_minutes": 0.0,
+      "drift_graduated_minutes": null
+    },
+    "8tqbkiA83KaevvHcS9UPvgLeX5j2TonePLb7cjMGpump": {
+      "mint_address": "8tqbkiA83KaevvHcS9UPvgLeX5j2TonePLb7cjMGpump",
+      "jupiter": {
+        "found": true,
+        "error": null,
+        "firstPoolCreatedAt": "2026-08-14T05:50:59Z",
+        "firstPoolCreatedAtMs": 1786686659000,
+        "graduatedAt": null,
+        "graduatedAtMs": null,
+        "graduatedPool": null,
+        "launchpad": "pump.fun"
+      },
+      "dexscreener": {
+        "error": null,
+        "pairCreatedAtMs": 1786686659000
+      },
+      "drift_first_minutes": 0.0,
+      "drift_graduated_minutes": null
+    },
+    "4KagmpNaGA91ZdFxsXk2f7P3LZ8WJpf8T7nxBJDYV4Qp": {
+      "mint_address": "4KagmpNaGA91ZdFxsXk2f7P3LZ8WJpf8T7nxBJDYV4Qp",
+      "jupiter": {
+        "found": true,
+        "error": null,
+        "firstPoolCreatedAt": "2026-08-14T05:51:34Z",
+        "firstPoolCreatedAtMs": 1786686694000,
+        "graduatedAt": null,
+        "graduatedAtMs": null,
+        "graduatedPool": null,
+        "launchpad": null
+      },
+      "dexscreener": {
+        "error": null,
+        "pairCreatedAtMs": 1786686694000
+      },
+      "drift_first_minutes": 0.0,
+      "drift_graduated_minutes": null
+    },
+    "7CyZQjVCND6epMVAByXkeTPJYAXYuDoVm492Cn6jDXps": {
+      "mint_address": "7CyZQjVCND6epMVAByXkeTPJYAXYuDoVm492Cn6jDXps",
+      "jupiter": {
+        "found": true,
+        "error": null,
+        "firstPoolCreatedAt": "2026-08-14T05:48:30Z",
+        "firstPoolCreatedAtMs": 1786686510000,
+        "graduatedAt": "2026-08-14T05:50:25Z",
+        "graduatedAtMs": 1786686625000,
+        "graduatedPool": "FR6i2Xa3DCAn5nNR59kKoCBDBebReodayAh9wgqHfQWS",
+        "launchpad": "met-dbc"
+      },
+      "dexscreener": {
+        "error": null,
+        "pairCreatedAtMs": 1786686510000
+      },
+      "drift_first_minutes": 0.0,
+      "drift_graduated_minutes": 1.9166666666666667
+    },
+    "AzXuLSSRkj3kDCgSx8C3MvHMDSAk8TcUZcjhYciQpump": {
+      "mint_address": "AzXuLSSRkj3kDCgSx8C3MvHMDSAk8TcUZcjhYciQpump",
+      "jupiter": {
+        "found": true,
+        "error": null,
+        "firstPoolCreatedAt": "2026-08-14T05:44:15Z",
+        "firstPoolCreatedAtMs": 1786686255000,
+        "graduatedAt": "2026-08-14T06:43:07Z",
+        "graduatedAtMs": 1786689787000,
+        "graduatedPool": "B8Rhz3QxgPscJHCfjrrHnxVHLNzFgFB6n3ADRfGoVxr4",
+        "launchpad": "pump.fun"
+      },
+      "dexscreener": {
+        "error": null,
+        "pairCreatedAtMs": 1786686255000
+      },
+      "drift_first_minutes": 0.0,
+      "drift_graduated_minutes": 58.86666666666667
+    },
+    "C5EWCHjV7sbhBoRNW8rFW5FxkCGHBHqd4NEp3CMFwFQY": {
+      "mint_address": "C5EWCHjV7sbhBoRNW8rFW5FxkCGHBHqd4NEp3CMFwFQY",
+      "jupiter": {
+        "found": true,
+        "error": null,
+        "firstPoolCreatedAt": "2026-08-14T05:43:16Z",
+        "firstPoolCreatedAtMs": 1786686196000,
+        "graduatedAt": "2026-08-14T05:45:03Z",
+        "graduatedAtMs": 1786686303000,
+        "graduatedPool": "GPWFPS2t4WQVkTiPHK1tqtui9vMAAjGuWVNbh1YoJCgJ",
+        "launchpad": "met-dbc"
+      },
+      "dexscreener": {
+        "error": null,
+        "pairCreatedAtMs": 1786686196000
+      },
+      "drift_first_minutes": 0.0,
+      "drift_graduated_minutes": 1.7833333333333334
+    },
+    "3qSxm2PbrvU6eCUdi7hHHBgKvvezn4ZwB1xCqiX5AfGE": {
+      "mint_address": "3qSxm2PbrvU6eCUdi7hHHBgKvvezn4ZwB1xCqiX5AfGE",
+      "jupiter": {
+        "found": true,
+        "error": null,
+        "firstPoolCreatedAt": "2026-08-14T05:42:14Z",
+        "firstPoolCreatedAtMs": 1786686134000,
+        "graduatedAt": "2026-08-14T05:43:45Z",
+        "graduatedAtMs": 1786686225000,
+        "graduatedPool": "5XFVbHZTasJLzRzp8iZZsNFDeSXXNumRFf7DJJqwAGR1",
+        "launchpad": "met-dbc"
+      },
+      "dexscreener": {
+        "error": null,
+        "pairCreatedAtMs": 1786686134000
+      },
+      "drift_first_minutes": 0.0,
+      "drift_graduated_minutes": 1.5166666666666666
+    },
+    "DsgEKjaba8kaomBJTXhBhxUJBUYu7JZbLyFvk9sfjPjG": {
+      "mint_address": "DsgEKjaba8kaomBJTXhBhxUJBUYu7JZbLyFvk9sfjPjG",
+      "jupiter": {
+        "found": true,
+        "error": null,
+        "firstPoolCreatedAt": "2026-08-14T05:29:15Z",
+        "firstPoolCreatedAtMs": 1786685355000,
+        "graduatedAt": "2026-08-14T05:32:53Z",
+        "graduatedAtMs": 1786685573000,
+        "graduatedPool": "4QAjSbiCnACsFip5KXry3qnWTxbahR5YGEeFG9KD37dZ",
+        "launchpad": "met-dbc"
+      },
+      "dexscreener": {
+        "error": null,
+        "pairCreatedAtMs": 1786685355000
+      },
+      "drift_first_minutes": 0.0,
+      "drift_graduated_minutes": 3.6333333333333333
+    },
+    "8n7peGtGLFvnJZfFhpfpzGqC6V57s6AyCQw57GD48MkG": {
+      "mint_address": "8n7peGtGLFvnJZfFhpfpzGqC6V57s6AyCQw57GD48MkG",
+      "jupiter": {
+        "found": true,
+        "error": null,
+        "firstPoolCreatedAt": "2026-08-14T05:29:28Z",
+        "firstPoolCreatedAtMs": 1786685368000,
+        "graduatedAt": "2026-08-14T05:30:54Z",
+        "graduatedAtMs": 1786685454000,
+        "graduatedPool": "FXTpm3ace8orJRBchVqeQumq2WVVgtgi7DUq3iRoKWzq",
+        "launchpad": "met-dbc"
+      },
+      "dexscreener": {
+        "error": null,
+        "pairCreatedAtMs": 1786685368000
+      },
+      "drift_first_minutes": 0.0,
+      "drift_graduated_minutes": 1.4333333333333333
+    },
+    "B4Kg2oRQkhuAZuTre1Nx2LRMoa3NRwmeyfoUzGxujBWS": {
+      "mint_address": "B4Kg2oRQkhuAZuTre1Nx2LRMoa3NRwmeyfoUzGxujBWS",
+      "jupiter": {
+        "found": true,
+        "error": null,
+        "firstPoolCreatedAt": "2026-08-14T05:28:25Z",
+        "firstPoolCreatedAtMs": 1786685305000,
+        "graduatedAt": "2026-08-14T05:29:03Z",
+        "graduatedAtMs": 1786685343000,
+        "graduatedPool": "5AGJMbdgTsL1wWM5HjEmWj3mJeEtYr1yizMft7KRcTNF",
+        "launchpad": "met-dbc"
+      },
+      "dexscreener": {
+        "error": null,
+        "pairCreatedAtMs": 1786685305000
+      },
+      "drift_first_minutes": 0.0,
+      "drift_graduated_minutes": 0.6333333333333333
+    },
+    "3J3psREWqqRKAUsSCbx5TGsYqTvuP6SKFXvGYHxMBV8y": {
+      "mint_address": "3J3psREWqqRKAUsSCbx5TGsYqTvuP6SKFXvGYHxMBV8y",
+      "jupiter": {
+        "found": true,
+        "error": null,
+        "firstPoolCreatedAt": "2026-08-14T05:23:09Z",
+        "firstPoolCreatedAtMs": 1786684989000,
+        "graduatedAt": "2026-08-14T05:26:16Z",
+        "graduatedAtMs": 1786685176000,
+        "graduatedPool": "H6jTQa8ud3FfL3GkvrSjtRiKXiXhJTcbux32idJhJCQn",
+        "launchpad": "met-dbc"
+      },
+      "dexscreener": {
+        "error": null,
+        "pairCreatedAtMs": 1786684989000
+      },
+      "drift_first_minutes": 0.0,
+      "drift_graduated_minutes": 3.1166666666666667
+    },
+    "4JJnrPYRt3cLgaJVUWCduodAewF2gV4Bokpo793xpump": {
+      "mint_address": "4JJnrPYRt3cLgaJVUWCduodAewF2gV4Bokpo793xpump",
+      "jupiter": {
+        "found": true,
+        "error": null,
+        "firstPoolCreatedAt": "2026-08-14T05:20:57Z",
+        "firstPoolCreatedAtMs": 1786684857000,
+        "graduatedAt": null,
+        "graduatedAtMs": null,
+        "graduatedPool": null,
+        "launchpad": "pump.fun"
+      },
+      "dexscreener": {
+        "error": null,
+        "pairCreatedAtMs": 1786684857000
+      },
+      "drift_first_minutes": 0.0,
+      "drift_graduated_minutes": null
+    },
+    "3YDXFkyN9jD2oSBgifB1Hr43cf6Dd32XBDxvyd1FBxMG": {
+      "mint_address": "3YDXFkyN9jD2oSBgifB1Hr43cf6Dd32XBDxvyd1FBxMG",
+      "jupiter": {
+        "found": true,
+        "error": null,
+        "firstPoolCreatedAt": "2026-08-14T05:21:04Z",
+        "firstPoolCreatedAtMs": 1786684864000,
+        "graduatedAt": "2026-08-14T05:26:35Z",
+        "graduatedAtMs": 1786685195000,
+        "graduatedPool": "EDRwHRXxjFyZchTGa7ZZYuEtyBA4GaEL1GKNaFxUrHUA",
+        "launchpad": "met-dbc"
+      },
+      "dexscreener": {
+        "error": null,
+        "pairCreatedAtMs": 1786684864000
+      },
+      "drift_first_minutes": 0.0,
+      "drift_graduated_minutes": 5.516666666666667
+    },
+    "HViJfpgZMTMnT6vynterbmv5yeq4wogkM4rgBXGS44F2": {
+      "mint_address": "HViJfpgZMTMnT6vynterbmv5yeq4wogkM4rgBXGS44F2",
+      "jupiter": {
+        "found": true,
+        "error": null,
+        "firstPoolCreatedAt": "2026-08-14T05:16:10Z",
+        "firstPoolCreatedAtMs": 1786684570000,
+        "graduatedAt": "2026-08-14T05:23:26Z",
+        "graduatedAtMs": 1786685006000,
+        "graduatedPool": "GynGud1LgTgXH7p8pPD9KrpeNvooFxXgt4fGu6aoourN",
+        "launchpad": "met-dbc"
+      },
+      "dexscreener": {
+        "error": null,
+        "pairCreatedAtMs": 1786684570000
+      },
+      "drift_first_minutes": 0.0,
+      "drift_graduated_minutes": 7.266666666666667
+    },
+    "E5YqNqCXvjCGZbQ4foj9Mq4nsE9bjPTnT1YE4DJWTSTj": {
+      "mint_address": "E5YqNqCXvjCGZbQ4foj9Mq4nsE9bjPTnT1YE4DJWTSTj",
+      "jupiter": {
+        "found": true,
+        "error": null,
+        "firstPoolCreatedAt": "2026-08-14T05:15:30Z",
+        "firstPoolCreatedAtMs": 1786684530000,
+        "graduatedAt": "2026-08-14T05:17:23Z",
+        "graduatedAtMs": 1786684643000,
+        "graduatedPool": "4NgHXLbYiQv62fTW4tMrLQ23KE1AzZmoeEk73kGvQkYd",
+        "launchpad": "met-dbc"
+      },
+      "dexscreener": {
+        "error": null,
+        "pairCreatedAtMs": 1786684530000
+      },
+      "drift_first_minutes": 0.0,
+      "drift_graduated_minutes": 1.8833333333333333
+    },
+    "6Tdj5vvzeP4pZoTJ15nmMeaVwer1LqogjwEKANJCjJxp": {
+      "mint_address": "6Tdj5vvzeP4pZoTJ15nmMeaVwer1LqogjwEKANJCjJxp",
+      "jupiter": {
+        "found": true,
+        "error": null,
+        "firstPoolCreatedAt": "2026-08-14T05:14:10Z",
+        "firstPoolCreatedAtMs": 1786684450000,
+        "graduatedAt": "2026-08-14T05:15:33Z",
+        "graduatedAtMs": 1786684533000,
+        "graduatedPool": "7yBCLzoDwpb8tFY1hr5syuXeoG3cGJoaYjnVJZs3MSoL",
+        "launchpad": "met-dbc"
+      },
+      "dexscreener": {
+        "error": null,
+        "pairCreatedAtMs": 1786684450000
+      },
+      "drift_first_minutes": 0.0,
+      "drift_graduated_minutes": 1.3833333333333333
+    },
+    "Cyn7Js1THKHV9c6EN2nV5mXzwMMtEEQP1Aat1UtPpump": {
+      "mint_address": "Cyn7Js1THKHV9c6EN2nV5mXzwMMtEEQP1Aat1UtPpump",
+      "jupiter": {
+        "found": true,
+        "error": null,
+        "firstPoolCreatedAt": "2026-08-14T05:07:41Z",
+        "firstPoolCreatedAtMs": 1786684061000,
+        "graduatedAt": null,
+        "graduatedAtMs": null,
+        "graduatedPool": null,
+        "launchpad": "pump.fun"
+      },
+      "dexscreener": {
+        "error": null,
+        "pairCreatedAtMs": 1786684061000
+      },
+      "drift_first_minutes": 0.0,
+      "drift_graduated_minutes": null
+    },
+    "AX6hDg5Q7Zxkjk9Nar8ZxT5ioigiVGvGvtjDvH7ChfUK": {
+      "mint_address": "AX6hDg5Q7Zxkjk9Nar8ZxT5ioigiVGvGvtjDvH7ChfUK",
+      "jupiter": {
+        "found": true,
+        "error": null,
+        "firstPoolCreatedAt": "2026-08-14T05:12:18Z",
+        "firstPoolCreatedAtMs": 1786684338000,
+        "graduatedAt": null,
+        "graduatedAtMs": null,
+        "graduatedPool": null,
+        "launchpad": "pump.fun"
+      },
+      "dexscreener": {
+        "error": null,
+        "pairCreatedAtMs": 1786684338000
+      },
+      "drift_first_minutes": 0.0,
+      "drift_graduated_minutes": null
+    },
+    "DhUnGSdbKRLHGTYMYUSBdecmx9YLFNzd1MzMqEtUaWF6": {
+      "mint_address": "DhUnGSdbKRLHGTYMYUSBdecmx9YLFNzd1MzMqEtUaWF6",
+      "jupiter": {
+        "found": true,
+        "error": null,
+        "firstPoolCreatedAt": "2026-08-14T05:11:58Z",
+        "firstPoolCreatedAtMs": 1786684318000,
+        "graduatedAt": "2026-08-14T05:11:58Z",
+        "graduatedAtMs": 1786684318000,
+        "graduatedPool": "BonVo2vGAHUngduYuPLcSTPH2R1mGv54ofZVyb3B2Q8e",
+        "launchpad": "met-dbc"
+      },
+      "dexscreener": {
+        "error": null,
+        "pairCreatedAtMs": 1786684318000
+      },
+      "drift_first_minutes": 0.0,
+      "drift_graduated_minutes": 0.0
+    },
+    "Wc7AAM12p498e4Nb6bYFGvgDZC8NtZfoj1Ck48zeDMc": {
+      "mint_address": "Wc7AAM12p498e4Nb6bYFGvgDZC8NtZfoj1Ck48zeDMc",
+      "jupiter": {
+        "found": true,
+        "error": null,
+        "firstPoolCreatedAt": "2026-08-14T05:12:26Z",
+        "firstPoolCreatedAtMs": 1786684346000,
+        "graduatedAt": "2026-08-14T05:14:07Z",
+        "graduatedAtMs": 1786684447000,
+        "graduatedPool": "4naTeAEH1oBbvXx2caVVz36Gf81Ap4jrArmSn1zUEMR3",
+        "launchpad": "met-dbc"
+      },
+      "dexscreener": {
+        "error": null,
+        "pairCreatedAtMs": 1786684346000
+      },
+      "drift_first_minutes": 0.0,
+      "drift_graduated_minutes": 1.6833333333333333
+    },
+    "DTvWA4mLyZCgMHDvuCbUuHLGSBeEyJKSANDb5TGYEBaf": {
+      "mint_address": "DTvWA4mLyZCgMHDvuCbUuHLGSBeEyJKSANDb5TGYEBaf",
+      "jupiter": {
+        "found": true,
+        "error": null,
+        "firstPoolCreatedAt": "2026-08-14T05:10:35Z",
+        "firstPoolCreatedAtMs": 1786684235000,
+        "graduatedAt": "2026-08-14T05:13:43Z",
+        "graduatedAtMs": 1786684423000,
+        "graduatedPool": "9oh4hVwK2pHa2V9j5Hq7ksxQxsJ7ZCzveTSiXu5SphtP",
+        "launchpad": "met-dbc"
+      },
+      "dexscreener": {
+        "error": null,
+        "pairCreatedAtMs": 1786684235000
+      },
+      "drift_first_minutes": 0.0,
+      "drift_graduated_minutes": 3.1333333333333333
+    },
+    "FuJk9vz2prJsJpoLwRGtf7VdTm2cjeHRH39F5CKRpump": {
+      "mint_address": "FuJk9vz2prJsJpoLwRGtf7VdTm2cjeHRH39F5CKRpump",
+      "jupiter": {
+        "found": true,
+        "error": null,
+        "firstPoolCreatedAt": "2026-08-14T05:01:19Z",
+        "firstPoolCreatedAtMs": 1786683679000,
+        "graduatedAt": null,
+        "graduatedAtMs": null,
+        "graduatedPool": null,
+        "launchpad": "pump.fun"
+      },
+      "dexscreener": {
+        "error": null,
+        "pairCreatedAtMs": 1786683679000
+      },
+      "drift_first_minutes": 0.0,
+      "drift_graduated_minutes": null
+    },
+    "9rFgAccJTULYVxCfo9Czn5iUskH2r9sNRNTaNpAkki5g": {
+      "mint_address": "9rFgAccJTULYVxCfo9Czn5iUskH2r9sNRNTaNpAkki5g",
+      "jupiter": {
+        "found": true,
+        "error": null,
+        "firstPoolCreatedAt": "2026-08-14T05:08:13Z",
+        "firstPoolCreatedAtMs": 1786684093000,
+        "graduatedAt": "2026-08-14T05:10:23Z",
+        "graduatedAtMs": 1786684223000,
+        "graduatedPool": "2iBHevipSyxFRMEMk2dxjZpBtbacQyZ6jGfvVJuNHyqh",
+        "launchpad": "met-dbc"
+      },
+      "dexscreener": {
+        "error": null,
+        "pairCreatedAtMs": 1786684093000
+      },
+      "drift_first_minutes": 0.0,
+      "drift_graduated_minutes": 2.1666666666666665
+    },
+    "35Xypokx6kY8NpsSUeNY7oP6366Fxbwow6hRrpQipump": {
+      "mint_address": "35Xypokx6kY8NpsSUeNY7oP6366Fxbwow6hRrpQipump",
+      "jupiter": {
+        "found": true,
+        "error": null,
+        "firstPoolCreatedAt": "2026-08-14T05:05:41Z",
+        "firstPoolCreatedAtMs": 1786683941000,
+        "graduatedAt": null,
+        "graduatedAtMs": null,
+        "graduatedPool": null,
+        "launchpad": "pump.fun"
+      },
+      "dexscreener": {
+        "error": null,
+        "pairCreatedAtMs": 1786683941000
+      },
+      "drift_first_minutes": 0.0,
+      "drift_graduated_minutes": null
+    },
+    "HYRLERbw3YRYANCUXXNZgPxMNqQ5PjfsBXyagAXJpump": {
+      "mint_address": "HYRLERbw3YRYANCUXXNZgPxMNqQ5PjfsBXyagAXJpump",
+      "jupiter": {
+        "found": true,
+        "error": null,
+        "firstPoolCreatedAt": "2026-08-14T04:54:37Z",
+        "firstPoolCreatedAtMs": 1786683277000,
+        "graduatedAt": null,
+        "graduatedAtMs": null,
+        "graduatedPool": null,
+        "launchpad": "pump.fun"
+      },
+      "dexscreener": {
+        "error": null,
+        "pairCreatedAtMs": 1786683277000
+      },
+      "drift_first_minutes": 0.0,
+      "drift_graduated_minutes": null
+    },
+    "HmNmxVcjo6xYw4MBcB5UhmsSKGJEBV5GpRLLGi3Dpump": {
+      "mint_address": "HmNmxVcjo6xYw4MBcB5UhmsSKGJEBV5GpRLLGi3Dpump",
+      "jupiter": {
+        "found": true,
+        "error": null,
+        "firstPoolCreatedAt": "2026-08-14T04:39:09Z",
+        "firstPoolCreatedAtMs": 1786682349000,
+        "graduatedAt": null,
+        "graduatedAtMs": null,
+        "graduatedPool": null,
+        "launchpad": "pump.fun"
+      },
+      "dexscreener": {
+        "error": null,
+        "pairCreatedAtMs": 1786682349000
+      },
+      "drift_first_minutes": 0.0,
+      "drift_graduated_minutes": null
+    },
+    "AtbbLJ2tMq5kBTwEFNiFNks1BhR7Vo6MLWwmdP1pYPSt": {
+      "mint_address": "AtbbLJ2tMq5kBTwEFNiFNks1BhR7Vo6MLWwmdP1pYPSt",
+      "jupiter": {
+        "found": true,
+        "error": null,
+        "firstPoolCreatedAt": "2026-08-14T04:38:02Z",
+        "firstPoolCreatedAtMs": 1786682282000,
+        "graduatedAt": null,
+        "graduatedAtMs": null,
+        "graduatedPool": null,
+        "launchpad": null
+      },
+      "dexscreener": {
+        "error": null,
+        "pairCreatedAtMs": 1786682282000
+      },
+      "drift_first_minutes": 0.0,
+      "drift_graduated_minutes": null
+    },
+    "C1mGePxJW3wesSodpLcF4PA54s5q58x6KixotsKYsx79": {
+      "mint_address": "C1mGePxJW3wesSodpLcF4PA54s5q58x6KixotsKYsx79",
+      "jupiter": {
+        "found": true,
+        "error": null,
+        "firstPoolCreatedAt": "2026-08-14T04:33:14Z",
+        "firstPoolCreatedAtMs": 1786681994000,
+        "graduatedAt": "2026-08-14T04:35:20Z",
+        "graduatedAtMs": 1786682120000,
+        "graduatedPool": "E4UiZ2Zwfacy4bMnX2bnvYT3Bn7QnmUXAeERxcE12Rn2",
+        "launchpad": "met-dbc"
+      },
+      "dexscreener": {
+        "error": null,
+        "pairCreatedAtMs": 1786681994000
+      },
+      "drift_first_minutes": 0.0,
+      "drift_graduated_minutes": 2.1
+    },
+    "E4ri6nRZBscWUHv24VtTPkNNfeEeAzArt1NsF5VcSyHA": {
+      "mint_address": "E4ri6nRZBscWUHv24VtTPkNNfeEeAzArt1NsF5VcSyHA",
+      "jupiter": {
+        "found": true,
+        "error": null,
+        "firstPoolCreatedAt": "2026-08-14T04:29:54Z",
+        "firstPoolCreatedAtMs": 1786681794000,
+        "graduatedAt": null,
+        "graduatedAtMs": null,
+        "graduatedPool": null,
+        "launchpad": null
+      },
+      "dexscreener": {
+        "error": null,
+        "pairCreatedAtMs": 1786681794000
+      },
+      "drift_first_minutes": 0.0,
+      "drift_graduated_minutes": null
+    },
+    "2CJxE3kJzdvN1aEhQu9iVCFNuZbS4YMLNTja7jz7CqHV": {
+      "mint_address": "2CJxE3kJzdvN1aEhQu9iVCFNuZbS4YMLNTja7jz7CqHV",
+      "jupiter": {
+        "found": true,
+        "error": null,
+        "firstPoolCreatedAt": "2026-08-14T04:30:23Z",
+        "firstPoolCreatedAtMs": 1786681823000,
+        "graduatedAt": "2026-08-14T04:33:22Z",
+        "graduatedAtMs": 1786682002000,
+        "graduatedPool": "FigBjnPmn1Dv4cyUQnxjVxhCw5iiXzgWkmjDbLHaSwjA",
+        "launchpad": "met-dbc"
+      },
+      "dexscreener": {
+        "error": null,
+        "pairCreatedAtMs": 1786681823000
+      },
+      "drift_first_minutes": 0.0,
+      "drift_graduated_minutes": 2.9833333333333334
+    },
+    "HbDeMAfM4Msbki95FHegi8HgbyogKMgQp3NHhBFP7mMc": {
+      "mint_address": "HbDeMAfM4Msbki95FHegi8HgbyogKMgQp3NHhBFP7mMc",
+      "jupiter": {
+        "found": true,
+        "error": null,
+        "firstPoolCreatedAt": "2026-08-14T04:26:01Z",
+        "firstPoolCreatedAtMs": 1786681561000,
+        "graduatedAt": "2026-08-14T04:28:11Z",
+        "graduatedAtMs": 1786681691000,
+        "graduatedPool": "A13A415j2LifsdgTD44qroz5LL4Edi4ecYjCjMmtqTeS",
+        "launchpad": "met-dbc"
+      },
+      "dexscreener": {
+        "error": null,
+        "pairCreatedAtMs": 1786681561000
+      },
+      "drift_first_minutes": 0.0,
+      "drift_graduated_minutes": 2.1666666666666665
+    },
+    "2k11PajbegQqtjb85osKLCSZ8SC46UKauHchAZqxQfBF": {
+      "mint_address": "2k11PajbegQqtjb85osKLCSZ8SC46UKauHchAZqxQfBF",
+      "jupiter": {
+        "found": true,
+        "error": null,
+        "firstPoolCreatedAt": "2026-08-14T04:23:31Z",
+        "firstPoolCreatedAtMs": 1786681411000,
+        "graduatedAt": "2026-08-14T04:23:31Z",
+        "graduatedAtMs": 1786681411000,
+        "graduatedPool": "ATPLvMP1uJp5SEtkwC9pvGKTKb5GfhTcbohGKSfvpVFJ",
+        "launchpad": "met-dbc"
+      },
+      "dexscreener": {
+        "error": null,
+        "pairCreatedAtMs": 1786681411000
+      },
+      "drift_first_minutes": 0.0,
+      "drift_graduated_minutes": 0.0
+    },
+    "Co6FvqEBmyAHfFSeTFudGKN6Yr8iPDFL3sU67Hir9ciN": {
+      "mint_address": "Co6FvqEBmyAHfFSeTFudGKN6Yr8iPDFL3sU67Hir9ciN",
+      "jupiter": {
+        "found": true,
+        "error": null,
+        "firstPoolCreatedAt": "2026-08-14T04:21:02Z",
+        "firstPoolCreatedAtMs": 1786681262000,
+        "graduatedAt": null,
+        "graduatedAtMs": null,
+        "graduatedPool": null,
+        "launchpad": null
+      },
+      "dexscreener": {
+        "error": null,
+        "pairCreatedAtMs": 1786681262000
+      },
+      "drift_first_minutes": 0.0,
+      "drift_graduated_minutes": null
+    },
+    "HgQpq9jBXkzTtidufErZFGPnze9HU1efg8F86t25KFu": {
+      "mint_address": "HgQpq9jBXkzTtidufErZFGPnze9HU1efg8F86t25KFu",
+      "jupiter": {
+        "found": true,
+        "error": null,
+        "firstPoolCreatedAt": "2026-08-14T04:18:52Z",
+        "firstPoolCreatedAtMs": 1786681132000,
+        "graduatedAt": "2026-08-14T04:22:20Z",
+        "graduatedAtMs": 1786681340000,
+        "graduatedPool": "BeZkELgtFag964rRcfv9Dzha9ahfLqGfWzoq3sn7EuLA",
+        "launchpad": "met-dbc"
+      },
+      "dexscreener": {
+        "error": null,
+        "pairCreatedAtMs": 1786681132000
+      },
+      "drift_first_minutes": 0.0,
+      "drift_graduated_minutes": 3.466666666666667
+    },
+    "4ZY2gp2GuMbSacbiDTN7vWccyR9Ge826kpVeuGThvZ9H": {
+      "mint_address": "4ZY2gp2GuMbSacbiDTN7vWccyR9Ge826kpVeuGThvZ9H",
+      "jupiter": {
+        "found": true,
+        "error": null,
+        "firstPoolCreatedAt": "2026-08-14T04:17:58Z",
+        "firstPoolCreatedAtMs": 1786681078000,
+        "graduatedAt": null,
+        "graduatedAtMs": null,
+        "graduatedPool": null,
+        "launchpad": null
+      },
+      "dexscreener": {
+        "error": null,
+        "pairCreatedAtMs": 1786681078000
+      },
+      "drift_first_minutes": 0.0,
+      "drift_graduated_minutes": null
+    },
+    "6tyDvHiPSMcJx5ZCUwekJKBErY3ARGJuY6bxFLmSQrL8": {
+      "mint_address": "6tyDvHiPSMcJx5ZCUwekJKBErY3ARGJuY6bxFLmSQrL8",
+      "jupiter": {
+        "found": true,
+        "error": null,
+        "firstPoolCreatedAt": "2026-08-14T04:16:35Z",
+        "firstPoolCreatedAtMs": 1786680995000,
+        "graduatedAt": "2026-08-14T04:17:56Z",
+        "graduatedAtMs": 1786681076000,
+        "graduatedPool": "3EDEaYqDgm3SiHZfmH12A1Mq9ZjGn4QjgBX7Z6MXpWT2",
+        "launchpad": "met-dbc"
+      },
+      "dexscreener": {
+        "error": null,
+        "pairCreatedAtMs": 1786680995000
+      },
+      "drift_first_minutes": 0.0,
+      "drift_graduated_minutes": 1.35
+    },
+    "B4G4ChP4hkziuNP8sJBXDL39u2pRyjhmotKo16tMyBuF": {
+      "mint_address": "B4G4ChP4hkziuNP8sJBXDL39u2pRyjhmotKo16tMyBuF",
+      "jupiter": {
+        "found": true,
+        "error": null,
+        "firstPoolCreatedAt": "2026-08-14T04:15:56Z",
+        "firstPoolCreatedAtMs": 1786680956000,
+        "graduatedAt": null,
+        "graduatedAtMs": null,
+        "graduatedPool": null,
+        "launchpad": null
+      },
+      "dexscreener": {
+        "error": null,
+        "pairCreatedAtMs": 1786680956000
+      },
+      "drift_first_minutes": 0.0,
+      "drift_graduated_minutes": null
+    }
+  }
+}
