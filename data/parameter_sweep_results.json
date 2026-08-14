@@ -1,0 +1,2532 @@
+{
+  "methodology": {
+    "positions_analyzed": 765,
+    "snapshot_backed": 202,
+    "peak_bound_fallback": 563,
+    "exit_order": "take_profit -> hard_stop -> trailing_stop (armed at 2%) -> early_exit_no_green (90s, 1%) -> time_stop (10 min)",
+    "fallback_model": "MT-520 peak-bound approximation using persisted entry/peak/close",
+    "mcap_source": "candidate_log (entered=TRUE, max mcap per position)",
+    "filters": {
+      "baseline": "No filter",
+      "no_wed": "Exclude Wednesday",
+      "no_utc14": "Exclude UTC 14",
+      "no_wed_no_utc14": "Exclude Wednesday + UTC 14",
+      "thu_fri": "Only Thursday + Friday",
+      "golden_hours": "Only golden hours (UTC 4-6, 8-12, 17)"
+    }
+  },
+  "baseline_parameters": {
+    "trailing_stop_pct": 4,
+    "take_profit_pct": 80,
+    "hard_stop_pct": 10
+  },
+  "baseline_no_filter": {
+    "trades": 765,
+    "pnl_sol": 6.18314606,
+    "win_rate": 0.359477,
+    "profit_factor": 4.172171,
+    "avg_win": 0.02957211,
+    "avg_loss": -0.00421901,
+    "pnl_per_trade": 0.00808254
+  },
+  "step2_full_sweep": [
+    {
+      "trades": 765,
+      "pnl_sol": 8.73094598,
+      "win_rate": 0.350327,
+      "profit_factor": 6.585088,
+      "avg_win": 0.03841122,
+      "avg_loss": -0.00333318,
+      "pnl_per_trade": 0.011413,
+      "parameters": {
+        "trailing_stop_pct": 2,
+        "take_profit_pct": 150,
+        "hard_stop_pct": 8
+      },
+      "filter": "baseline"
+    },
+    {
+      "trades": 765,
+      "pnl_sol": 8.70206066,
+      "win_rate": 0.34902,
+      "profit_factor": 6.418544,
+      "avg_win": 0.03860688,
+      "avg_loss": -0.00341697,
+      "pnl_per_trade": 0.01137524,
+      "parameters": {
+        "trailing_stop_pct": 3,
+        "take_profit_pct": 150,
+        "hard_stop_pct": 8
+      },
+      "filter": "baseline"
+    },
+    {
+      "trades": 765,
+      "pnl_sol": 8.67566527,
+      "win_rate": 0.346405,
+      "profit_factor": 6.242993,
+      "avg_win": 0.03898257,
+      "avg_loss": -0.00350575,
+      "pnl_per_trade": 0.01134074,
+      "parameters": {
+        "trailing_stop_pct": 4,
+        "take_profit_pct": 150,
+        "hard_stop_pct": 8
+      },
+      "filter": "baseline"
+    },
+    {
+      "trades": 765,
+      "pnl_sol": 8.54697792,
+      "win_rate": 0.346405,
+      "profit_factor": 6.02728,
+      "avg_win": 0.03866829,
+      "avg_loss": -0.00360195,
+      "pnl_per_trade": 0.01117252,
+      "parameters": {
+        "trailing_stop_pct": 5,
+        "take_profit_pct": 150,
+        "hard_stop_pct": 8
+      },
+      "filter": "baseline"
+    },
+    {
+      "trades": 765,
+      "pnl_sol": 8.46969117,
+      "win_rate": 0.352941,
+      "profit_factor": 5.465421,
+      "avg_win": 0.03839415,
+      "avg_loss": -0.00406152,
+      "pnl_per_trade": 0.01107149,
+      "parameters": {
+        "trailing_stop_pct": 2,
+        "take_profit_pct": 150,
+        "hard_stop_pct": 10
+      },
+      "filter": "baseline"
+    },
+    {
+      "trades": 765,
+      "pnl_sol": 8.44080585,
+      "win_rate": 0.351634,
+      "profit_factor": 5.352175,
+      "avg_win": 0.0385883,
+      "avg_loss": -0.00414411,
+      "pnl_per_trade": 0.01103373,
+      "parameters": {
+        "trailing_stop_pct": 3,
+        "take_profit_pct": 150,
+        "hard_stop_pct": 10
+      },
+      "filter": "baseline"
+    },
+    {
+      "trades": 765,
+      "pnl_sol": 8.43873467,
+      "win_rate": 0.346405,
+      "profit_factor": 5.826936,
+      "avg_win": 0.03844149,
+      "avg_loss": -0.00370394,
+      "pnl_per_trade": 0.01103103,
+      "parameters": {
+        "trailing_stop_pct": 6,
+        "take_profit_pct": 150,
+        "hard_stop_pct": 8
+      },
+      "filter": "baseline"
+    },
+    {
+      "trades": 765,
+      "pnl_sol": 8.41341046,
+      "win_rate": 0.34902,
+      "profit_factor": 5.229578,
+      "avg_win": 0.03896103,
+      "avg_loss": -0.00423231,
+      "pnl_per_trade": 0.01099792,
+      "parameters": {
+        "trailing_stop_pct": 4,
+        "take_profit_pct": 150,
+        "hard_stop_pct": 10
+      },
+      "filter": "baseline"
+    },
+    {
+      "trades": 765,
+      "pnl_sol": 8.37629258,
+      "win_rate": 0.350327,
+      "profit_factor": 6.35822,
+      "avg_win": 0.03708788,
+      "avg_loss": -0.00333318,
+      "pnl_per_trade": 0.0109494,
+      "parameters": {
+        "trailing_stop_pct": 2,
+        "take_profit_pct": 120,
+        "hard_stop_pct": 8
+      },
+      "filter": "baseline"
+    },
+    {
+      "trades": 765,
+      "pnl_sol": 8.33240726,
+      "win_rate": 0.34902,
+      "profit_factor": 6.188371,
+      "avg_win": 0.03722241,
+      "avg_loss": -0.00341697,
+      "pnl_per_trade": 0.01089204,
+      "parameters": {
+        "trailing_stop_pct": 3,
+        "take_profit_pct": 120,
+        "hard_stop_pct": 8
+      },
+      "filter": "baseline"
+    },
+    {
+      "trades": 765,
+      "pnl_sol": 8.30601187,
+      "win_rate": 0.346405,
+      "profit_factor": 6.019599,
+      "avg_win": 0.03758765,
+      "avg_loss": -0.00350575,
+      "pnl_per_trade": 0.01085753,
+      "parameters": {
+        "trailing_stop_pct": 4,
+        "take_profit_pct": 120,
+        "hard_stop_pct": 8
+      },
+      "filter": "baseline"
+    },
+    {
+      "trades": 765,
+      "pnl_sol": 8.28472311,
+      "win_rate": 0.34902,
+      "profit_factor": 5.071942,
+      "avg_win": 0.0386491,
+      "avg_loss": -0.00432891,
+      "pnl_per_trade": 0.0108297,
+      "parameters": {
+        "trailing_stop_pct": 5,
+        "take_profit_pct": 150,
+        "hard_stop_pct": 10
+      },
+      "filter": "baseline"
+    },
+    {
+      "trades": 765,
+      "pnl_sol": 8.20503242,
+      "win_rate": 0.345098,
+      "profit_factor": 5.436854,
+      "avg_win": 0.03808456,
+      "avg_loss": -0.00390971,
+      "pnl_per_trade": 0.01072553,
+      "parameters": {
+        "trailing_stop_pct": 8,
+        "take_profit_pct": 150,
+        "hard_stop_pct": 8
+      },
+      "filter": "baseline"
+    },
+    {
+      "trades": 765,
+      "pnl_sol": 8.17732452,
+      "win_rate": 0.346405,
+      "profit_factor": 5.809852,
+      "avg_win": 0.03727337,
+      "avg_loss": -0.00360195,
+      "pnl_per_trade": 0.01068931,
+      "parameters": {
+        "trailing_stop_pct": 5,
+        "take_profit_pct": 120,
+        "hard_stop_pct": 8
+      },
+      "filter": "baseline"
+    },
+    {
+      "trades": 765,
+      "pnl_sol": 8.17647987,
+      "win_rate": 0.34902,
+      "profit_factor": 4.925853,
+      "avg_win": 0.038424,
+      "avg_loss": -0.00443133,
+      "pnl_per_trade": 0.01068821,
+      "parameters": {
+        "trailing_stop_pct": 6,
+        "take_profit_pct": 150,
+        "hard_stop_pct": 10
+      },
+      "filter": "baseline"
+    },
+    {
+      "trades": 765,
+      "pnl_sol": 8.11222189,
+      "win_rate": 0.352941,
+      "profit_factor": 5.276955,
+      "avg_win": 0.03707019,
+      "avg_loss": -0.00406152,
+      "pnl_per_trade": 0.01060421,
+      "parameters": {
+        "trailing_stop_pct": 2,
+        "take_profit_pct": 120,
+        "hard_stop_pct": 10
+      },
+      "filter": "baseline"
+    },
+    {
+      "trades": 765,
+      "pnl_sol": 8.06908127,
+      "win_rate": 0.346405,
+      "profit_factor": 5.615495,
+      "avg_win": 0.03704657,
+      "avg_loss": -0.00370394,
+      "pnl_per_trade": 0.01054782,
+      "parameters": {
+        "trailing_stop_pct": 6,
+        "take_profit_pct": 120,
+        "hard_stop_pct": 8
+      },
+      "filter": "baseline"
+    },
+    {
+      "trades": 765,
+      "pnl_sol": 8.06833657,
+      "win_rate": 0.351634,
+      "profit_factor": 5.160125,
+      "avg_win": 0.03720365,
+      "avg_loss": -0.00414411,
+      "pnl_per_trade": 0.01054685,
+      "parameters": {
+        "trailing_stop_pct": 3,
+        "take_profit_pct": 120,
+        "hard_stop_pct": 10
+      },
+      "filter": "baseline"
+    },
+    {
+      "trades": 765,
+      "pnl_sol": 8.04094118,
+      "win_rate": 0.34902,
+      "profit_factor": 5.042331,
+      "avg_win": 0.03756601,
+      "avg_loss": -0.00423231,
+      "pnl_per_trade": 0.01051103,
+      "parameters": {
+        "trailing_stop_pct": 4,
+        "take_profit_pct": 120,
+        "hard_stop_pct": 10
+      },
+      "filter": "baseline"
+    },
+    {
+      "trades": 765,
+      "pnl_sol": 7.94277761,
+      "win_rate": 0.347712,
+      "profit_factor": 4.637205,
+      "avg_win": 0.03806968,
+      "avg_loss": -0.00463643,
+      "pnl_per_trade": 0.01038272,
+      "parameters": {
+        "trailing_stop_pct": 8,
+        "take_profit_pct": 150,
+        "hard_stop_pct": 10
+      },
+      "filter": "baseline"
+    },
+    {
+      "trades": 765,
+      "pnl_sol": 7.91225383,
+      "win_rate": 0.34902,
+      "profit_factor": 4.888873,
+      "avg_win": 0.03725409,
+      "avg_loss": -0.00432891,
+      "pnl_per_trade": 0.01034282,
+      "parameters": {
+        "trailing_stop_pct": 5,
+        "take_profit_pct": 120,
+        "hard_stop_pct": 10
+      },
+      "filter": "baseline"
+    },
+    {
+      "trades": 765,
+      "pnl_sol": 7.83537902,
+      "win_rate": 0.345098,
+      "profit_factor": 5.236965,
+      "avg_win": 0.03668435,
+      "avg_loss": -0.00390971,
+      "pnl_per_trade": 0.01024233,
+      "parameters": {
+        "trailing_stop_pct": 8,
+        "take_profit_pct": 120,
+        "hard_stop_pct": 8
+      },
+      "filter": "baseline"
+    },
+    {
+      "trades": 765,
+      "pnl_sol": 7.80401058,
+      "win_rate": 0.34902,
+      "profit_factor": 4.747015,
+      "avg_win": 0.03702898,
+      "avg_loss": -0.00443133,
+      "pnl_per_trade": 0.01020132,
+      "parameters": {
+        "trailing_stop_pct": 6,
+        "take_profit_pct": 120,
+        "hard_stop_pct": 10
+      },
+      "filter": "baseline"
+    },
+    {
+      "trades": 765,
+      "pnl_sol": 7.65036701,
+      "win_rate": 0.352941,
+      "profit_factor": 3.816723,
+      "avg_win": 0.03839415,
+      "avg_loss": -0.00581596,
+      "pnl_per_trade": 0.01000048,
+      "parameters": {
+        "trailing_stop_pct": 2,
+        "take_profit_pct": 150,
+        "hard_stop_pct": 15
+      },
+      "filter": "baseline"
+    },
+    {
+      "trades": 765,
+      "pnl_sol": 7.62148169,
+      "win_rate": 0.351634,
+      "profit_factor": 3.762638,
+      "avg_win": 0.0385883,
+      "avg_loss": -0.00589481,
+      "pnl_per_trade": 0.00996272,
+      "parameters": {
+        "trailing_stop_pct": 3,
+        "take_profit_pct": 150,
+        "hard_stop_pct": 15
+      },
+      "filter": "baseline"
+    },
+    {
+      "trades": 765,
+      "pnl_sol": 7.5915863,
+      "win_rate": 0.34902,
+      "profit_factor": 3.700663,
+      "avg_win": 0.03896103,
+      "avg_loss": -0.00598087,
+      "pnl_per_trade": 0.00992364,
+      "parameters": {
+        "trailing_stop_pct": 4,
+        "take_profit_pct": 150,
+        "hard_stop_pct": 15
+      },
+      "filter": "baseline"
+    },
+    {
+      "trades": 765,
+      "pnl_sol": 7.57030833,
+      "win_rate": 0.347712,
+      "profit_factor": 4.466642,
+      "avg_win": 0.03666942,
+      "avg_loss": -0.00463643,
+      "pnl_per_trade": 0.00989583,
+      "parameters": {
+        "trailing_stop_pct": 8,
+        "take_profit_pct": 120,
+        "hard_stop_pct": 10
+      },
+      "filter": "baseline"
+    },
+    {
+      "trades": 765,
+      "pnl_sol": 7.53597112,
+      "win_rate": 0.350327,
+      "profit_factor": 5.820676,
+      "avg_win": 0.03395236,
+      "avg_loss": -0.00333318,
+      "pnl_per_trade": 0.00985094,
+      "parameters": {
+        "trailing_stop_pct": 2,
+        "take_profit_pct": 100,
+        "hard_stop_pct": 8
+      },
+      "filter": "baseline"
+    },
+    {
+      "trades": 765,
+      "pnl_sol": 7.50005541,
+      "win_rate": 0.34902,
+      "profit_factor": 5.670087,
+      "avg_win": 0.03410499,
+      "avg_loss": -0.00341697,
+      "pnl_per_trade": 0.00980399,
+      "parameters": {
+        "trailing_stop_pct": 3,
+        "take_profit_pct": 100,
+        "hard_stop_pct": 8
+      },
+      "filter": "baseline"
+    },
+    {
+      "trades": 765,
+      "pnl_sol": 7.49876473,
+      "win_rate": 0.346405,
+      "profit_factor": 5.531753,
+      "avg_win": 0.03454144,
+      "avg_loss": -0.00350575,
+      "pnl_per_trade": 0.00980231,
+      "parameters": {
+        "trailing_stop_pct": 4,
+        "take_profit_pct": 100,
+        "hard_stop_pct": 8
+      },
+      "filter": "baseline"
+    },
+    {
+      "trades": 765,
+      "pnl_sol": 7.46289895,
+      "win_rate": 0.34902,
+      "profit_factor": 3.612683,
+      "avg_win": 0.0386491,
+      "avg_loss": -0.00607747,
+      "pnl_per_trade": 0.00975542,
+      "parameters": {
+        "trailing_stop_pct": 5,
+        "take_profit_pct": 150,
+        "hard_stop_pct": 15
+      },
+      "filter": "baseline"
+    },
+    {
+      "trades": 765,
+      "pnl_sol": 7.39884855,
+      "win_rate": 0.346405,
+      "profit_factor": 5.351957,
+      "avg_win": 0.03433573,
+      "avg_loss": -0.00360195,
+      "pnl_per_trade": 0.0096717,
+      "parameters": {
+        "trailing_stop_pct": 5,
+        "take_profit_pct": 100,
+        "hard_stop_pct": 8
+      },
+      "filter": "baseline"
+    },
+    {
+      "trades": 765,
+      "pnl_sol": 7.3546557,
+      "win_rate": 0.34902,
+      "profit_factor": 3.532114,
+      "avg_win": 0.038424,
+      "avg_loss": -0.0061799,
+      "pnl_per_trade": 0.00961393,
+      "parameters": {
+        "trailing_stop_pct": 6,
+        "take_profit_pct": 150,
+        "hard_stop_pct": 15
+      },
+      "filter": "baseline"
+    },
+    {
+      "trades": 765,
+      "pnl_sol": 7.32317142,
+      "win_rate": 0.346405,
+      "profit_factor": 5.188836,
+      "avg_win": 0.03423181,
+      "avg_loss": -0.00370394,
+      "pnl_per_trade": 0.00957277,
+      "parameters": {
+        "trailing_stop_pct": 6,
+        "take_profit_pct": 100,
+        "hard_stop_pct": 8
+      },
+      "filter": "baseline"
+    },
+    {
+      "trades": 765,
+      "pnl_sol": 7.29289773,
+      "win_rate": 0.352941,
+      "profit_factor": 3.685109,
+      "avg_win": 0.03707019,
+      "avg_loss": -0.00581596,
+      "pnl_per_trade": 0.0095332,
+      "parameters": {
+        "trailing_stop_pct": 2,
+        "take_profit_pct": 120,
+        "hard_stop_pct": 15
+      },
+      "filter": "baseline"
+    },
+    {
+      "trades": 765,
+      "pnl_sol": 7.26190043,
+      "win_rate": 0.352941,
+      "profit_factor": 4.828646,
+      "avg_win": 0.03392085,
+      "avg_loss": -0.00406152,
+      "pnl_per_trade": 0.00949268,
+      "parameters": {
+        "trailing_stop_pct": 2,
+        "take_profit_pct": 100,
+        "hard_stop_pct": 10
+      },
+      "filter": "baseline"
+    },
+    {
+      "trades": 765,
+      "pnl_sol": 7.24901241,
+      "win_rate": 0.351634,
+      "profit_factor": 3.627625,
+      "avg_win": 0.03720365,
+      "avg_loss": -0.00589481,
+      "pnl_per_trade": 0.00947583,
+      "parameters": {
+        "trailing_stop_pct": 3,
+        "take_profit_pct": 120,
+        "hard_stop_pct": 15
+      },
+      "filter": "baseline"
+    },
+    {
+      "trades": 765,
+      "pnl_sol": 7.22598471,
+      "win_rate": 0.351634,
+      "profit_factor": 4.725799,
+      "avg_win": 0.03407223,
+      "avg_loss": -0.00414411,
+      "pnl_per_trade": 0.00944573,
+      "parameters": {
+        "trailing_stop_pct": 3,
+        "take_profit_pct": 100,
+        "hard_stop_pct": 10
+      },
+      "filter": "baseline"
+    },
+    {
+      "trades": 765,
+      "pnl_sol": 7.22369404,
+      "win_rate": 0.34902,
+      "profit_factor": 4.631486,
+      "avg_win": 0.03450516,
+      "avg_loss": -0.00423231,
+      "pnl_per_trade": 0.00944274,
+      "parameters": {
+        "trailing_stop_pct": 4,
+        "take_profit_pct": 100,
+        "hard_stop_pct": 10
+      },
+      "filter": "baseline"
+    },
+    {
+      "trades": 765,
+      "pnl_sol": 7.21911701,
+      "win_rate": 0.34902,
+      "profit_factor": 3.568159,
+      "avg_win": 0.03756601,
+      "avg_loss": -0.00598087,
+      "pnl_per_trade": 0.00943675,
+      "parameters": {
+        "trailing_stop_pct": 4,
+        "take_profit_pct": 120,
+        "hard_stop_pct": 15
+      },
+      "filter": "baseline"
+    },
+    {
+      "trades": 765,
+      "pnl_sol": 7.17625458,
+      "win_rate": 0.345098,
+      "profit_factor": 4.880545,
+      "avg_win": 0.03418767,
+      "avg_loss": -0.00390971,
+      "pnl_per_trade": 0.00938072,
+      "parameters": {
+        "trailing_stop_pct": 8,
+        "take_profit_pct": 100,
+        "hard_stop_pct": 8
+      },
+      "filter": "baseline"
+    },
+    {
+      "trades": 765,
+      "pnl_sol": 7.12377786,
+      "win_rate": 0.34902,
+      "profit_factor": 4.501337,
+      "avg_win": 0.03430099,
+      "avg_loss": -0.00432891,
+      "pnl_per_trade": 0.00931213,
+      "parameters": {
+        "trailing_stop_pct": 5,
+        "take_profit_pct": 100,
+        "hard_stop_pct": 10
+      },
+      "filter": "baseline"
+    },
+    {
+      "trades": 765,
+      "pnl_sol": 7.12095345,
+      "win_rate": 0.347712,
+      "profit_factor": 3.369242,
+      "avg_win": 0.03806968,
+      "avg_loss": -0.00638128,
+      "pnl_per_trade": 0.00930844,
+      "parameters": {
+        "trailing_stop_pct": 8,
+        "take_profit_pct": 150,
+        "hard_stop_pct": 15
+      },
+      "filter": "baseline"
+    },
+    {
+      "trades": 765,
+      "pnl_sol": 7.09042967,
+      "win_rate": 0.34902,
+      "profit_factor": 3.482285,
+      "avg_win": 0.03725409,
+      "avg_loss": -0.00607747,
+      "pnl_per_trade": 0.00926854,
+      "parameters": {
+        "trailing_stop_pct": 5,
+        "take_profit_pct": 120,
+        "hard_stop_pct": 15
+      },
+      "filter": "baseline"
+    },
+    {
+      "trades": 765,
+      "pnl_sol": 7.04810073,
+      "win_rate": 0.34902,
+      "profit_factor": 4.384073,
+      "avg_win": 0.03419786,
+      "avg_loss": -0.00443133,
+      "pnl_per_trade": 0.0092132,
+      "parameters": {
+        "trailing_stop_pct": 6,
+        "take_profit_pct": 100,
+        "hard_stop_pct": 10
+      },
+      "filter": "baseline"
+    },
+    {
+      "trades": 765,
+      "pnl_sol": 6.98218642,
+      "win_rate": 0.34902,
+      "profit_factor": 3.403878,
+      "avg_win": 0.03702898,
+      "avg_loss": -0.0061799,
+      "pnl_per_trade": 0.00912704,
+      "parameters": {
+        "trailing_stop_pct": 6,
+        "take_profit_pct": 120,
+        "hard_stop_pct": 15
+      },
+      "filter": "baseline"
+    },
+    {
+      "trades": 765,
+      "pnl_sol": 6.90118389,
+      "win_rate": 0.347712,
+      "profit_factor": 4.160232,
+      "avg_win": 0.03415392,
+      "avg_loss": -0.00463643,
+      "pnl_per_trade": 0.00902116,
+      "parameters": {
+        "trailing_stop_pct": 8,
+        "take_profit_pct": 100,
+        "hard_stop_pct": 10
+      },
+      "filter": "baseline"
+    },
+    {
+      "trades": 765,
+      "pnl_sol": 6.86919151,
+      "win_rate": 0.352941,
+      "profit_factor": 2.964182,
+      "avg_win": 0.03839415,
+      "avg_loss": -0.00748871,
+      "pnl_per_trade": 0.00897934,
+      "parameters": {
+        "trailing_stop_pct": 2,
+        "take_profit_pct": 150,
+        "hard_stop_pct": 20
+      },
+      "filter": "baseline"
+    },
+    {
+      "trades": 765,
+      "pnl_sol": 6.84030619,
+      "win_rate": 0.351634,
+      "profit_factor": 2.93232,
+      "avg_win": 0.0385883,
+      "avg_loss": -0.00756399,
+      "pnl_per_trade": 0.00894158,
+      "parameters": {
+        "trailing_stop_pct": 3,
+        "take_profit_pct": 150,
+        "hard_stop_pct": 20
+      },
+      "filter": "baseline"
+    },
+    {
+      "trades": 765,
+      "pnl_sol": 6.80791079,
+      "win_rate": 0.34902,
+      "profit_factor": 2.893883,
+      "avg_win": 0.03896103,
+      "avg_loss": -0.00764826,
+      "pnl_per_trade": 0.00889923,
+      "parameters": {
+        "trailing_stop_pct": 4,
+        "take_profit_pct": 150,
+        "hard_stop_pct": 20
+      },
+      "filter": "baseline"
+    },
+    {
+      "trades": 765,
+      "pnl_sol": 6.74848416,
+      "win_rate": 0.347712,
+      "profit_factor": 3.245316,
+      "avg_win": 0.03666942,
+      "avg_loss": -0.00638128,
+      "pnl_per_trade": 0.00882155,
+      "parameters": {
+        "trailing_stop_pct": 8,
+        "take_profit_pct": 120,
+        "hard_stop_pct": 15
+      },
+      "filter": "baseline"
+    },
+    {
+      "trades": 765,
+      "pnl_sol": 6.67922344,
+      "win_rate": 0.34902,
+      "profit_factor": 2.834907,
+      "avg_win": 0.0386491,
+      "avg_loss": -0.00774487,
+      "pnl_per_trade": 0.00873101,
+      "parameters": {
+        "trailing_stop_pct": 5,
+        "take_profit_pct": 150,
+        "hard_stop_pct": 20
+      },
+      "filter": "baseline"
+    },
+    {
+      "trades": 765,
+      "pnl_sol": 6.5709802,
+      "win_rate": 0.34902,
+      "profit_factor": 2.78161,
+      "avg_win": 0.038424,
+      "avg_loss": -0.00784729,
+      "pnl_per_trade": 0.00858952,
+      "parameters": {
+        "trailing_stop_pct": 6,
+        "take_profit_pct": 150,
+        "hard_stop_pct": 20
+      },
+      "filter": "baseline"
+    },
+    {
+      "trades": 765,
+      "pnl_sol": 6.51172222,
+      "win_rate": 0.352941,
+      "profit_factor": 2.861967,
+      "avg_win": 0.03707019,
+      "avg_loss": -0.00748871,
+      "pnl_per_trade": 0.00851206,
+      "parameters": {
+        "trailing_stop_pct": 2,
+        "take_profit_pct": 120,
+        "hard_stop_pct": 20
+      },
+      "filter": "baseline"
+    },
+    {
+      "trades": 765,
+      "pnl_sol": 6.49870876,
+      "win_rate": 0.360784,
+      "profit_factor": 5.244026,
+      "avg_win": 0.02909409,
+      "avg_loss": -0.00332161,
+      "pnl_per_trade": 0.00849504,
+      "parameters": {
+        "trailing_stop_pct": 2,
+        "take_profit_pct": 80,
+        "hard_stop_pct": 8
+      },
+      "filter": "baseline"
+    },
+    {
+      "trades": 765,
+      "pnl_sol": 6.4678369,
+      "win_rate": 0.351634,
+      "profit_factor": 2.827101,
+      "avg_win": 0.03720365,
+      "avg_loss": -0.00756399,
+      "pnl_per_trade": 0.00845469,
+      "parameters": {
+        "trailing_stop_pct": 3,
+        "take_profit_pct": 120,
+        "hard_stop_pct": 20
+      },
+      "filter": "baseline"
+    },
+    {
+      "trades": 765,
+      "pnl_sol": 6.46021675,
+      "win_rate": 0.356863,
+      "profit_factor": 4.981113,
+      "avg_win": 0.02960781,
+      "avg_loss": -0.00349723,
+      "pnl_per_trade": 0.00844473,
+      "parameters": {
+        "trailing_stop_pct": 4,
+        "take_profit_pct": 80,
+        "hard_stop_pct": 8
+      },
+      "filter": "baseline"
+    },
+    {
+      "trades": 765,
+      "pnl_sol": 6.46004605,
+      "win_rate": 0.359477,
+      "profit_factor": 5.104281,
+      "avg_win": 0.02921463,
+      "avg_loss": -0.00340688,
+      "pnl_per_trade": 0.0084445,
+      "parameters": {
+        "trailing_stop_pct": 3,
+        "take_profit_pct": 80,
+        "hard_stop_pct": 8
+      },
+      "filter": "baseline"
+    },
+    {
+      "trades": 765,
+      "pnl_sol": 6.44257626,
+      "win_rate": 0.352941,
+      "profit_factor": 3.372037,
+      "avg_win": 0.03392085,
+      "avg_loss": -0.00581596,
+      "pnl_per_trade": 0.00842167,
+      "parameters": {
+        "trailing_stop_pct": 2,
+        "take_profit_pct": 100,
+        "hard_stop_pct": 15
+      },
+      "filter": "baseline"
+    },
+    {
+      "trades": 765,
+      "pnl_sol": 6.43544151,
+      "win_rate": 0.34902,
+      "profit_factor": 2.790266,
+      "avg_win": 0.03756601,
+      "avg_loss": -0.00764826,
+      "pnl_per_trade": 0.00841234,
+      "parameters": {
+        "trailing_stop_pct": 4,
+        "take_profit_pct": 120,
+        "hard_stop_pct": 20
+      },
+      "filter": "baseline"
+    },
+    {
+      "trades": 765,
+      "pnl_sol": 6.40666055,
+      "win_rate": 0.351634,
+      "profit_factor": 3.322289,
+      "avg_win": 0.03407223,
+      "avg_loss": -0.00589481,
+      "pnl_per_trade": 0.00837472,
+      "parameters": {
+        "trailing_stop_pct": 3,
+        "take_profit_pct": 100,
+        "hard_stop_pct": 15
+      },
+      "filter": "baseline"
+    },
+    {
+      "trades": 765,
+      "pnl_sol": 6.40186988,
+      "win_rate": 0.34902,
+      "profit_factor": 3.277428,
+      "avg_win": 0.03450516,
+      "avg_loss": -0.00598087,
+      "pnl_per_trade": 0.00836846,
+      "parameters": {
+        "trailing_stop_pct": 4,
+        "take_profit_pct": 100,
+        "hard_stop_pct": 15
+      },
+      "filter": "baseline"
+    },
+    {
+      "trades": 765,
+      "pnl_sol": 6.36779663,
+      "win_rate": 0.356863,
+      "profit_factor": 4.81735,
+      "avg_win": 0.02943559,
+      "avg_loss": -0.00359509,
+      "pnl_per_trade": 0.00832392,
+      "parameters": {
+        "trailing_stop_pct": 5,
+        "take_profit_pct": 80,
+        "hard_stop_pct": 8
+      },
+      "filter": "baseline"
+    },
+    {
+      "trades": 765,
+      "pnl_sol": 6.33727794,
+      "win_rate": 0.347712,
+      "profit_factor": 2.672432,
+      "avg_win": 0.03806968,
+      "avg_loss": -0.00804513,
+      "pnl_per_trade": 0.00828402,
+      "parameters": {
+        "trailing_stop_pct": 8,
+        "take_profit_pct": 150,
+        "hard_stop_pct": 20
+      },
+      "filter": "baseline"
+    },
+    {
+      "trades": 765,
+      "pnl_sol": 6.30675416,
+      "win_rate": 0.34902,
+      "profit_factor": 2.732583,
+      "avg_win": 0.03725409,
+      "avg_loss": -0.00774487,
+      "pnl_per_trade": 0.00824412,
+      "parameters": {
+        "trailing_stop_pct": 5,
+        "take_profit_pct": 120,
+        "hard_stop_pct": 20
+      },
+      "filter": "baseline"
+    },
+    {
+      "trades": 765,
+      "pnl_sol": 6.3019537,
+      "win_rate": 0.34902,
+      "profit_factor": 3.206248,
+      "avg_win": 0.03430099,
+      "avg_loss": -0.00607747,
+      "pnl_per_trade": 0.00823785,
+      "parameters": {
+        "trailing_stop_pct": 5,
+        "take_profit_pct": 100,
+        "hard_stop_pct": 15
+      },
+      "filter": "baseline"
+    },
+    {
+      "trades": 765,
+      "pnl_sol": 6.29961557,
+      "win_rate": 0.356863,
+      "profit_factor": 4.67055,
+      "avg_win": 0.02936218,
+      "avg_loss": -0.00369883,
+      "pnl_per_trade": 0.00823479,
+      "parameters": {
+        "trailing_stop_pct": 6,
+        "take_profit_pct": 80,
+        "hard_stop_pct": 8
+      },
+      "filter": "baseline"
+    },
+    {
+      "trades": 765,
+      "pnl_sol": 6.22627657,
+      "win_rate": 0.34902,
+      "profit_factor": 3.143628,
+      "avg_win": 0.03419786,
+      "avg_loss": -0.0061799,
+      "pnl_per_trade": 0.00813892,
+      "parameters": {
+        "trailing_stop_pct": 6,
+        "take_profit_pct": 100,
+        "hard_stop_pct": 15
+      },
+      "filter": "baseline"
+    },
+    {
+      "trades": 765,
+      "pnl_sol": 6.22263807,
+      "win_rate": 0.363399,
+      "profit_factor": 4.351399,
+      "avg_win": 0.02906247,
+      "avg_loss": -0.00404516,
+      "pnl_per_trade": 0.00813417,
+      "parameters": {
+        "trailing_stop_pct": 2,
+        "take_profit_pct": 80,
+        "hard_stop_pct": 10
+      },
+      "filter": "baseline"
+    },
+    {
+      "trades": 765,
+      "pnl_sol": 6.19851091,
+      "win_rate": 0.34902,
+      "profit_factor": 2.680621,
+      "avg_win": 0.03702898,
+      "avg_loss": -0.00784729,
+      "pnl_per_trade": 0.00810263,
+      "parameters": {
+        "trailing_stop_pct": 6,
+        "take_profit_pct": 120,
+        "hard_stop_pct": 20
+      },
+      "filter": "baseline"
+    },
+    {
+      "trades": 765,
+      "pnl_sol": 6.18397536,
+      "win_rate": 0.362092,
+      "profit_factor": 4.255674,
+      "avg_win": 0.02918202,
+      "avg_loss": -0.00412923,
+      "pnl_per_trade": 0.00808363,
+      "parameters": {
+        "trailing_stop_pct": 3,
+        "take_profit_pct": 80,
+        "hard_stop_pct": 10
+      },
+      "filter": "baseline"
+    },
+    {
+      "trades": 765,
+      "pnl_sol": 6.18314606,
+      "win_rate": 0.359477,
+      "profit_factor": 4.172171,
+      "avg_win": 0.02957211,
+      "avg_loss": -0.00421901,
+      "pnl_per_trade": 0.00808254,
+      "parameters": {
+        "trailing_stop_pct": 4,
+        "take_profit_pct": 80,
+        "hard_stop_pct": 10
+      },
+      "filter": "baseline"
+    },
+    {
+      "trades": 765,
+      "pnl_sol": 6.16769086,
+      "win_rate": 0.355556,
+      "profit_factor": 4.393894,
+      "avg_win": 0.02935655,
+      "avg_loss": -0.00390815,
+      "pnl_per_trade": 0.00806234,
+      "parameters": {
+        "trailing_stop_pct": 8,
+        "take_profit_pct": 80,
+        "hard_stop_pct": 8
+      },
+      "filter": "baseline"
+    },
+    {
+      "trades": 765,
+      "pnl_sol": 6.09072594,
+      "win_rate": 0.359477,
+      "profit_factor": 4.053626,
+      "avg_win": 0.02940114,
+      "avg_loss": -0.00431729,
+      "pnl_per_trade": 0.00796173,
+      "parameters": {
+        "trailing_stop_pct": 5,
+        "take_profit_pct": 80,
+        "hard_stop_pct": 10
+      },
+      "filter": "baseline"
+    },
+    {
+      "trades": 765,
+      "pnl_sol": 6.07935973,
+      "win_rate": 0.347712,
+      "profit_factor": 3.022689,
+      "avg_win": 0.03415392,
+      "avg_loss": -0.00638128,
+      "pnl_per_trade": 0.00794688,
+      "parameters": {
+        "trailing_stop_pct": 8,
+        "take_profit_pct": 100,
+        "hard_stop_pct": 15
+      },
+      "filter": "baseline"
+    },
+    {
+      "trades": 765,
+      "pnl_sol": 6.02254488,
+      "win_rate": 0.359477,
+      "profit_factor": 3.948287,
+      "avg_win": 0.02932826,
+      "avg_loss": -0.00442149,
+      "pnl_per_trade": 0.00787261,
+      "parameters": {
+        "trailing_stop_pct": 6,
+        "take_profit_pct": 80,
+        "hard_stop_pct": 10
+      },
+      "filter": "baseline"
+    },
+    {
+      "trades": 765,
+      "pnl_sol": 5.96480866,
+      "win_rate": 0.347712,
+      "profit_factor": 2.574136,
+      "avg_win": 0.03666942,
+      "avg_loss": -0.00804513,
+      "pnl_per_trade": 0.00779714,
+      "parameters": {
+        "trailing_stop_pct": 8,
+        "take_profit_pct": 120,
+        "hard_stop_pct": 20
+      },
+      "filter": "baseline"
+    },
+    {
+      "trades": 765,
+      "pnl_sol": 5.89062017,
+      "win_rate": 0.35817,
+      "profit_factor": 3.7478,
+      "avg_win": 0.02932255,
+      "avg_loss": -0.00463015,
+      "pnl_per_trade": 0.00770016,
+      "parameters": {
+        "trailing_stop_pct": 8,
+        "take_profit_pct": 80,
+        "hard_stop_pct": 10
+      },
+      "filter": "baseline"
+    },
+    {
+      "trades": 765,
+      "pnl_sol": 5.86935898,
+      "win_rate": 0.397386,
+      "profit_factor": 5.135506,
+      "avg_win": 0.02397572,
+      "avg_loss": -0.00327774,
+      "pnl_per_trade": 0.00767236,
+      "parameters": {
+        "trailing_stop_pct": 2,
+        "take_profit_pct": 60,
+        "hard_stop_pct": 8
+      },
+      "filter": "baseline"
+    },
+    {
+      "trades": 765,
+      "pnl_sol": 5.82580258,
+      "win_rate": 0.396078,
+      "profit_factor": 4.984878,
+      "avg_win": 0.02405208,
+      "avg_loss": -0.00336861,
+      "pnl_per_trade": 0.00761543,
+      "parameters": {
+        "trailing_stop_pct": 3,
+        "take_profit_pct": 60,
+        "hard_stop_pct": 8
+      },
+      "filter": "baseline"
+    },
+    {
+      "trades": 765,
+      "pnl_sol": 5.81710685,
+      "win_rate": 0.393464,
+      "profit_factor": 4.850562,
+      "avg_win": 0.02434493,
+      "avg_loss": -0.00346495,
+      "pnl_per_trade": 0.00760406,
+      "parameters": {
+        "trailing_stop_pct": 4,
+        "take_profit_pct": 60,
+        "hard_stop_pct": 8
+      },
+      "filter": "baseline"
+    },
+    {
+      "trades": 765,
+      "pnl_sol": 5.75517103,
+      "win_rate": 0.393464,
+      "profit_factor": 4.698411,
+      "avg_win": 0.02429,
+      "avg_loss": -0.00356908,
+      "pnl_per_trade": 0.0075231,
+      "parameters": {
+        "trailing_stop_pct": 5,
+        "take_profit_pct": 60,
+        "hard_stop_pct": 8
+      },
+      "filter": "baseline"
+    },
+    {
+      "trades": 765,
+      "pnl_sol": 5.68953745,
+      "win_rate": 0.393464,
+      "profit_factor": 4.54652,
+      "avg_win": 0.02423188,
+      "avg_loss": -0.00367949,
+      "pnl_per_trade": 0.0074373,
+      "parameters": {
+        "trailing_stop_pct": 6,
+        "take_profit_pct": 60,
+        "hard_stop_pct": 8
+      },
+      "filter": "baseline"
+    },
+    {
+      "trades": 765,
+      "pnl_sol": 5.66140076,
+      "win_rate": 0.352941,
+      "profit_factor": 2.618825,
+      "avg_win": 0.03392085,
+      "avg_loss": -0.00748871,
+      "pnl_per_trade": 0.00740052,
+      "parameters": {
+        "trailing_stop_pct": 2,
+        "take_profit_pct": 100,
+        "hard_stop_pct": 20
+      },
+      "filter": "baseline"
+    },
+    {
+      "trades": 765,
+      "pnl_sol": 5.62548505,
+      "win_rate": 0.351634,
+      "profit_factor": 2.589145,
+      "avg_win": 0.03407223,
+      "avg_loss": -0.00756399,
+      "pnl_per_trade": 0.00735358,
+      "parameters": {
+        "trailing_stop_pct": 3,
+        "take_profit_pct": 100,
+        "hard_stop_pct": 20
+      },
+      "filter": "baseline"
+    },
+    {
+      "trades": 765,
+      "pnl_sol": 5.61819437,
+      "win_rate": 0.34902,
+      "profit_factor": 2.562917,
+      "avg_win": 0.03450516,
+      "avg_loss": -0.00764826,
+      "pnl_per_trade": 0.00734404,
+      "parameters": {
+        "trailing_stop_pct": 4,
+        "take_profit_pct": 100,
+        "hard_stop_pct": 20
+      },
+      "filter": "baseline"
+    },
+    {
+      "trades": 765,
+      "pnl_sol": 5.61128828,
+      "win_rate": 0.4,
+      "profit_factor": 4.268594,
+      "avg_win": 0.02394777,
+      "avg_loss": -0.00398313,
+      "pnl_per_trade": 0.00733502,
+      "parameters": {
+        "trailing_stop_pct": 2,
+        "take_profit_pct": 60,
+        "hard_stop_pct": 10
+      },
+      "filter": "baseline"
+    },
+    {
+      "trades": 765,
+      "pnl_sol": 5.56773189,
+      "win_rate": 0.398693,
+      "profit_factor": 4.164481,
+      "avg_win": 0.02402353,
+      "avg_loss": -0.00407279,
+      "pnl_per_trade": 0.00727808,
+      "parameters": {
+        "trailing_stop_pct": 3,
+        "take_profit_pct": 60,
+        "hard_stop_pct": 10
+      },
+      "filter": "baseline"
+    },
+    {
+      "trades": 765,
+      "pnl_sol": 5.56271296,
+      "win_rate": 0.392157,
+      "profit_factor": 4.262032,
+      "avg_win": 0.02422668,
+      "avg_loss": -0.00390227,
+      "pnl_per_trade": 0.00727152,
+      "parameters": {
+        "trailing_stop_pct": 8,
+        "take_profit_pct": 60,
+        "hard_stop_pct": 8
+      },
+      "filter": "baseline"
+    },
+    {
+      "trades": 765,
+      "pnl_sol": 5.55803616,
+      "win_rate": 0.396078,
+      "profit_factor": 4.072123,
+      "avg_win": 0.02431426,
+      "avg_loss": -0.00416863,
+      "pnl_per_trade": 0.00726541,
+      "parameters": {
+        "trailing_stop_pct": 4,
+        "take_profit_pct": 60,
+        "hard_stop_pct": 10
+      },
+      "filter": "baseline"
+    },
+    {
+      "trades": 765,
+      "pnl_sol": 5.51827819,
+      "win_rate": 0.34902,
+      "profit_factor": 2.515974,
+      "avg_win": 0.03430099,
+      "avg_loss": -0.00774487,
+      "pnl_per_trade": 0.00721344,
+      "parameters": {
+        "trailing_stop_pct": 5,
+        "take_profit_pct": 100,
+        "hard_stop_pct": 20
+      },
+      "filter": "baseline"
+    },
+    {
+      "trades": 765,
+      "pnl_sol": 5.49610034,
+      "win_rate": 0.396078,
+      "profit_factor": 3.963516,
+      "avg_win": 0.0242597,
+      "avg_loss": -0.00427324,
+      "pnl_per_trade": 0.00718444,
+      "parameters": {
+        "trailing_stop_pct": 5,
+        "take_profit_pct": 60,
+        "hard_stop_pct": 10
+      },
+      "filter": "baseline"
+    },
+    {
+      "trades": 765,
+      "pnl_sol": 5.44260106,
+      "win_rate": 0.34902,
+      "profit_factor": 2.475669,
+      "avg_win": 0.03419786,
+      "avg_loss": -0.00784729,
+      "pnl_per_trade": 0.00711451,
+      "parameters": {
+        "trailing_stop_pct": 6,
+        "take_profit_pct": 100,
+        "hard_stop_pct": 20
+      },
+      "filter": "baseline"
+    },
+    {
+      "trades": 765,
+      "pnl_sol": 5.43046675,
+      "win_rate": 0.396078,
+      "profit_factor": 3.854044,
+      "avg_win": 0.02420196,
+      "avg_loss": -0.00438416,
+      "pnl_per_trade": 0.00709865,
+      "parameters": {
+        "trailing_stop_pct": 6,
+        "take_profit_pct": 60,
+        "hard_stop_pct": 10
+      },
+      "filter": "baseline"
+    },
+    {
+      "trades": 765,
+      "pnl_sol": 5.42331391,
+      "win_rate": 0.363399,
+      "profit_factor": 3.04187,
+      "avg_win": 0.02906247,
+      "avg_loss": -0.00578661,
+      "pnl_per_trade": 0.0070893,
+      "parameters": {
+        "trailing_stop_pct": 2,
+        "take_profit_pct": 80,
+        "hard_stop_pct": 15
+      },
+      "filter": "baseline"
+    },
+    {
+      "trades": 765,
+      "pnl_sol": 5.3846512,
+      "win_rate": 0.362092,
+      "profit_factor": 2.995224,
+      "avg_win": 0.02918202,
+      "avg_loss": -0.00586689,
+      "pnl_per_trade": 0.00703876,
+      "parameters": {
+        "trailing_stop_pct": 3,
+        "take_profit_pct": 80,
+        "hard_stop_pct": 15
+      },
+      "filter": "baseline"
+    },
+    {
+      "trades": 765,
+      "pnl_sol": 5.38132189,
+      "win_rate": 0.359477,
+      "profit_factor": 2.956127,
+      "avg_win": 0.02957211,
+      "avg_loss": -0.00595456,
+      "pnl_per_trade": 0.00703441,
+      "parameters": {
+        "trailing_stop_pct": 4,
+        "take_profit_pct": 80,
+        "hard_stop_pct": 15
+      },
+      "filter": "baseline"
+    },
+    {
+      "trades": 765,
+      "pnl_sol": 5.30364227,
+      "win_rate": 0.394771,
+      "profit_factor": 3.646847,
+      "avg_win": 0.02419669,
+      "avg_loss": -0.00460634,
+      "pnl_per_trade": 0.00693287,
+      "parameters": {
+        "trailing_stop_pct": 8,
+        "take_profit_pct": 60,
+        "hard_stop_pct": 10
+      },
+      "filter": "baseline"
+    },
+    {
+      "trades": 765,
+      "pnl_sol": 5.29568422,
+      "win_rate": 0.347712,
+      "profit_factor": 2.397552,
+      "avg_win": 0.03415392,
+      "avg_loss": -0.00804513,
+      "pnl_per_trade": 0.00692246,
+      "parameters": {
+        "trailing_stop_pct": 8,
+        "take_profit_pct": 100,
+        "hard_stop_pct": 20
+      },
+      "filter": "baseline"
+    },
+    {
+      "trades": 765,
+      "pnl_sol": 5.28890178,
+      "win_rate": 0.359477,
+      "profit_factor": 2.891317,
+      "avg_win": 0.02940114,
+      "avg_loss": -0.00605284,
+      "pnl_per_trade": 0.0069136,
+      "parameters": {
+        "trailing_stop_pct": 5,
+        "take_profit_pct": 80,
+        "hard_stop_pct": 15
+      },
+      "filter": "baseline"
+    },
+    {
+      "trades": 765,
+      "pnl_sol": 5.22072072,
+      "win_rate": 0.359477,
+      "profit_factor": 2.835341,
+      "avg_win": 0.02932826,
+      "avg_loss": -0.00615704,
+      "pnl_per_trade": 0.00682447,
+      "parameters": {
+        "trailing_stop_pct": 6,
+        "take_profit_pct": 80,
+        "hard_stop_pct": 15
+      },
+      "filter": "baseline"
+    },
+    {
+      "trades": 765,
+      "pnl_sol": 5.08879601,
+      "win_rate": 0.35817,
+      "profit_factor": 2.727602,
+      "avg_win": 0.02932255,
+      "avg_loss": -0.00636195,
+      "pnl_per_trade": 0.00665202,
+      "parameters": {
+        "trailing_stop_pct": 8,
+        "take_profit_pct": 80,
+        "hard_stop_pct": 15
+      },
+      "filter": "baseline"
+    },
+    {
+      "trades": 765,
+      "pnl_sol": 4.88093147,
+      "win_rate": 0.4,
+      "profit_factor": 2.99459,
+      "avg_win": 0.02394777,
+      "avg_loss": -0.00567769,
+      "pnl_per_trade": 0.0063803,
+      "parameters": {
+        "trailing_stop_pct": 2,
+        "take_profit_pct": 60,
+        "hard_stop_pct": 15
+      },
+      "filter": "baseline"
+    },
+    {
+      "trades": 765,
+      "pnl_sol": 4.83737508,
+      "win_rate": 0.398693,
+      "profit_factor": 2.942875,
+      "avg_win": 0.02402353,
+      "avg_loss": -0.00576343,
+      "pnl_per_trade": 0.00632337,
+      "parameters": {
+        "trailing_stop_pct": 3,
+        "take_profit_pct": 60,
+        "hard_stop_pct": 15
+      },
+      "filter": "baseline"
+    },
+    {
+      "trades": 765,
+      "pnl_sol": 4.82517935,
+      "win_rate": 0.396078,
+      "profit_factor": 2.898152,
+      "avg_win": 0.02431426,
+      "avg_loss": -0.00585724,
+      "pnl_per_trade": 0.00630742,
+      "parameters": {
+        "trailing_stop_pct": 4,
+        "take_profit_pct": 60,
+        "hard_stop_pct": 15
+      },
+      "filter": "baseline"
+    },
+    {
+      "trades": 765,
+      "pnl_sol": 4.76324352,
+      "win_rate": 0.396078,
+      "profit_factor": 2.840906,
+      "avg_win": 0.0242597,
+      "avg_loss": -0.00596185,
+      "pnl_per_trade": 0.00622646,
+      "parameters": {
+        "trailing_stop_pct": 5,
+        "take_profit_pct": 60,
+        "hard_stop_pct": 15
+      },
+      "filter": "baseline"
+    },
+    {
+      "trades": 765,
+      "pnl_sol": 4.69760994,
+      "win_rate": 0.396078,
+      "profit_factor": 2.782379,
+      "avg_win": 0.02420196,
+      "avg_loss": -0.00607277,
+      "pnl_per_trade": 0.00614067,
+      "parameters": {
+        "trailing_stop_pct": 6,
+        "take_profit_pct": 60,
+        "hard_stop_pct": 15
+      },
+      "filter": "baseline"
+    },
+    {
+      "trades": 765,
+      "pnl_sol": 4.6621384,
+      "win_rate": 0.363399,
+      "profit_factor": 2.364304,
+      "avg_win": 0.02906247,
+      "avg_loss": -0.00744494,
+      "pnl_per_trade": 0.0060943,
+      "parameters": {
+        "trailing_stop_pct": 2,
+        "take_profit_pct": 80,
+        "hard_stop_pct": 20
+      },
+      "filter": "baseline"
+    },
+    {
+      "trades": 765,
+      "pnl_sol": 4.62347569,
+      "win_rate": 0.362092,
+      "profit_factor": 2.336286,
+      "avg_win": 0.02918202,
+      "avg_loss": -0.00752162,
+      "pnl_per_trade": 0.00604376,
+      "parameters": {
+        "trailing_stop_pct": 3,
+        "take_profit_pct": 80,
+        "hard_stop_pct": 20
+      },
+      "filter": "baseline"
+    },
+    {
+      "trades": 765,
+      "pnl_sol": 4.61764639,
+      "win_rate": 0.359477,
+      "profit_factor": 2.313816,
+      "avg_win": 0.02957211,
+      "avg_loss": -0.00760754,
+      "pnl_per_trade": 0.00603614,
+      "parameters": {
+        "trailing_stop_pct": 4,
+        "take_profit_pct": 80,
+        "hard_stop_pct": 20
+      },
+      "filter": "baseline"
+    },
+    {
+      "trades": 765,
+      "pnl_sol": 4.57078546,
+      "win_rate": 0.394771,
+      "profit_factor": 2.670233,
+      "avg_win": 0.02419669,
+      "avg_loss": -0.00629107,
+      "pnl_per_trade": 0.00597488,
+      "parameters": {
+        "trailing_stop_pct": 8,
+        "take_profit_pct": 60,
+        "hard_stop_pct": 15
+      },
+      "filter": "baseline"
+    },
+    {
+      "trades": 765,
+      "pnl_sol": 4.52522627,
+      "win_rate": 0.359477,
+      "profit_factor": 2.2711,
+      "avg_win": 0.02940114,
+      "avg_loss": -0.00770582,
+      "pnl_per_trade": 0.00591533,
+      "parameters": {
+        "trailing_stop_pct": 5,
+        "take_profit_pct": 80,
+        "hard_stop_pct": 20
+      },
+      "filter": "baseline"
+    },
+    {
+      "trades": 765,
+      "pnl_sol": 4.45704521,
+      "win_rate": 0.359477,
+      "profit_factor": 2.235245,
+      "avg_win": 0.02932826,
+      "avg_loss": -0.00781001,
+      "pnl_per_trade": 0.0058262,
+      "parameters": {
+        "trailing_stop_pct": 6,
+        "take_profit_pct": 80,
+        "hard_stop_pct": 20
+      },
+      "filter": "baseline"
+    },
+    {
+      "trades": 765,
+      "pnl_sol": 4.3251205,
+      "win_rate": 0.35817,
+      "profit_factor": 2.166034,
+      "avg_win": 0.02932255,
+      "avg_loss": -0.00801136,
+      "pnl_per_trade": 0.00565375,
+      "parameters": {
+        "trailing_stop_pct": 8,
+        "take_profit_pct": 80,
+        "hard_stop_pct": 20
+      },
+      "filter": "baseline"
+    },
+    {
+      "trades": 765,
+      "pnl_sol": 4.18659677,
+      "win_rate": 0.4,
+      "profit_factor": 2.332708,
+      "avg_win": 0.02394777,
+      "avg_loss": -0.00728868,
+      "pnl_per_trade": 0.00547268,
+      "parameters": {
+        "trailing_stop_pct": 2,
+        "take_profit_pct": 60,
+        "hard_stop_pct": 20
+      },
+      "filter": "baseline"
+    },
+    {
+      "trades": 765,
+      "pnl_sol": 4.14304038,
+      "win_rate": 0.398693,
+      "profit_factor": 2.30115,
+      "avg_win": 0.02402353,
+      "avg_loss": -0.00737069,
+      "pnl_per_trade": 0.00541574,
+      "parameters": {
+        "trailing_stop_pct": 3,
+        "take_profit_pct": 60,
+        "hard_stop_pct": 20
+      },
+      "filter": "baseline"
+    },
+    {
+      "trades": 765,
+      "pnl_sol": 4.12834465,
+      "win_rate": 0.396078,
+      "profit_factor": 2.274623,
+      "avg_win": 0.02431426,
+      "avg_loss": -0.00746285,
+      "pnl_per_trade": 0.00539653,
+      "parameters": {
+        "trailing_stop_pct": 4,
+        "take_profit_pct": 60,
+        "hard_stop_pct": 20
+      },
+      "filter": "baseline"
+    },
+    {
+      "trades": 765,
+      "pnl_sol": 4.06640882,
+      "win_rate": 0.396078,
+      "profit_factor": 2.238143,
+      "avg_win": 0.0242597,
+      "avg_loss": -0.00756746,
+      "pnl_per_trade": 0.00531557,
+      "parameters": {
+        "trailing_stop_pct": 5,
+        "take_profit_pct": 60,
+        "hard_stop_pct": 20
+      },
+      "filter": "baseline"
+    },
+    {
+      "trades": 765,
+      "pnl_sol": 4.00077524,
+      "win_rate": 0.396078,
+      "profit_factor": 2.200562,
+      "avg_win": 0.02420196,
+      "avg_loss": -0.00767838,
+      "pnl_per_trade": 0.00522977,
+      "parameters": {
+        "trailing_stop_pct": 6,
+        "take_profit_pct": 60,
+        "hard_stop_pct": 20
+      },
+      "filter": "baseline"
+    },
+    {
+      "trades": 765,
+      "pnl_sol": 3.87395076,
+      "win_rate": 0.394771,
+      "profit_factor": 2.128297,
+      "avg_win": 0.02419669,
+      "avg_loss": -0.00789299,
+      "pnl_per_trade": 0.00506399,
+      "parameters": {
+        "trailing_stop_pct": 8,
+        "take_profit_pct": 60,
+        "hard_stop_pct": 20
+      },
+      "filter": "baseline"
+    }
+  ],
+  "step3_top5_x_filters": [
+    {
+      "trades": 765,
+      "pnl_sol": 8.73094598,
+      "win_rate": 0.350327,
+      "profit_factor": 6.585088,
+      "avg_win": 0.03841122,
+      "avg_loss": -0.00333318,
+      "pnl_per_trade": 0.011413,
+      "parameters": {
+        "trailing_stop_pct": 2,
+        "take_profit_pct": 150,
+        "hard_stop_pct": 8
+      },
+      "filter": "baseline",
+      "filter_label": "No filter"
+    },
+    {
+      "trades": 671,
+      "pnl_sol": 8.75451208,
+      "win_rate": 0.388972,
+      "profit_factor": 7.630152,
+      "avg_win": 0.03860123,
+      "avg_loss": -0.00345657,
+      "pnl_per_trade": 0.01304696,
+      "parameters": {
+        "trailing_stop_pct": 2,
+        "take_profit_pct": 150,
+        "hard_stop_pct": 8
+      },
+      "filter": "no_wed",
+      "filter_label": "Exclude Wednesday"
+    },
+    {
+      "trades": 740,
+      "pnl_sol": 8.64721434,
+      "win_rate": 0.358108,
+      "profit_factor": 6.803725,
+      "avg_win": 0.03825342,
+      "avg_loss": -0.0033332,
+      "pnl_per_trade": 0.01168542,
+      "parameters": {
+        "trailing_stop_pct": 2,
+        "take_profit_pct": 150,
+        "hard_stop_pct": 8
+      },
+      "filter": "no_utc14",
+      "filter_label": "Exclude UTC 14"
+    },
+    {
+      "trades": 646,
+      "pnl_sol": 8.67078043,
+      "win_rate": 0.399381,
+      "profit_factor": 7.952806,
+      "avg_win": 0.03844136,
+      "avg_loss": -0.00346414,
+      "pnl_per_trade": 0.01342226,
+      "parameters": {
+        "trailing_stop_pct": 2,
+        "take_profit_pct": 150,
+        "hard_stop_pct": 8
+      },
+      "filter": "no_wed_no_utc14",
+      "filter_label": "Exclude Wednesday + UTC 14"
+    },
+    {
+      "trades": 617,
+      "pnl_sol": 8.30463462,
+      "win_rate": 0.387358,
+      "profit_factor": 7.618357,
+      "avg_win": 0.03999758,
+      "avg_loss": -0.00347587,
+      "pnl_per_trade": 0.0134597,
+      "parameters": {
+        "trailing_stop_pct": 2,
+        "take_profit_pct": 150,
+        "hard_stop_pct": 8
+      },
+      "filter": "thu_fri",
+      "filter_label": "Only Thursday + Friday"
+    },
+    {
+      "trades": 240,
+      "pnl_sol": 3.7845385,
+      "win_rate": 0.4875,
+      "profit_factor": 10.097709,
+      "avg_win": 0.03590194,
+      "avg_loss": -0.00361729,
+      "pnl_per_trade": 0.01576891,
+      "parameters": {
+        "trailing_stop_pct": 2,
+        "take_profit_pct": 150,
+        "hard_stop_pct": 8
+      },
+      "filter": "golden_hours",
+      "filter_label": "Only golden hours (UTC 4-6, 8-12, 17)"
+    },
+    {
+      "trades": 765,
+      "pnl_sol": 8.70206066,
+      "win_rate": 0.34902,
+      "profit_factor": 6.418544,
+      "avg_win": 0.03860688,
+      "avg_loss": -0.00341697,
+      "pnl_per_trade": 0.01137524,
+      "parameters": {
+        "trailing_stop_pct": 3,
+        "take_profit_pct": 150,
+        "hard_stop_pct": 8
+      },
+      "filter": "baseline",
+      "filter_label": "No filter"
+    },
+    {
+      "trades": 671,
+      "pnl_sol": 8.74325514,
+      "win_rate": 0.388972,
+      "profit_factor": 7.488871,
+      "avg_win": 0.0386616,
+      "avg_loss": -0.00352729,
+      "pnl_per_trade": 0.01303019,
+      "parameters": {
+        "trailing_stop_pct": 3,
+        "take_profit_pct": 150,
+        "hard_stop_pct": 8
+      },
+      "filter": "no_wed",
+      "filter_label": "Exclude Wednesday"
+    },
+    {
+      "trades": 740,
+      "pnl_sol": 8.62091217,
+      "win_rate": 0.356757,
+      "profit_factor": 6.63216,
+      "avg_win": 0.03845292,
+      "avg_loss": -0.00341665,
+      "pnl_per_trade": 0.01164988,
+      "parameters": {
+        "trailing_stop_pct": 3,
+        "take_profit_pct": 150,
+        "hard_stop_pct": 8
+      },
+      "filter": "no_utc14",
+      "filter_label": "Exclude UTC 14"
+    },
+    {
+      "trades": 646,
+      "pnl_sol": 8.66210665,
+      "win_rate": 0.399381,
+      "profit_factor": 7.809276,
+      "avg_win": 0.03850469,
+      "avg_loss": -0.00353362,
+      "pnl_per_trade": 0.01340883,
+      "parameters": {
+        "trailing_stop_pct": 3,
+        "take_profit_pct": 150,
+        "hard_stop_pct": 8
+      },
+      "filter": "no_wed_no_utc14",
+      "filter_label": "Exclude Wednesday + UTC 14"
+    },
+    {
+      "trades": 617,
+      "pnl_sol": 8.2967967,
+      "win_rate": 0.387358,
+      "profit_factor": 7.472759,
+      "avg_win": 0.04007782,
+      "avg_loss": -0.0035507,
+      "pnl_per_trade": 0.013447,
+      "parameters": {
+        "trailing_stop_pct": 3,
+        "take_profit_pct": 150,
+        "hard_stop_pct": 8
+      },
+      "filter": "thu_fri",
+      "filter_label": "Only Thursday + Friday"
+    },
+    {
+      "trades": 240,
+      "pnl_sol": 3.74475839,
+      "win_rate": 0.4875,
+      "profit_factor": 9.863582,
+      "avg_win": 0.03561749,
+      "avg_loss": -0.00367381,
+      "pnl_per_trade": 0.01560316,
+      "parameters": {
+        "trailing_stop_pct": 3,
+        "take_profit_pct": 150,
+        "hard_stop_pct": 8
+      },
+      "filter": "golden_hours",
+      "filter_label": "Only golden hours (UTC 4-6, 8-12, 17)"
+    },
+    {
+      "trades": 765,
+      "pnl_sol": 8.67566527,
+      "win_rate": 0.346405,
+      "profit_factor": 6.242993,
+      "avg_win": 0.03898257,
+      "avg_loss": -0.00350575,
+      "pnl_per_trade": 0.01134074,
+      "parameters": {
+        "trailing_stop_pct": 4,
+        "take_profit_pct": 150,
+        "hard_stop_pct": 8
+      },
+      "filter": "baseline",
+      "filter_label": "No filter"
+    },
+    {
+      "trades": 671,
+      "pnl_sol": 8.73448812,
+      "win_rate": 0.385991,
+      "profit_factor": 7.328667,
+      "avg_win": 0.03905264,
+      "avg_loss": -0.00359413,
+      "pnl_per_trade": 0.01301712,
+      "parameters": {
+        "trailing_stop_pct": 4,
+        "take_profit_pct": 150,
+        "hard_stop_pct": 8
+      },
+      "filter": "no_wed",
+      "filter_label": "Exclude Wednesday"
+    },
+    {
+      "trades": 740,
+      "pnl_sol": 8.59709993,
+      "win_rate": 0.354054,
+      "profit_factor": 6.450185,
+      "avg_win": 0.03883395,
+      "avg_loss": -0.00350532,
+      "pnl_per_trade": 0.0116177,
+      "parameters": {
+        "trailing_stop_pct": 4,
+        "take_profit_pct": 150,
+        "hard_stop_pct": 8
+      },
+      "filter": "no_utc14",
+      "filter_label": "Exclude UTC 14"
+    },
+    {
+      "trades": 646,
+      "pnl_sol": 8.65592278,
+      "win_rate": 0.396285,
+      "profit_factor": 7.643958,
+      "avg_win": 0.03890136,
+      "avg_loss": -0.00359897,
+      "pnl_per_trade": 0.01339926,
+      "parameters": {
+        "trailing_stop_pct": 4,
+        "take_profit_pct": 150,
+        "hard_stop_pct": 8
+      },
+      "filter": "no_wed_no_utc14",
+      "filter_label": "Exclude Wednesday + UTC 14"
+    },
+    {
+      "trades": 617,
+      "pnl_sol": 8.28892292,
+      "win_rate": 0.385737,
+      "profit_factor": 7.309569,
+      "avg_win": 0.04034718,
+      "avg_loss": -0.00362902,
+      "pnl_per_trade": 0.01343423,
+      "parameters": {
+        "trailing_stop_pct": 4,
+        "take_profit_pct": 150,
+        "hard_stop_pct": 8
+      },
+      "filter": "thu_fri",
+      "filter_label": "Only Thursday + Friday"
+    },
+    {
+      "trades": 240,
+      "pnl_sol": 3.76119046,
+      "win_rate": 0.483333,
+      "profit_factor": 9.678718,
+      "avg_win": 0.0361601,
+      "avg_loss": -0.00373604,
+      "pnl_per_trade": 0.01567163,
+      "parameters": {
+        "trailing_stop_pct": 4,
+        "take_profit_pct": 150,
+        "hard_stop_pct": 8
+      },
+      "filter": "golden_hours",
+      "filter_label": "Only golden hours (UTC 4-6, 8-12, 17)"
+    },
+    {
+      "trades": 765,
+      "pnl_sol": 8.54697792,
+      "win_rate": 0.346405,
+      "profit_factor": 6.02728,
+      "avg_win": 0.03866829,
+      "avg_loss": -0.00360195,
+      "pnl_per_trade": 0.01117252,
+      "parameters": {
+        "trailing_stop_pct": 5,
+        "take_profit_pct": 150,
+        "hard_stop_pct": 8
+      },
+      "filter": "baseline",
+      "filter_label": "No filter"
+    },
+    {
+      "trades": 671,
+      "pnl_sol": 8.62442895,
+      "win_rate": 0.385991,
+      "profit_factor": 7.122979,
+      "avg_win": 0.03873731,
+      "avg_loss": -0.00366806,
+      "pnl_per_trade": 0.0128531,
+      "parameters": {
+        "trailing_stop_pct": 5,
+        "take_profit_pct": 150,
+        "hard_stop_pct": 8
+      },
+      "filter": "no_wed",
+      "filter_label": "Exclude Wednesday"
+    },
+    {
+      "trades": 740,
+      "pnl_sol": 8.47125718,
+      "win_rate": 0.354054,
+      "profit_factor": 6.227438,
+      "avg_win": 0.0385183,
+      "avg_loss": -0.00360119,
+      "pnl_per_trade": 0.01144764,
+      "parameters": {
+        "trailing_stop_pct": 5,
+        "take_profit_pct": 150,
+        "hard_stop_pct": 8
+      },
+      "filter": "no_utc14",
+      "filter_label": "Exclude UTC 14"
+    },
+    {
+      "trades": 646,
+      "pnl_sol": 8.54870821,
+      "win_rate": 0.396285,
+      "profit_factor": 7.432669,
+      "avg_win": 0.03858461,
+      "avg_loss": -0.00367114,
+      "pnl_per_trade": 0.01323329,
+      "parameters": {
+        "trailing_stop_pct": 5,
+        "take_profit_pct": 150,
+        "hard_stop_pct": 8
+      },
+      "filter": "no_wed_no_utc14",
+      "filter_label": "Exclude Wednesday + UTC 14"
+    },
+    {
+      "trades": 617,
+      "pnl_sol": 8.20766075,
+      "win_rate": 0.385737,
+      "profit_factor": 7.115559,
+      "avg_win": 0.04012502,
+      "avg_loss": -0.00370744,
+      "pnl_per_trade": 0.01330253,
+      "parameters": {
+        "trailing_stop_pct": 5,
+        "take_profit_pct": 150,
+        "hard_stop_pct": 8
+      },
+      "filter": "thu_fri",
+      "filter_label": "Only Thursday + Friday"
+    },
+    {
+      "trades": 240,
+      "pnl_sol": 3.72542549,
+      "win_rate": 0.483333,
+      "profit_factor": 9.459552,
+      "avg_win": 0.03591212,
+      "avg_loss": -0.00379639,
+      "pnl_per_trade": 0.01552261,
+      "parameters": {
+        "trailing_stop_pct": 5,
+        "take_profit_pct": 150,
+        "hard_stop_pct": 8
+      },
+      "filter": "golden_hours",
+      "filter_label": "Only golden hours (UTC 4-6, 8-12, 17)"
+    },
+    {
+      "trades": 765,
+      "pnl_sol": 8.46969117,
+      "win_rate": 0.352941,
+      "profit_factor": 5.465421,
+      "avg_win": 0.03839415,
+      "avg_loss": -0.00406152,
+      "pnl_per_trade": 0.01107149,
+      "parameters": {
+        "trailing_stop_pct": 2,
+        "take_profit_pct": 150,
+        "hard_stop_pct": 10
+      },
+      "filter": "baseline",
+      "filter_label": "No filter"
+    },
+    {
+      "trades": 671,
+      "pnl_sol": 8.54225727,
+      "win_rate": 0.391952,
+      "profit_factor": 6.322687,
+      "avg_win": 0.03858226,
+      "avg_loss": -0.00422336,
+      "pnl_per_trade": 0.01273064,
+      "parameters": {
+        "trailing_stop_pct": 2,
+        "take_profit_pct": 150,
+        "hard_stop_pct": 10
+      },
+      "filter": "no_wed",
+      "filter_label": "Exclude Wednesday"
+    },
+    {
+      "trades": 740,
+      "pnl_sol": 8.40195953,
+      "win_rate": 0.360811,
+      "profit_factor": 5.648618,
+      "avg_win": 0.03823734,
+      "avg_loss": -0.0040616,
+      "pnl_per_trade": 0.011354,
+      "parameters": {
+        "trailing_stop_pct": 2,
+        "take_profit_pct": 150,
+        "hard_stop_pct": 10
+      },
+      "filter": "no_utc14",
+      "filter_label": "Exclude UTC 14"
+    },
+    {
+      "trades": 646,
+      "pnl_sol": 8.47452563,
+      "win_rate": 0.402477,
+      "profit_factor": 6.591684,
+      "avg_win": 0.0384234,
+      "avg_loss": -0.0042334,
+      "pnl_per_trade": 0.01311846,
+      "parameters": {
+        "trailing_stop_pct": 2,
+        "take_profit_pct": 150,
+        "hard_stop_pct": 10
+      },
+      "filter": "no_wed_no_utc14",
+      "filter_label": "Exclude Wednesday + UTC 14"
+    },
+    {
+      "trades": 617,
+      "pnl_sol": 8.03792383,
+      "win_rate": 0.388979,
+      "profit_factor": 6.25047,
+      "avg_win": 0.03987008,
+      "avg_loss": -0.00425249,
+      "pnl_per_trade": 0.01302743,
+      "parameters": {
+        "trailing_stop_pct": 2,
+        "take_profit_pct": 150,
+        "hard_stop_pct": 10
+      },
+      "filter": "thu_fri",
+      "filter_label": "Only Thursday + Friday"
+    },
+    {
+      "trades": 240,
+      "pnl_sol": 3.70652458,
+      "win_rate": 0.491667,
+      "profit_factor": 8.362991,
+      "avg_win": 0.03567732,
+      "avg_loss": -0.00441578,
+      "pnl_per_trade": 0.01544385,
+      "parameters": {
+        "trailing_stop_pct": 2,
+        "take_profit_pct": 150,
+        "hard_stop_pct": 10
+      },
+      "filter": "golden_hours",
+      "filter_label": "Only golden hours (UTC 4-6, 8-12, 17)"
+    }
+  ],
+  "step4_top3_on_mcap_20k": {
+    "mcap_floor_usd": 20000.0,
+    "mcap_records": 449,
+    "results": [
+      {
+        "trades": 404,
+        "pnl_sol": 7.03514614,
+        "win_rate": 0.455446,
+        "profit_factor": 9.829145,
+        "avg_win": 0.04256498,
+        "avg_loss": -0.00370609,
+        "pnl_per_trade": 0.01741373,
+        "parameters": {
+          "trailing_stop_pct": 2,
+          "take_profit_pct": 150,
+          "hard_stop_pct": 8
+        },
+        "filter": "no_wed",
+        "filter_label": "Exclude Wednesday"
+      },
+      {
+        "trades": 404,
+        "pnl_sol": 7.05034049,
+        "win_rate": 0.455446,
+        "profit_factor": 9.771058,
+        "avg_win": 0.04268565,
+        "avg_loss": -0.00373869,
+        "pnl_per_trade": 0.01745134,
+        "parameters": {
+          "trailing_stop_pct": 3,
+          "take_profit_pct": 150,
+          "hard_stop_pct": 8
+        },
+        "filter": "no_wed",
+        "filter_label": "Exclude Wednesday"
+      },
+      {
+        "trades": 404,
+        "pnl_sol": 6.9912789,
+        "win_rate": 0.450495,
+        "profit_factor": 9.571454,
+        "avg_win": 0.0428952,
+        "avg_loss": -0.00375874,
+        "pnl_per_trade": 0.01730515,
+        "parameters": {
+          "trailing_stop_pct": 4,
+          "take_profit_pct": 150,
+          "hard_stop_pct": 8
+        },
+        "filter": "no_wed",
+        "filter_label": "Exclude Wednesday"
+      }
+    ]
+  },
+  "top10_ranked": [
+    {
+      "trades": 671,
+      "pnl_sol": 8.75451208,
+      "win_rate": 0.388972,
+      "profit_factor": 7.630152,
+      "avg_win": 0.03860123,
+      "avg_loss": -0.00345657,
+      "pnl_per_trade": 0.01304696,
+      "parameters": {
+        "trailing_stop_pct": 2,
+        "take_profit_pct": 150,
+        "hard_stop_pct": 8
+      },
+      "filter": "no_wed",
+      "filter_label": "Exclude Wednesday"
+    },
+    {
+      "trades": 671,
+      "pnl_sol": 8.74325514,
+      "win_rate": 0.388972,
+      "profit_factor": 7.488871,
+      "avg_win": 0.0386616,
+      "avg_loss": -0.00352729,
+      "pnl_per_trade": 0.01303019,
+      "parameters": {
+        "trailing_stop_pct": 3,
+        "take_profit_pct": 150,
+        "hard_stop_pct": 8
+      },
+      "filter": "no_wed",
+      "filter_label": "Exclude Wednesday"
+    },
+    {
+      "trades": 671,
+      "pnl_sol": 8.73448812,
+      "win_rate": 0.385991,
+      "profit_factor": 7.328667,
+      "avg_win": 0.03905264,
+      "avg_loss": -0.00359413,
+      "pnl_per_trade": 0.01301712,
+      "parameters": {
+        "trailing_stop_pct": 4,
+        "take_profit_pct": 150,
+        "hard_stop_pct": 8
+      },
+      "filter": "no_wed",
+      "filter_label": "Exclude Wednesday"
+    },
+    {
+      "trades": 765,
+      "pnl_sol": 8.73094598,
+      "win_rate": 0.350327,
+      "profit_factor": 6.585088,
+      "avg_win": 0.03841122,
+      "avg_loss": -0.00333318,
+      "pnl_per_trade": 0.011413,
+      "parameters": {
+        "trailing_stop_pct": 2,
+        "take_profit_pct": 150,
+        "hard_stop_pct": 8
+      },
+      "filter": "baseline",
+      "filter_label": "No filter"
+    },
+    {
+      "trades": 765,
+      "pnl_sol": 8.70206066,
+      "win_rate": 0.34902,
+      "profit_factor": 6.418544,
+      "avg_win": 0.03860688,
+      "avg_loss": -0.00341697,
+      "pnl_per_trade": 0.01137524,
+      "parameters": {
+        "trailing_stop_pct": 3,
+        "take_profit_pct": 150,
+        "hard_stop_pct": 8
+      },
+      "filter": "baseline",
+      "filter_label": "No filter"
+    },
+    {
+      "trades": 765,
+      "pnl_sol": 8.67566527,
+      "win_rate": 0.346405,
+      "profit_factor": 6.242993,
+      "avg_win": 0.03898257,
+      "avg_loss": -0.00350575,
+      "pnl_per_trade": 0.01134074,
+      "parameters": {
+        "trailing_stop_pct": 4,
+        "take_profit_pct": 150,
+        "hard_stop_pct": 8
+      },
+      "filter": "baseline",
+      "filter_label": "No filter"
+    },
+    {
+      "trades": 646,
+      "pnl_sol": 8.67078043,
+      "win_rate": 0.399381,
+      "profit_factor": 7.952806,
+      "avg_win": 0.03844136,
+      "avg_loss": -0.00346414,
+      "pnl_per_trade": 0.01342226,
+      "parameters": {
+        "trailing_stop_pct": 2,
+        "take_profit_pct": 150,
+        "hard_stop_pct": 8
+      },
+      "filter": "no_wed_no_utc14",
+      "filter_label": "Exclude Wednesday + UTC 14"
+    },
+    {
+      "trades": 646,
+      "pnl_sol": 8.66210665,
+      "win_rate": 0.399381,
+      "profit_factor": 7.809276,
+      "avg_win": 0.03850469,
+      "avg_loss": -0.00353362,
+      "pnl_per_trade": 0.01340883,
+      "parameters": {
+        "trailing_stop_pct": 3,
+        "take_profit_pct": 150,
+        "hard_stop_pct": 8
+      },
+      "filter": "no_wed_no_utc14",
+      "filter_label": "Exclude Wednesday + UTC 14"
+    },
+    {
+      "trades": 646,
+      "pnl_sol": 8.65592278,
+      "win_rate": 0.396285,
+      "profit_factor": 7.643958,
+      "avg_win": 0.03890136,
+      "avg_loss": -0.00359897,
+      "pnl_per_trade": 0.01339926,
+      "parameters": {
+        "trailing_stop_pct": 4,
+        "take_profit_pct": 150,
+        "hard_stop_pct": 8
+      },
+      "filter": "no_wed_no_utc14",
+      "filter_label": "Exclude Wednesday + UTC 14"
+    },
+    {
+      "trades": 740,
+      "pnl_sol": 8.64721434,
+      "win_rate": 0.358108,
+      "profit_factor": 6.803725,
+      "avg_win": 0.03825342,
+      "avg_loss": -0.0033332,
+      "pnl_per_trade": 0.01168542,
+      "parameters": {
+        "trailing_stop_pct": 2,
+        "take_profit_pct": 150,
+        "hard_stop_pct": 8
+      },
+      "filter": "no_utc14",
+      "filter_label": "Exclude UTC 14"
+    }
+  ]
+}
