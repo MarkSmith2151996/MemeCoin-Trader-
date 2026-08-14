@@ -8,10 +8,14 @@ becomes a real signed swap; shadow mode (paper + Jupiter quotes) is untouched.
 Safety gates before any swap:
 - the token must not be in the banned list,
 - the wallet must hold enough SOL for the notional plus a reserve,
-- the quote price impact must stay below ``max_price_impact_pct`` (default 5%).
+- the quote price impact must stay below ``max_price_impact_pct`` (default 5%),
+- the circuit breaker must be clear (MT-546) — a tripped breaker blocks new
+  buys only; sells are never blocked so open positions stay manageable.
 
 Every step — quote, price impact, signed transaction, send result,
 confirmation, and fill price versus the reference paper mark — is logged.
+A failed or crashed sell trips the breaker (``src/execution/safety_controls.py``);
+reset it with ``scripts/reset_breaker.py`` after investigating.
 """
 
 from __future__ import annotations
@@ -24,6 +28,7 @@ from src.chain.jupiter_swap import JupiterSwapClient, JupiterSwapQuote
 from src.core.models import Side, SwapQuote, Trade
 from src.execution.base import ExecutionAdapter
 from src.execution.price_provider import PriceProvider
+from src.execution.safety_controls import CircuitBreaker
 
 log = logging.getLogger("live_execution")
 
@@ -42,12 +47,14 @@ class LiveExecutionAdapter(ExecutionAdapter):
         max_price_impact_pct: float = MAX_PRICE_IMPACT_PCT,
         wallet_reserve_sol: float = WALLET_RESERVE_SOL,
         reference_price_provider: PriceProvider | None = None,
+        circuit_breaker: CircuitBreaker | None = None,
     ) -> None:
         self._client = client if client is not None else JupiterSwapClient()
         self._banned_tokens = set(banned_tokens or ())
         self._max_price_impact_pct = max_price_impact_pct
         self._wallet_reserve_sol = wallet_reserve_sol
         self._reference_price_provider = reference_price_provider
+        self._circuit_breaker = circuit_breaker if circuit_breaker is not None else CircuitBreaker()
         self._closed = False
 
     @property
@@ -57,6 +64,7 @@ class LiveExecutionAdapter(ExecutionAdapter):
     async def buy(self, mint_address: str, amount_sol: float, slippage_bps: int = 100) -> Trade:
         """Buy ``amount_sol`` worth of ``mint_address`` through Jupiter."""
         self._ensure_open()
+        self._check_circuit_breaker()
         await self._check_token_allowed(mint_address)
         await self._check_sol_balance(amount_sol)
 
@@ -119,9 +127,28 @@ class LiveExecutionAdapter(ExecutionAdapter):
             quote.price_sol or 0.0, quote.price_impact_pct * 100,
         )
 
-        result = await self._client.execute_swap(quote)
+        try:
+            result = await self._client.execute_swap(quote)
+        except Exception as exc:
+            # MT-546: a crashed swap execution also trips the breaker — the
+            # system cannot know whether the sell landed.
+            self._circuit_breaker.trip(
+                mint=mint_address,
+                error=f"sell crash: {exc}",
+                reason="sell_failure",
+            )
+            raise
         await self._log_swap_result("SELL", mint_address, result)
         if not result.ok:
+            # MT-546: a failed sell (swap error, expired after retries, or
+            # confirmation timeout) trips the circuit breaker — new buys are
+            # blocked until an operator resets the flag.
+            self._circuit_breaker.trip(
+                mint=mint_address,
+                signature_attempt=result.signature,
+                error=result.error or f"sell {result.confirmation_status}",
+                reason="sell_failure",
+            )
             raise RuntimeError(
                 f"live sell failed ({result.confirmation_status}): {result.error or 'unknown'}",
             )
@@ -244,6 +271,21 @@ class LiveExecutionAdapter(ExecutionAdapter):
             raise RuntimeError(
                 f"price impact {impact_pct:.2f}% exceeds limit "
                 f"{self._max_price_impact_pct:.2f}% for {mint_address[:16]}",
+            )
+
+    def _check_circuit_breaker(self) -> None:
+        """Block new buys while the sell-failure breaker is tripped.
+
+        Sells are never blocked — open positions must keep being manageable.
+        Paper mode never reaches this adapter, so the breaker is live-only.
+        """
+        state = self._circuit_breaker.status()
+        if state.tripped:
+            raise RuntimeError(
+                "circuit breaker tripped (reason="
+                f"{state.reason or 'sell_failure'} mint={state.mint or '-'} "
+                f"at={state.tripped_at or '-'} error={state.error or '-'}) — "
+                "new buys blocked; reset via scripts/reset_breaker.py",
             )
 
     async def _quote_or_raise(

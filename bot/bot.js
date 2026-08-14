@@ -18,7 +18,7 @@
  */
 const path = require("node:path");
 const fs = require("node:fs");
-const { spawnSync } = require("node:child_process");
+const { spawn, spawnSync } = require("node:child_process");
 const TelegramBot = require("node-telegram-bot-api");
 
 const lib = require("./lib");
@@ -112,6 +112,10 @@ async function handleCommand(chatId, text) {
         `${r.ok ? "Kill signal sent." : `Failed: ${r.message}`}\n` +
         `Process: ${alive ? "STILL RUNNING" : "stopped"}.\n` +
         'Note: the external watchdog restarts it within ~3 min unless you send "start B" first.';
+      break;
+    }
+    case cmd === "kill switch" || cmd === "killswitch": {
+      reply = await runKillSwitch(PROJECT_ROOT);
       break;
     }
     case /^start b$/.test(cmd): {
@@ -274,6 +278,30 @@ function scheduleDailySummary() {
 }
 
 /* ---------------- helpers ---------------- */
+
+/** Run scripts/kill_switch.py asynchronously and resolve with its output. */
+function runKillSwitch(projectRoot) {
+  const script = path.join(projectRoot, "scripts", "kill_switch.py");
+  return new Promise((resolve) => {
+    const child = spawn("python3", [script], { cwd: projectRoot, timeout: 240000 });
+    let out = "";
+    let err = "";
+    let settled = false;
+    child.stdout.on("data", (d) => (out += d));
+    child.stderr.on("data", (d) => (err += d));
+    const finish = () => {
+      if (settled) return;
+      settled = true;
+      const body = (out.trim() || err.trim() || "(no output)").split("\n").slice(0, 40).join("\n");
+      resolve(`*Kill switch*\n${body}`);
+    };
+    child.on("close", finish);
+    child.on("error", (e) => {
+      out = `Failed to launch: ${e.message}`;
+      finish();
+    });
+  });
+}
 
 function waitMs(ms) {
   return new Promise((r) => setTimeout(r, ms));

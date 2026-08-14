@@ -354,6 +354,7 @@ function helpReport() {
     "last 5 — last 5 closed trades",
     "gates — current gate thresholds",
     "kill B / start B — stop/start Strategy B",
+    "kill switch — halt live trading and liquidate all positions",
   ].join("\n");
 }
 
