@@ -234,6 +234,22 @@ SCHEMA = (
       metrics_json TEXT
     )
     """,
+    """
+    CREATE TABLE IF NOT EXISTS jupiter_quotes (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      position_id INTEGER,
+      side TEXT,
+      mint_address TEXT,
+      dex_price_sol REAL,
+      jup_output_amount REAL,
+      jup_price_sol REAL,
+      price_impact_pct REAL,
+      slippage_vs_paper_pct REAL,
+      route_info TEXT,
+      quoted_at TEXT,
+      FOREIGN KEY (position_id) REFERENCES positions(id)
+    )
+    """,
 )
 
 
@@ -907,6 +923,46 @@ async def prune_position_price_snapshots(
             if "locked" not in str(exc).lower() or attempt == 2:
                 raise
             await asyncio.sleep(2 * (attempt + 1))
+
+
+async def record_jupiter_quote(
+    path: str | Path,
+    *,
+    position_id: str | None,
+    side: str,
+    mint_address: str,
+    dex_price_sol: float | None,
+    jup_output_amount: int | None,
+    jup_price_sol: float | None,
+    price_impact_pct: float | None,
+    slippage_vs_paper_pct: float | None,
+    route_info: str,
+    quoted_at: str,
+) -> None:
+    """Persist one shadow Jupiter quote comparison row for telemetry."""
+    async with aiosqlite.connect(path) as db:
+        await db.execute(
+            """
+            INSERT INTO jupiter_quotes (
+                position_id, side, mint_address, dex_price_sol, jup_output_amount,
+                jup_price_sol, price_impact_pct, slippage_vs_paper_pct, route_info,
+                quoted_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                position_id,
+                side,
+                mint_address,
+                dex_price_sol,
+                jup_output_amount,
+                jup_price_sol,
+                price_impact_pct,
+                slippage_vs_paper_pct,
+                route_info,
+                quoted_at,
+            ),
+        )
+        await db.commit()
 
 
 async def get_distinct_mints(path: str | Path) -> list[str]:

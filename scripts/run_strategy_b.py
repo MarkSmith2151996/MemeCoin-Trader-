@@ -42,10 +42,13 @@ import aiosqlite
 import httpx
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
+from src.chain.jupiter import LAMPORTS_PER_SOL
+from src.chain.jupiter_quote import JupiterQuoteV2, JupiterV2QuoteClient
 from src.core.config import load_settings
 from src.core.database import (
     init_db,
     mark_strategy_candidate_entered,
+    record_jupiter_quote,
     record_strategy_candidate,
     record_trade,
 )
@@ -149,6 +152,119 @@ seen_mints: dict[str, float] = {}
 SEEN_MINTS_TTL = 3600  # 1 hour in seconds
 _rugcheck = RugCheckClient(timeout_s=5.0)
 peak_prices: dict[str, float] = {}  # mint -> highest price seen
+
+
+# ── Shadow Jupiter quote telemetry (MT-538) ───────────────────────────
+# Every paper BUY/SELL fires a read-only Jupiter V2 quote in the background
+# (fire-and-forget) to measure real-world slippage vs DexScreener paper
+# prices. Never blocks the main loop, never touches a wallet.
+
+_shadow_client = JupiterV2QuoteClient()
+_shadow_tasks: set[asyncio.Task] = set()
+
+
+def _fire_shadow_task(coro) -> None:
+    """Schedule a shadow quote coroutine without blocking the caller."""
+    task = asyncio.create_task(coro)
+    _shadow_tasks.add(task)
+    task.add_done_callback(_shadow_tasks.discard)
+
+
+async def _drain_shadow_tasks() -> None:
+    """Await any in-flight shadow quotes (used at shutdown / test-mode exit)."""
+    if not _shadow_tasks:
+        return
+    await asyncio.gather(*list(_shadow_tasks), return_exceptions=True)
+
+
+async def _shadow_quote_and_record(
+    mint: str,
+    side: Side,
+    amount_lamports: int,
+    dex_price_sol: float,
+    position_id: str,
+    db_path: Path,
+    client: JupiterV2QuoteClient | None = None,
+) -> JupiterQuoteV2 | None:
+    """Quote one paper trade against Jupiter and persist the comparison.
+
+    Failures log a warning and return None — paper trading is never affected.
+    """
+    client = client or _shadow_client
+    try:
+        quote = await client.get_quote(mint, side, amount_lamports)
+    except Exception as exc:
+        log.warning("SHADOW quote error mint=%s side=%s: %s", mint[:16], side.value, exc)
+        return None
+    if quote is None:
+        return None
+
+    jup_price = quote.price_sol
+    slip_pct = (
+        ((jup_price - dex_price_sol) / dex_price_sol) * 100
+        if jup_price is not None and dex_price_sol
+        else None
+    )
+    jup_str = f"{jup_price:.8f}" if jup_price is not None else "N/A"
+    slip_str = f"{slip_pct:+.2f}%" if slip_pct is not None else "N/A"
+    log.info(
+        "SHADOW: %s mint=%s paper=%.8f jup=%s slip=%s",
+        side.value, mint[:16], dex_price_sol, jup_str, slip_str,
+    )
+
+    try:
+        await record_jupiter_quote(
+            db_path,
+            position_id=position_id,
+            side=side.value.lower(),
+            mint_address=mint,
+            dex_price_sol=dex_price_sol,
+            jup_output_amount=quote.out_amount,
+            jup_price_sol=jup_price,
+            price_impact_pct=quote.price_impact_pct,
+            slippage_vs_paper_pct=slip_pct,
+            route_info=json.dumps(list(quote.route_plan)),
+            quoted_at=quote.quoted_at,
+        )
+    except Exception as exc:
+        log.warning("SHADOW record failed mint=%s side=%s: %s", mint[:16], side.value, exc)
+    return quote
+
+
+async def _shadow_buy_quote(
+    mint: str,
+    size_sol: float,
+    dex_price_sol: float,
+    position_id: str,
+    db_path: Path,
+) -> None:
+    """Fire the shadow BUY quote for the same SOL size the paper trade used."""
+    await _shadow_quote_and_record(
+        mint=mint,
+        side=Side.BUY,
+        amount_lamports=int(size_sol * LAMPORTS_PER_SOL),
+        dex_price_sol=dex_price_sol,
+        position_id=position_id,
+        db_path=db_path,
+    )
+
+
+async def _shadow_sell_quote(
+    pos,
+    close_price: float,
+    db_path: Path,
+) -> None:
+    """Fire the shadow SELL quote for the reverse swap of the paper close."""
+    decimals = await _shadow_client.get_token_decimals(pos.mint_address)
+    amount_lamports = int(pos.token_amount * (10**decimals))
+    await _shadow_quote_and_record(
+        mint=pos.mint_address,
+        side=Side.SELL,
+        amount_lamports=amount_lamports,
+        dex_price_sol=close_price,
+        position_id=pos.id,
+        db_path=db_path,
+    )
 
 
 # ── Gate helpers ────────────────────────────────────────────────────
@@ -724,6 +840,7 @@ async def try_enter(
         f"Price: {price:.8f} SOL\n"
         f"Size: {size_sol} SOL"
     )
+    _fire_shadow_task(_shadow_buy_quote(mint, size_sol, price, position.id, db_path))
     return position.id
 
 
@@ -821,6 +938,7 @@ async def _adapter_close(pos, close_price: float, reason: str, db_path: Path) ->
         metadata={"close_reason": reason},
     )
     await record_trade(db_path, trade)
+    _fire_shadow_task(_shadow_sell_quote(pos, close_price, db_path))
     return trade
 
 
@@ -1104,12 +1222,16 @@ async def main() -> None:
     )
     if args.test:
         await scan_loop(mark_provider, adapter, manager, db_path, tracked_wallets=tracked_wallets, test_mode=True)
+        await _drain_shadow_tasks()
+        await _shadow_client.close()
         return
     await asyncio.gather(
         scan_loop(mark_provider, adapter, manager, db_path, tracked_wallets=tracked_wallets),
         monitor_loop(manager, mark_provider, db_path, gate_tuner),
         snapshot_loop(manager, mark_provider, db_path),
     )
+    await _drain_shadow_tasks()
+    await _shadow_client.close()
 
 
 if __name__ == "__main__":
