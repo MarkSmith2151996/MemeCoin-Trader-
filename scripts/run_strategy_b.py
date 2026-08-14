@@ -1,10 +1,9 @@
-"""Strategy B: browser-pc backed Grok social-hype validated paper trading loop.
+"""Strategy B: Jupiter-discovered Grok social-hype validated paper trading loop.
 
-Uses browser-pc to scan DexScreener new-pairs page for fresh Solana pairs
-under 15 minutes old across all DEXs.
+Uses Jupiter Tokens V2 to scan fresh Solana tokens under 22 minutes old.
 
 SCAN (every 60s):
-  1. browser-pc captures DexScreener new-pairs URL → rows
+  1. Jupiter Tokens V2 discovers fresh and organic tokens
   2. Screen through age/mcap/txns/vol/ratio/RugCheck gates
   3. Grok mention check via 0-5min temporal bucket
   4. Paper enter if mentions >= MIN_MENTIONS and slots available
@@ -67,6 +66,7 @@ from src.strategy.position_manager import PositionManager
 WRAPPED_SOL_MINT = "So11111111111111111111111111111111111111112"
 
 BROWSER_PC_URL = "http://localhost:8099"
+# DEPRECATED: replaced by Jupiter API (MT-550).
 # Browser rows are only discovery hints. DexScreener's URL age filters are
 # client-side and can be stale, so API pairCreatedAt is authoritative.
 STRATEGY_B_DEXSCREENER_URL = "https://dexscreener.com/new-pairs/solana"
@@ -81,6 +81,10 @@ MIN_VOLUME_USD = 500
 MIN_TXNS = 3
 SOURCE_MAX_AGE_MINUTES = MAX_AGE_MINUTES
 MAX_SOURCE_ROWS = 30
+
+JUPITER_API_BASE = "https://api.jup.ag/tokens/v2"
+JUPITER_API_KEY = os.environ.get("JUPITER_API_KEY", "")
+JUPITER_HEADERS = {"x-api-key": JUPITER_API_KEY}
 
 PAPER_SIZE_SOL = 0.05
 MIN_MENTIONS = 3
@@ -351,6 +355,7 @@ def _parse_age_minutes(s: str) -> float:
         return 999.0
 
 
+# DEPRECATED: replaced by Jupiter API (MT-550).
 def parse_row(row: dict) -> dict:
     """Map a browser-pc row to a coin dict for screen_coin()."""
     ticker = row.get("name") or row.get("symbol") or "?"
@@ -382,6 +387,7 @@ def parse_row(row: dict) -> dict:
     }
 
 
+# DEPRECATED: replaced by Jupiter API (MT-550).
 async def _search_fresh_pair(ticker: str, http: httpx.AsyncClient) -> dict | None:
     """Resolve a browser hint through search and return an API-aged Solana pair."""
     try:
@@ -435,6 +441,7 @@ async def _search_fresh_pair(ticker: str, http: httpx.AsyncClient) -> dict | Non
     }
 
 
+# DEPRECATED: replaced by Jupiter API (MT-550).
 async def fetch_candidates(http: httpx.AsyncClient) -> list[dict]:
     """Return only candidates whose API pair timestamps pass the live age gate."""
     try:
@@ -463,6 +470,105 @@ async def fetch_candidates(http: httpx.AsyncClient) -> list[dict]:
     except Exception as e:
         log.warning("browser-pc error: %s", e)
         return []
+
+
+def _synthesize_pair_dict(token: dict) -> dict:
+    """Map Jupiter token fields to the DexScreener pair shape used downstream."""
+    s1h = token.get("stats1h", {})
+    s5m = token.get("stats5m", {})
+    fp = token.get("firstPool", {})
+    return {
+        "chainId": "solana",
+        "pairCreatedAt": (
+            int(datetime.fromisoformat(fp["createdAt"]).timestamp() * 1000)
+            if fp.get("createdAt") else 0
+        ),
+        "baseToken": {"address": token["id"], "symbol": token.get("symbol", "")},
+        "txns": {
+            "h1": {
+                "buys": int(s1h.get("numBuys", 0) or 0),
+                "sells": int(s1h.get("numSells", 0) or 0),
+            },
+        },
+        "volume": {"h1": (s1h.get("buyVolume", 0) or 0) + (s1h.get("sellVolume", 0) or 0)},
+        "liquidity": {"usd": float(token.get("liquidity", 0) or 0)},
+        "marketCap": token.get("mcap"),
+        "fdv": token.get("fdv"),
+        "priceUsd": str(token.get("usdPrice", "0")),
+        "priceChange": {
+            "m5": s5m.get("priceChange", 0),
+            "h1": s1h.get("priceChange", 0),
+        },
+    }
+
+
+async def fetch_candidates_jupiter(http: httpx.AsyncClient) -> list[dict]:
+    """Discover fresh Solana tokens from Jupiter Tokens V2."""
+    tokens_by_mint: dict[str, dict] = {}
+    endpoints = (
+        ("/toporganicscore/5m", {"limit": 100}),
+        ("/recent", {"limit": 30}),
+    )
+
+    for index, (path, params) in enumerate(endpoints):
+        try:
+            response = await http.get(
+                f"{JUPITER_API_BASE}{path}",
+                params=params,
+                headers=JUPITER_HEADERS,
+                timeout=15.0,
+            )
+            response.raise_for_status()
+            payload = response.json()
+            if not isinstance(payload, list):
+                log.warning("Jupiter %s returned a non-list response", path)
+                continue
+            for token in payload:
+                mint = token.get("id") if isinstance(token, dict) else None
+                if isinstance(mint, str) and mint:
+                    tokens_by_mint[mint] = token
+        except Exception as exc:
+            log.warning("Jupiter %s error: %s", path, exc)
+        if index < len(endpoints) - 1:
+            await asyncio.sleep(0.25)
+
+    now_ms = time.time() * 1000
+    candidates = []
+    for token in tokens_by_mint.values():
+        first_pool = token.get("firstPool") or {}
+        created_at = first_pool.get("createdAt")
+        if not isinstance(created_at, str) or not created_at:
+            continue
+        try:
+            created_timestamp = int(datetime.fromisoformat(created_at).timestamp() * 1000)
+        except ValueError:
+            log.debug("Jupiter invalid firstPool.createdAt mint=%s", token["id"][:16])
+            continue
+        age_minutes = max(0.0, (now_ms - created_timestamp) / 60_000)
+        if age_minutes > SOURCE_MAX_AGE_MINUTES:
+            continue
+
+        stats_1h = token.get("stats1h") or {}
+        buys = stats_1h.get("numBuys", 0) or 0
+        sells = stats_1h.get("numSells", 0) or 0
+        candidates.append({
+            "mint": token["id"],
+            "ticker": token.get("symbol", ""),
+            "usd_market_cap": token.get("mcap") or token.get("fdv") or 0,
+            "created_timestamp": created_timestamp,
+            "volume": (stats_1h.get("buyVolume", 0) or 0) + (stats_1h.get("sellVolume", 0) or 0),
+            "txns": buys + sells,
+            "buy_sell_ratio": buys / max(sells, 1),
+            "liquidity": float(token.get("liquidity", 0) or 0),
+            "source_age_minutes": age_minutes,
+            "pair": _synthesize_pair_dict(token),
+        })
+
+    log.info(
+        "Jupiter discovery tokens=%d (all <= %.0fm)",
+        len(candidates), SOURCE_MAX_AGE_MINUTES,
+    )
+    return candidates
 
 
 async def resolve_mint(name: str, http: httpx.AsyncClient) -> str | None:
@@ -1022,7 +1128,7 @@ async def scan_loop(
                 main_blocker_count: dict[str, int] = {}
 
                 # Candidate telemetry is collected even at capacity; only entries are capped.
-                candidates = await fetch_candidates(http)
+                candidates = await fetch_candidates_jupiter(http)
                 detailed["total"] = len(candidates)
                 if candidates:
 
@@ -1166,7 +1272,7 @@ async def scan_loop(
                 if detailed["full_screen_pass"] == 0 and detailed["total"] > 0:
                     print(
                         "  NOTE: Zero coins passed full screen. "
-                        "browser-pc isn't surfacing sufficiently qualified candidates."
+                        "Jupiter did not surface sufficiently qualified candidates."
                     )
 
                 elapsed = time.monotonic() - cycle_start
