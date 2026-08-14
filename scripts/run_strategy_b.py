@@ -33,6 +33,7 @@ import argparse
 import asyncio
 import json
 import logging
+import os
 import sys
 import time
 from datetime import UTC, datetime
@@ -53,14 +54,15 @@ from src.core.database import (
     record_trade,
 )
 from src.core.models import Side, Trade
-from src.execution.price_provider import DexScreenerPriceProvider
+from src.execution.base import ExecutionAdapter
 from src.execution.paper import PaperExecutionAdapter
+from src.execution.price_provider import DexScreenerPriceProvider
 from src.monitoring.alerts import send_imessage
 from src.monitoring.position_snapshots import snapshot_loop
 from src.risk.rugcheck import RugCheckClient
-from src.signals.grok_xsearch import get_mentions_with_timestamps, count_influencer_mentions
-from src.strategy.position_manager import PositionManager
+from src.signals.grok_xsearch import count_influencer_mentions, get_mentions_with_timestamps
 from src.strategy.gate_tuner import GateThresholds, GateTuner
+from src.strategy.position_manager import PositionManager
 
 WRAPPED_SOL_MINT = "So11111111111111111111111111111111111111112"
 
@@ -142,7 +144,10 @@ log = logging.getLogger("strategy_b")
 logging.getLogger("httpx").setLevel(logging.WARNING)
 
 try:
-    from src.signals.whale_tracker import get_whale_signal, load_tracked_wallets  # noqa: F401 — kept for MT-524 re-enable
+    from src.signals.whale_tracker import (  # noqa: F401 — kept for MT-524 re-enable
+        get_whale_signal,
+        load_tracked_wallets,
+    )
 except ImportError:
     get_whale_signal = None
     load_tracked_wallets = None
@@ -851,6 +856,7 @@ async def monitor_positions(
     mark_provider: DexScreenerPriceProvider,
     db_path: Path,
     gate_tuner: GateTuner | None = None,
+    adapter: ExecutionAdapter | None = None,
 ) -> bool:
     """Re-mark open positions and close on stops; True if any position is in
     the danger zone (below 95% of entry) so the caller polls at 5s."""
@@ -898,7 +904,13 @@ async def monitor_positions(
         if close_reason:
             peak = peak_prices.get(pos.mint_address)
             peak_prices.pop(pos.mint_address, None)
-            trade = await _adapter_close(pos, close_price, close_reason, db_path)
+            trade = await _adapter_close(pos, close_price, close_reason, db_path, adapter)
+            if trade is None:
+                log.error(
+                    "CLOSE FAILED [%s]: mint=%s — position left open",
+                    close_reason, pos.mint_address[:16],
+                )
+                continue
             await manager.close_position(pos.mint_address, close_price, mode="paper", peak_price_sol=peak)
             # AUTO-TUNER PAUSED — oscillating, not converging. See MT-537.
             # if gate_tuner is not None and await gate_tuner.maybe_tune():
@@ -920,8 +932,30 @@ async def monitor_positions(
     return danger
 
 
-async def _adapter_close(pos, close_price: float, reason: str, db_path: Path) -> Trade:
+async def _adapter_close(
+    pos,
+    close_price: float,
+    reason: str,
+    db_path: Path,
+    adapter: ExecutionAdapter | None = None,
+) -> Trade | None:
     import uuid
+
+    # MT-544: in live mode the close is a real Jupiter sell; paper/shadow mode
+    # keeps the existing simulated record path unchanged. A failed live sell
+    # returns None so the position stays open for retry.
+    if adapter is not None and adapter.mode == "live":
+        try:
+            live_trade = await adapter.sell(pos.mint_address, pos.token_amount)
+        except Exception as exc:
+            log.error("LIVE SELL mint=%s reason=%s failed: %s", pos.mint_address[:16], reason, exc)
+            return None
+        if live_trade.metadata is None:
+            live_trade.metadata = {}
+        live_trade.metadata["close_reason"] = reason
+        await record_trade(db_path, live_trade)
+        _fire_shadow_task(_shadow_sell_quote(pos, close_price, db_path))
+        return live_trade
 
     token_remaining = pos.token_amount
     sol_out = token_remaining * close_price
@@ -1151,10 +1185,11 @@ async def monitor_loop(
     mark_provider: DexScreenerPriceProvider,
     db_path: Path,
     gate_tuner: GateTuner,
+    adapter: ExecutionAdapter | None = None,
 ) -> None:
     while True:
         cycle_start = time.monotonic()
-        danger = await monitor_positions(manager, mark_provider, db_path, gate_tuner)
+        danger = await monitor_positions(manager, mark_provider, db_path, gate_tuner, adapter)
         elapsed = time.monotonic() - cycle_start
         interval = FAST_MONITOR_INTERVAL_S if danger else MONITOR_INTERVAL
         await asyncio.sleep(max(0.0, interval - elapsed))
@@ -1184,6 +1219,9 @@ async def record_manual_freeze(db_path: Path) -> None:
 
 
 async def main() -> None:
+    from dotenv import load_dotenv
+
+    load_dotenv()
     parser = argparse.ArgumentParser()
     parser.add_argument("--test", action="store_true", help="Run one cycle and exit (2-minute test)")
     args = parser.parse_args()
@@ -1196,7 +1234,18 @@ async def main() -> None:
     await record_manual_freeze(db_path)
 
     mark_provider = DexScreenerPriceProvider()
-    adapter = PaperExecutionAdapter(price_provider=mark_provider)
+    # MT-544: EXECUTION_MODE selects the execution adapter. paper = current
+    # behavior (default), shadow = paper + Jupiter quotes (MT-538), live =
+    # real Jupiter swaps via src/execution/live.py.
+    execution_mode = os.environ.get("EXECUTION_MODE", "paper").strip().lower()
+    if execution_mode == "live":
+        from src.execution.live import LiveExecutionAdapter
+
+        adapter = LiveExecutionAdapter(reference_price_provider=mark_provider)
+        log.info("Strategy B execution adapter: LIVE (Jupiter swap)")
+    else:
+        adapter = PaperExecutionAdapter(price_provider=mark_provider)
+        log.info("Strategy B execution adapter: PAPER (EXECUTION_MODE=%s)", execution_mode)
     manager = PositionManager(db_path, settings, strategy="B")
 
     tracked_wallets: list = []
@@ -1227,7 +1276,7 @@ async def main() -> None:
         return
     await asyncio.gather(
         scan_loop(mark_provider, adapter, manager, db_path, tracked_wallets=tracked_wallets),
-        monitor_loop(manager, mark_provider, db_path, gate_tuner),
+        monitor_loop(manager, mark_provider, db_path, gate_tuner, adapter),
         snapshot_loop(manager, mark_provider, db_path),
     )
     await _drain_shadow_tasks()

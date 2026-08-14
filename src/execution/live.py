@@ -1,0 +1,289 @@
+"""Live execution adapter backed by the Jupiter Swap API.
+
+Implements the same ``ExecutionAdapter`` contract as the paper adapter
+(``src/execution/paper.py``) plus explicit ``buy``/``sell`` helpers. When
+``EXECUTION_MODE=live``, Strategy B instantiates this adapter and every entry
+becomes a real signed swap; shadow mode (paper + Jupiter quotes) is untouched.
+
+Safety gates before any swap:
+- the token must not be in the banned list,
+- the wallet must hold enough SOL for the notional plus a reserve,
+- the quote price impact must stay below ``max_price_impact_pct`` (default 5%).
+
+Every step — quote, price impact, signed transaction, send result,
+confirmation, and fill price versus the reference paper mark — is logged.
+"""
+
+from __future__ import annotations
+
+import logging
+from datetime import UTC, datetime, timedelta
+
+from src.chain.jupiter import LAMPORTS_PER_SOL, SOL_MINT
+from src.chain.jupiter_swap import JupiterSwapClient, JupiterSwapQuote
+from src.core.models import Side, SwapQuote, Trade
+from src.execution.base import ExecutionAdapter
+from src.execution.price_provider import PriceProvider
+
+log = logging.getLogger("live_execution")
+
+MAX_PRICE_IMPACT_PCT = 5.0
+WALLET_RESERVE_SOL = 0.01
+
+
+class LiveExecutionAdapter(ExecutionAdapter):
+    """Real-swap execution adapter using the Jupiter Swap API."""
+
+    def __init__(
+        self,
+        client: JupiterSwapClient | None = None,
+        *,
+        banned_tokens: set[str] | None = None,
+        max_price_impact_pct: float = MAX_PRICE_IMPACT_PCT,
+        wallet_reserve_sol: float = WALLET_RESERVE_SOL,
+        reference_price_provider: PriceProvider | None = None,
+    ) -> None:
+        self._client = client if client is not None else JupiterSwapClient()
+        self._banned_tokens = set(banned_tokens or ())
+        self._max_price_impact_pct = max_price_impact_pct
+        self._wallet_reserve_sol = wallet_reserve_sol
+        self._reference_price_provider = reference_price_provider
+        self._closed = False
+
+    @property
+    def mode(self) -> str:
+        return "live"
+
+    async def buy(self, mint_address: str, amount_sol: float, slippage_bps: int = 100) -> Trade:
+        """Buy ``amount_sol`` worth of ``mint_address`` through Jupiter."""
+        self._ensure_open()
+        await self._check_token_allowed(mint_address)
+        await self._check_sol_balance(amount_sol)
+
+        amount_lamports = int(amount_sol * LAMPORTS_PER_SOL)
+        quote = await self._quote_or_raise(SOL_MINT, mint_address, amount_lamports, slippage_bps)
+        await self._check_price_impact(mint_address, quote)
+
+        log.info(
+            "LIVE BUY %s: %s SOL → %.8f tokens @ %.10f SOL impact=%.4f%%",
+            mint_address[:16], amount_sol, quote.out_amount / 10**quote.token_decimals,
+            quote.price_sol or 0.0, quote.price_impact_pct * 100,
+        )
+
+        result = await self._client.execute_swap(quote)
+        await self._log_swap_result("BUY", mint_address, result)
+        if not result.ok:
+            raise RuntimeError(
+                f"live buy failed ({result.confirmation_status}): {result.error or 'unknown'}",
+            )
+
+        token_amount = result.out_amount / (10**quote.token_decimals)
+        return Trade(
+            mint_address=mint_address,
+            side=Side.BUY,
+            amount_sol=amount_sol,
+            token_amount=token_amount,
+            price_sol=result.price_sol or quote.price_sol,
+            slippage_bps=slippage_bps,
+            tx_signature=result.signature,
+            mode=self.mode,
+            status=result.confirmation_status,
+            metadata={
+                "provider": "jupiter",
+                "quote_in_amount": result.in_amount,
+                "quote_out_amount": result.out_amount,
+                "price_impact_pct": quote.price_impact_pct,
+                "fees_lamports": result.fees_lamports,
+                "confirmation_status": result.confirmation_status,
+                "slot": result.slot,
+                "token_balance_after": result.token_balance_after,
+            },
+        )
+
+    async def sell(self, mint_address: str, token_amount: float, slippage_bps: int = 100) -> Trade:
+        """Sell ``token_amount`` (in token units) of ``mint_address`` through Jupiter."""
+        self._ensure_open()
+        await self._check_token_allowed(mint_address)
+
+        decimals = await self._client.get_token_decimals(mint_address)
+        token_lamports = int(token_amount * 10**decimals)
+        if token_lamports <= 0:
+            raise RuntimeError(f"live sell rejected non-positive token amount {token_amount}")
+
+        quote = await self._quote_or_raise(mint_address, SOL_MINT, token_lamports, slippage_bps)
+        await self._check_price_impact(mint_address, quote)
+
+        log.info(
+            "LIVE SELL %s: %.8f tokens → %s SOL @ %.10f SOL impact=%.4f%%",
+            mint_address[:16], token_amount, quote.out_amount / LAMPORTS_PER_SOL,
+            quote.price_sol or 0.0, quote.price_impact_pct * 100,
+        )
+
+        result = await self._client.execute_swap(quote)
+        await self._log_swap_result("SELL", mint_address, result)
+        if not result.ok:
+            raise RuntimeError(
+                f"live sell failed ({result.confirmation_status}): {result.error or 'unknown'}",
+            )
+
+        sol_out = result.out_amount / LAMPORTS_PER_SOL
+        return Trade(
+            mint_address=mint_address,
+            side=Side.SELL,
+            amount_sol=sol_out,
+            token_amount=token_amount,
+            price_sol=result.price_sol or quote.price_sol,
+            slippage_bps=slippage_bps,
+            tx_signature=result.signature,
+            mode=self.mode,
+            status=result.confirmation_status,
+            metadata={
+                "provider": "jupiter",
+                "quote_in_amount": result.in_amount,
+                "quote_out_amount": result.out_amount,
+                "price_impact_pct": quote.price_impact_pct,
+                "fees_lamports": result.fees_lamports,
+                "confirmation_status": result.confirmation_status,
+                "slot": result.slot,
+                "token_balance_after": result.token_balance_after,
+            },
+        )
+
+    async def execute_swap(
+        self,
+        mint_address: str,
+        side: Side,
+        amount_sol: float,
+        slippage_bps: int = 300,
+    ) -> Trade:
+        """Base-contract entry point. Buys take ``amount_sol``; sells use the
+        wallet's current token balance for the mint when the caller cannot
+        supply a token amount."""
+        self._ensure_open()
+        if side == Side.BUY:
+            return await self.buy(mint_address, amount_sol, slippage_bps)
+        balance = await self._client.get_token_balance(mint_address)
+        if balance is None or balance <= 0:
+            raise RuntimeError(
+                f"live sell requires a token amount; wallet holds no {mint_address[:16]}",
+            )
+        return await self.sell(mint_address, balance, slippage_bps)
+
+    async def get_quote(
+        self,
+        mint_address: str,
+        side: Side,
+        amount_sol: float,
+        slippage_bps: int = 300,
+    ) -> SwapQuote:
+        """Quote the swap in SOL terms (compatible with the paper adapter)."""
+        self._ensure_open()
+        if side == Side.BUY:
+            amount_lamports = int(amount_sol * LAMPORTS_PER_SOL)
+            quote = await self._client.get_quote(
+                SOL_MINT, mint_address, amount_lamports, slippage_bps,
+            )
+            estimated_out = quote.out_amount / (10**quote.token_decimals) if quote else 0.0
+        else:
+            decimals = await self._client.get_token_decimals(mint_address)
+            token_lamports = int(amount_sol * (10**decimals)) if decimals else int(amount_sol)
+            quote = await self._client.get_quote(
+                mint_address, SOL_MINT, token_lamports, slippage_bps,
+            )
+            estimated_out = quote.out_amount / LAMPORTS_PER_SOL if quote else 0.0
+        return SwapQuote(
+            mint_address=mint_address,
+            side=side,
+            amount_sol=amount_sol,
+            estimated_out_amount=estimated_out,
+            price_sol=quote.price_sol if quote else None,
+            price_impact_pct=quote.price_impact_pct if quote else 0.0,
+            slippage_bps=slippage_bps,
+            provider="live",
+            expires_at=datetime.now(UTC) + timedelta(seconds=30),
+        )
+
+    async def get_current_price(self, mint_address: str) -> float | None:
+        self._ensure_open()
+        if self._reference_price_provider is not None:
+            try:
+                price = await self._reference_price_provider.get_current_price(mint_address)
+                if price is not None and price > 0:
+                    return price
+            except Exception as exc:
+                log.debug("reference price lookup failed for %s: %s", mint_address[:16], exc)
+        quote = await self._client.get_quote(
+            SOL_MINT, mint_address, 10_000_000, 100,
+        )
+        return quote.price_sol if quote else None
+
+    async def close(self) -> None:
+        if not self._closed:
+            await self._client.close()
+            self._closed = True
+
+    # ── Pre-swap gates ───────────────────────────────────────────────
+
+    async def _check_token_allowed(self, mint_address: str) -> None:
+        if mint_address in self._banned_tokens:
+            raise RuntimeError(f"token {mint_address[:16]} is banned")
+
+    async def _check_sol_balance(self, amount_sol: float) -> None:
+        sol_balance = await self._client.get_sol_balance()
+        if sol_balance is None:
+            raise RuntimeError("cannot verify wallet SOL balance — refusing live buy")
+        required = amount_sol + self._wallet_reserve_sol
+        if sol_balance < required:
+            raise RuntimeError(
+                f"insufficient SOL balance: {sol_balance:.4f} SOL needed >= {required:.4f}",
+            )
+
+    async def _check_price_impact(self, mint_address: str, quote: JupiterSwapQuote) -> None:
+        impact_pct = quote.price_impact_pct * 100
+        if impact_pct >= self._max_price_impact_pct:
+            raise RuntimeError(
+                f"price impact {impact_pct:.2f}% exceeds limit "
+                f"{self._max_price_impact_pct:.2f}% for {mint_address[:16]}",
+            )
+
+    async def _quote_or_raise(
+        self,
+        input_mint: str,
+        output_mint: str,
+        amount_lamports: int,
+        slippage_bps: int,
+    ) -> JupiterSwapQuote:
+        quote = await self._client.get_quote(input_mint, output_mint, amount_lamports, slippage_bps)
+        if quote is None:
+            raise RuntimeError(
+                f"quote failed {input_mint[:16]}→{output_mint[:16]} "
+                f"amount={amount_lamports} slip={slippage_bps}",
+            )
+        if quote.out_amount <= 0:
+            raise RuntimeError(f"quote returned zero output for {output_mint[:16]}")
+        return quote
+
+    async def _log_swap_result(self, side: str, mint_address: str, result) -> None:
+        """Log the send result, confirmation, and fill vs paper reference price."""
+        paper_price = None
+        if self._reference_price_provider is not None:
+            try:
+                paper_price = await self._reference_price_provider.get_current_price(mint_address)
+            except Exception:
+                paper_price = None
+        vs_paper = ""
+        if paper_price is not None and result.price_sol is not None and paper_price > 0:
+            diff_pct = (result.price_sol - paper_price) / paper_price * 100
+            vs_paper = f" fill_vs_paper={diff_pct:+.2f}% (paper={paper_price:.10f})"
+        log.info(
+            "LIVE %s RESULT %s: ok=%s sig=%s status=%s slot=%s fees=%s%s",
+            side, mint_address[:16], result.ok, result.signature or "-",
+            result.confirmation_status, result.slot or "-",
+            result.fees_lamports or "-", vs_paper,
+        )
+        for diag in result.diagnostics:
+            log.info("LIVE %s %s: %s", side, mint_address[:16], diag)
+
+    def _ensure_open(self) -> None:
+        if self._closed:
+            raise RuntimeError("live execution adapter is closed")
