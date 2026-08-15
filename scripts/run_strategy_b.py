@@ -21,8 +21,7 @@ Run:
 # size_multiplier is always 1.0 in practice:
 #   - Saturday halving: * 0.5 when utc_now.weekday() == 5 (-> 0.025 SOL).
 #   - Whale conviction sizing: DISABLED since MT-524 — the get_whale_signal
-#     call block and load_tracked_wallets loading block are commented out
-#     (WHALE_SIZE_MULTIPLIERS 1.0/2.0/4.0/6.0x in src/signals/whale_tracker.py:319),
+#     call block and load_tracked_wallets loading block are commented out,
 #     so the multiplier passed to try_enter() never changes from 1.0.
 # Sizing is NOT driven by conviction score, liquidity tiers, or gate scores.
 
