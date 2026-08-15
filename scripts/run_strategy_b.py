@@ -2,7 +2,7 @@
 
 Uses Jupiter Tokens V2 to scan fresh Solana tokens under 22 minutes old.
 
-SCAN (every 60s):
+SCAN (every 2s by default, STRATEGY_B_SCAN_INTERVAL in .env):
   1. Jupiter Tokens V2 discovers fresh and organic tokens
   2. Screen through age/mcap/txns/vol/ratio/RugCheck gates
   3. Grok mention check via 0-5min temporal bucket
@@ -10,6 +10,14 @@ SCAN (every 60s):
 
 MONITOR (every 30s):
   5. Re-mark open positions and close on take-profit / hard-stop / time-stop
+
+MT-560: scan cadence reduced from 60s to 2s. The old 60s interval was legacy
+from the Chrome/DexScreener era, where every cycle needed an 8-second
+browser-pc capture. Jupiter tokens/v2 free tier allows ~1 RPS; two discovery
+endpoints per cycle at a 2s cadence stays at ~1 req/s. A per-mint screening
+cooldown keeps RugCheck load, candidate_log writes, and log volume bounded at
+the faster cadence (see SCREEN_COOLDOWN_S). Discovery lag and end-to-end
+pipeline latency are logged per candidate/trade (DISCOVERY_LAG / LATENCY).
 
 Run:
     python3 scripts/run_strategy_b.py          # normal loop
@@ -32,8 +40,10 @@ import asyncio
 import json
 import logging
 import os
+import statistics
 import sys
 import time
+from collections import deque
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -41,6 +51,12 @@ import aiosqlite
 import httpx
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
+# MT-560: load .env at import time so env-backed constants below (e.g.
+# STRATEGY_B_SCAN_INTERVAL) resolve before main() runs. load_dotenv() never
+# overrides already-set environment variables and is idempotent, so the
+# call inside main() stays harmless.
+from dotenv import load_dotenv
+
 from src.chain.jupiter import LAMPORTS_PER_SOL
 from src.chain.jupiter_quote import JupiterQuoteV2, JupiterV2QuoteClient
 from src.core.config import load_settings
@@ -61,6 +77,8 @@ from src.risk.rugcheck import RugCheckClient
 from src.signals.grok_xsearch import count_influencer_mentions, get_mentions_with_timestamps
 from src.strategy.gate_tuner import GateThresholds, GateTuner
 from src.strategy.position_manager import PositionManager
+
+load_dotenv()
 
 WRAPPED_SOL_MINT = "So11111111111111111111111111111111111111112"
 
@@ -89,10 +107,26 @@ PAPER_SIZE_SOL = 0.05
 MIN_MENTIONS = 3
 MENTION_WINDOW_MINUTES = 5
 MAX_OPEN = 5
-SCAN_INTERVAL = 60
+# MT-560: 60s was legacy from the Chrome/DexScreener era (8s browser-pc
+# capture per cycle). Jupiter tokens/v2 free tier allows ~1 RPS; two
+# discovery endpoints per cycle at 2s keeps us at ~1 req/s. The cycle sleep
+# is `max(0.0, SCAN_INTERVAL - elapsed)` — if screening takes longer than the
+# interval the next cycle starts immediately rather than queuing up, which is
+# the rate-limit protection. Tune via STRATEGY_B_SCAN_INTERVAL in .env.
+SCAN_INTERVAL = int(os.environ.get("STRATEGY_B_SCAN_INTERVAL", "2"))
 MONITOR_INTERVAL = 30
 FAST_MONITOR_INTERVAL_S = 5
 FAST_POLL_DROP_PCT = 0.05
+# MT-560: per-mint re-screening cooldown. At the 2s cadence, re-running the
+# full screen_coin (RugCheck HTTP call + candidate_log insert) on every
+# candidate every cycle would hammer RugCheck and flood candidate_log. Mints
+# are re-screened at most once per SCREEN_COOLDOWN_S, so gate results still
+# track evolving stats (a failing mint can pass later), but load stays bounded.
+SCREEN_COOLDOWN_S = 45
+# MT-560: cycle summary cadence — at 2s the full "Gates:" line would flood the
+# log 30x/min. Logged at INFO every GATES_LOG_EVERY cycles (~60s), DEBUG in
+# between; the console print follows the same throttle.
+GATES_LOG_EVERY = 30
 # MT-553: optimized exit params from the MT-552 sweep (2% trail / 150% TP / 8%
 # hard stop) — +8.75 SOL vs +6.18 SOL baseline, PF 4.17 -> 7.63.
 TRAILING_STOP_PCT = 2.0
@@ -164,6 +198,25 @@ seen_mints: dict[str, float] = {}
 SEEN_MINTS_TTL = 3600  # 1 hour in seconds
 _rugcheck = RugCheckClient(timeout_s=5.0)
 peak_prices: dict[str, float] = {}  # mint -> highest price seen
+
+# ── MT-560 latency telemetry state ────────────────────────────────────
+# Discovery lag: first wall-clock sighting of each mint in a Jupiter API
+# response, compared against the on-chain createdAt later.
+first_seen_epoch: dict[str, float] = {}  # mint -> epoch seconds of first API sighting
+first_seen_mono: dict[str, float] = {}   # mint -> time.monotonic() of first API sighting
+_lag_logged: set[str] = set()            # mints whose DISCOVERY_LAG was already logged
+_lag_window: deque[float] = deque(maxlen=100)  # rolling discovery-lag seconds
+_lag_summary_every = 25                  # log DISCOVERY_STATS every N samples
+
+# Screening cooldown bookkeeping (MT-560): mint -> last full screen_coin epoch.
+_screened_at: dict[str, float] = {}
+
+# Cycle counter for log throttling (GATES_LOG_EVERY).
+cycle_number = 0
+
+# Pipe stats for the Grok mention lane (MT-560: initialized to fix a latent
+# KeyError when REQUIRE_MENTIONS is enabled).
+pipe_stats: dict[str, int] = {}
 
 
 # ── Shadow Jupiter quote telemetry (MT-538) ───────────────────────────
@@ -536,6 +589,8 @@ async def fetch_candidates_jupiter(http: httpx.AsyncClient) -> list[dict]:
             await asyncio.sleep(0.25)
 
     now_ms = time.time() * 1000
+    now_epoch = time.time()
+    now_mono = time.monotonic()
     candidates = []
     for token in tokens_by_mint.values():
         first_pool = token.get("firstPool") or {}
@@ -554,6 +609,10 @@ async def fetch_candidates_jupiter(http: httpx.AsyncClient) -> list[dict]:
         stats_1h = token.get("stats1h") or {}
         buys = stats_1h.get("numBuys", 0) or 0
         sells = stats_1h.get("numSells", 0) or 0
+        # MT-560: record the first time we see this mint in any API response.
+        # Used for DISCOVERY_LAG (how old a token is when we first learn of it).
+        first_seen_epoch.setdefault(token["id"], now_epoch)
+        first_seen_mono.setdefault(token["id"], now_mono)
         candidates.append({
             "mint": token["id"],
             "ticker": token.get("symbol", ""),
@@ -567,7 +626,7 @@ async def fetch_candidates_jupiter(http: httpx.AsyncClient) -> list[dict]:
             "pair": _synthesize_pair_dict(token),
         })
 
-    log.info(
+    log.debug(
         "Jupiter discovery tokens=%d (all <= %.0fm)",
         len(candidates), SOURCE_MAX_AGE_MINUTES,
     )
@@ -863,8 +922,15 @@ async def try_enter(
     db_path: Path,
     size_multiplier: float = 1.0,
     pair: dict | None = None,
+    timing: dict | None = None,
 ) -> str | None:
     from src.core.database import has_losing_close, record_entry_skip
+
+    # MT-560: pipeline timing. scan_loop seeds t_detect/t_gate_pass; this
+    # function stamps the remaining steps and logs one LATENCY line per entry.
+    timing = timing if timing is not None else {}
+    t0 = timing.setdefault("t_detect", time.monotonic())
+    t_gate = timing.setdefault("t_gate_pass", time.monotonic())
 
     if len(await manager.get_all_open(mode="paper")) >= MAX_OPEN:
         log.warning("SKIP %s ticker=%s — strategy capacity reached", mint[:16], ticker)
@@ -919,16 +985,20 @@ async def try_enter(
         return None
 
     price = await mark_provider.get_current_price(mint)
+    timing["t_quote"] = time.monotonic()
     if price is None or price <= 0:
         log.warning("SKIP %s ticker=%s \u2014 no valid DexScreener price", mint[:16], ticker)
         return None
 
     size_sol = PAPER_SIZE_SOL * size_multiplier
+    timing["t_signed"] = time.monotonic()
+    timing["t_sent"] = time.monotonic()
     try:
         trade = await adapter.execute_swap(mint, Side.BUY, size_sol)
     except Exception as exc:
         log.warning("SKIP %s ticker=%s \u2014 execute_swap failed: %s", mint[:16], ticker, exc)
         return None
+    t_swap_end = time.monotonic()
 
     if trade is None:
         log.warning("SKIP %s ticker=%s \u2014 execute_swap returned None", mint[:16], ticker)
@@ -958,6 +1028,30 @@ async def try_enter(
     except Exception as exc:
         log.warning("SKIP %s ticker=%s \u2014 open_position failed: %s", mint[:16], ticker, exc)
         return None
+
+    timing["t_confirmed"] = time.monotonic()
+
+    # MT-560: per-trade end-to-end latency. Deltas are wall-clock between the
+    # consecutive pipeline steps. In paper mode sign/send are simulated (~0ms)
+    # and the swap block is the paper record; in live mode the Jupiter swap
+    # client's internal quote/sign/send/confirm phases are NOT split here (the
+    # swap integration is deliberately untouched), so `send` absorbs the whole
+    # adapter.execute_swap duration (quote + sign + submit + confirm poll).
+    t_quote = timing.get("t_quote", t_gate)
+    t_signed = timing.get("t_signed", t_quote)
+    t_sent = timing.get("t_sent", t_signed)
+    t_confirmed = timing["t_confirmed"]
+    log.info(
+        "LATENCY mint=%s detect=%dms gates=%dms quote=%dms sign=%dms send=%dms confirm=%dms total=%dms",
+        mint[:16],
+        0,
+        int((t_gate - t0) * 1000),
+        int((t_quote - t_gate) * 1000),
+        int((t_signed - t_quote) * 1000),
+        int((t_sent - t_signed) * 1000) + int((t_swap_end - t_sent) * 1000),
+        int((t_confirmed - t_swap_end) * 1000),
+        int((t_confirmed - t0) * 1000),
+    )
 
     log.info("ENTRY mint=%s ticker=%s price=%.8f SOL size=%.4f SOL", mint[:16], ticker, price, size_sol)
     send_imessage(
@@ -1106,7 +1200,7 @@ async def scan_loop(
     tracked_wallets: list | None = None,
     test_mode: bool = False,
 ) -> None:
-    global seen_mints
+    global seen_mints, cycle_number
     if tracked_wallets is None:
         tracked_wallets = []
     async with httpx.AsyncClient() as http:
@@ -1115,14 +1209,20 @@ async def scan_loop(
             expired = [m for m, t in seen_mints.items() if now_ts - t > SEEN_MINTS_TTL]
             for m in expired:
                 del seen_mints[m]
+            # MT-560: prune stale screening-cooldown entries (1h TTL matches
+            # seen_mints; candidates are only eligible while < 22m old).
+            for m, t in list(_screened_at.items()):
+                if now_ts - t > SEEN_MINTS_TTL:
+                    del _screened_at[m]
             if expired:
                 log.info("Expired %d stale seen_mints entries", len(expired))
             try:
                 cycle_start = time.monotonic()
-                log.info("--- Strategy B Scan ---")
-                log.info("whale tracker disabled — re-enable when Helius integration is built into entry pipeline.")
+                cycle_number += 1
+                log.debug("--- Strategy B Scan (cycle %d) ---", cycle_number)
+                log.debug("whale tracker disabled — re-enable when Helius integration is built into entry pipeline.")
                 open_positions = await manager.get_all_open(mode="paper")
-                log.info("Open positions: %d / %d", len(open_positions), MAX_OPEN)
+                log.debug("Open positions: %d / %d", len(open_positions), MAX_OPEN)
 
                 detailed = {
                     "total": 0,
@@ -1136,6 +1236,7 @@ async def scan_loop(
                     "rugcheck_pass": 0,
                     "holder_pass": 0,
                     "full_screen_pass": 0,
+                    "cooldown_skips": 0,
                     "entry_attempts": 0,
                     "entered": 0,
                 }
@@ -1149,6 +1250,17 @@ async def scan_loop(
                     for coin in candidates:
                         ticker = coin["ticker"]
                         mint = coin["mint"]
+
+                        # MT-560: skip the full screen for mints screened within the
+                        # cooldown window. This keeps RugCheck calls, candidate_log
+                        # inserts, and gate re-evaluation bounded at the 2s cadence;
+                        # a mint that failed gates still gets re-screened every
+                        # SCREEN_COOLDOWN_S, so improving stats can still pass it.
+                        last_screen = _screened_at.get(mint, 0.0)
+                        if now_ts - last_screen < SCREEN_COOLDOWN_S:
+                            detailed["cooldown_skips"] += 1
+                            continue
+                        _screened_at[mint] = now_ts
 
                         passed, reason, gates = await screen_coin(coin, http, _rugcheck)
                         log.info("SCREEN %s (%s): %s", ticker, mint[:8], reason)
@@ -1180,6 +1292,37 @@ async def scan_loop(
                         seen_mints[mint] = time.time()
 
                         detailed["full_screen_pass"] += 1
+
+                        # MT-560: discovery-lag telemetry — how old is this token
+                        # (per its firstPool.createdAt) when we first saw it in a
+                        # Jupiter API response? Logged once per mint per process.
+                        if mint not in _lag_logged:
+                            _lag_logged.add(mint)
+                            created_ms = coin.get("created_timestamp")
+                            detected_epoch = first_seen_epoch.get(mint, now_ts)
+                            if isinstance(created_ms, (int, float)) and created_ms > 0:
+                                lag_s = max(0.0, detected_epoch - created_ms / 1000)
+                                _lag_window.append(lag_s)
+                                log.info(
+                                    "DISCOVERY_LAG mint=%s created=%d detected=%d lag=%.0fs",
+                                    mint, int(created_ms / 1000), int(detected_epoch), lag_s,
+                                )
+                                if len(_lag_window) % _lag_summary_every == 0:
+                                    stats = sorted(_lag_window)
+                                    log.info(
+                                        "DISCOVERY_STATS last_%d_tokens: min=%.0fs avg=%.0fs median=%.0fs max=%.0fs",
+                                        len(stats), stats[0],
+                                        sum(stats) / len(stats),
+                                        statistics.median(stats), stats[-1],
+                                    )
+
+                        # MT-560: per-trade pipeline timing baseline. t_detect is
+                        # the first API sighting; t_gate_pass now. try_enter stamps
+                        # quote/send/confirm and logs the LATENCY line on entry.
+                        timing = {
+                            "t_detect": first_seen_mono.get(mint, time.monotonic()),
+                            "t_gate_pass": time.monotonic(),
+                        }
 
                         if len(await manager.get_all_open(mode="paper")) >= MAX_OPEN:
                             log.info("SKIP %s — strategy capacity reached", ticker)
@@ -1245,7 +1388,7 @@ async def scan_loop(
                         detailed["entry_attempts"] += 1
                         position_id = await try_enter(
                             mint, ticker, mark_provider, adapter, manager, db_path, size_multiplier,
-                            pair=coin.get("pair"),
+                            pair=coin.get("pair"), timing=timing,
                         )
                         if position_id:
                             await mark_strategy_candidate_entered(db_path, candidate_id, position_id)
@@ -1256,33 +1399,42 @@ async def scan_loop(
                             break
 
                 main_blocker = max(main_blocker_count, key=main_blocker_count.get) if main_blocker_count else "none"
-                log.info(
+                # MT-560: at 2s cadence the per-cycle Gates line would flood the
+                # log 30x/min — full line every GATES_LOG_EVERY cycles, DEBUG
+                # between. The console print follows the same throttle.
+                gates_summary = (
                     "Gates: total=%d age=%d mcap=%d txns=%d vol=%d vol/mcap=%d low_fees~=%d "
-                    "b/s=%d rugcheck=%d holder=%d full_pass=%d entry_attempts=%d entered=%d "
-                    "main_blocker=%s",
+                    "b/s=%d rugcheck=%d holder=%d full_pass=%d cooldown_skips=%d "
+                    "entry_attempts=%d entered=%d main_blocker=%s",
                     detailed["total"], detailed["age_pass"], detailed["mcap_pass"],
                     detailed["txn_pass"], detailed["volume_pass"], detailed["vol_mcap_pass"],
                     detailed["low_fees_warn_or_pass"], detailed["buy_sell_pass"],
                     detailed["rugcheck_pass"], detailed["holder_pass"],
-                    detailed["full_screen_pass"], detailed["entry_attempts"],
-                    detailed["entered"], main_blocker,
+                    detailed["full_screen_pass"], detailed["cooldown_skips"],
+                    detailed["entry_attempts"], detailed["entered"], main_blocker,
                 )
-                print(
-                    f"Gates: {detailed['total']} pairs \u2192 "
-                    f"{detailed['age_pass']} age \u2192 "
-                    f"{detailed['mcap_pass']} mcap \u2192 "
-                    f"{detailed['txn_pass']} txns \u2192 "
-                    f"{detailed['volume_pass']} vol \u2192 "
-                    f"{detailed['vol_mcap_pass']} vol/mcap \u2192 "
-                    f"{detailed['low_fees_warn_or_pass']} low_fees~ \u2192 "
-                    f"{detailed['buy_sell_pass']} b/s \u2192 "
-                    f"{detailed['rugcheck_pass']} rugcheck \u2192 "
-                    f"{detailed['holder_pass']} holder \u2192 "
-                    f"{detailed['full_screen_pass']} full_pass \u2192 "
-                    f"{detailed['entry_attempts']} entry_attempts \u2192 "
-                    f"{detailed['entered']} entered "
-                    f"(blocker: {main_blocker})",
-                )
+                if cycle_number % GATES_LOG_EVERY == 0:
+                    log.info(*gates_summary)
+                else:
+                    log.debug(*gates_summary)
+                if cycle_number % GATES_LOG_EVERY == 0:
+                    print(
+                        f"Gates: {detailed['total']} pairs \u2192 "
+                        f"{detailed['age_pass']} age \u2192 "
+                        f"{detailed['mcap_pass']} mcap \u2192 "
+                        f"{detailed['txn_pass']} txns \u2192 "
+                        f"{detailed['volume_pass']} vol \u2192 "
+                        f"{detailed['vol_mcap_pass']} vol/mcap \u2192 "
+                        f"{detailed['low_fees_warn_or_pass']} low_fees~ \u2192 "
+                        f"{detailed['buy_sell_pass']} b/s \u2192 "
+                        f"{detailed['rugcheck_pass']} rugcheck \u2192 "
+                        f"{detailed['holder_pass']} holder \u2192 "
+                        f"{detailed['full_screen_pass']} full_pass \u2192 "
+                        f"{detailed['cooldown_skips']} cooldown_skips \u2192 "
+                        f"{detailed['entry_attempts']} entry_attempts \u2192 "
+                        f"{detailed['entered']} entered "
+                        f"(blocker: {main_blocker})",
+                    )
                 if detailed["full_screen_pass"] == 0 and detailed["total"] > 0:
                     print(
                         "  NOTE: Zero coins passed full screen. "
