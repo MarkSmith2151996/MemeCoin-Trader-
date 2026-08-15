@@ -56,6 +56,12 @@ def load_samples() -> list[tuple[str, str, str, str, float, int]]:
     con = sqlite3.connect(DB_PATH)
     try:
         con.row_factory = sqlite3.Row
+        table_exists = con.execute(
+            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'discovery_lag'",
+        ).fetchone()
+        if table_exists is None:
+            print("discovery_lag table is not initialized yet — restart Strategy B, then re-run.")
+            return []
         rows = con.execute(
             """
             SELECT mint_address, token_source, created_at, detected_at,
