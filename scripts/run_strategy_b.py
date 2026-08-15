@@ -14,10 +14,17 @@ MONITOR (every 30s):
 MT-560: scan cadence reduced from 60s to 2s. The old 60s interval was legacy
 from the Chrome/DexScreener era, where every cycle needed an 8-second
 browser-pc capture. Jupiter tokens/v2 free tier allows ~1 RPS; two discovery
-endpoints per cycle at a 2s cadence stays at ~1 req/s. A per-mint screening
-cooldown keeps RugCheck load, candidate_log writes, and log volume bounded at
-the faster cadence (see SCREEN_COOLDOWN_S). Discovery lag and end-to-end
-pipeline latency are logged per candidate/trade (DISCOVERY_LAG / LATENCY).
+endpoints per cycle at a 2s cadence stays at ~1 req/s. Discovery lag and
+end-to-end pipeline latency are logged per candidate/trade (DISCOVERY_LAG /
+LATENCY).
+
+MT-566: the MT-560 per-mint screening cooldown is removed. RugCheck results
+are now cached per token (10-min TTL), so gate re-evaluation runs every cycle
+(~0ms API-free) and a token enters on the first cycle where it becomes
+eligible — the 45s cooldown wait was showing up as ~46s of `gates` latency in
+the LATENCY telemetry. candidate_log inserts and SCREEN log lines remain
+throttled per mint (see SCREEN_LOG_COOLDOWN_S) to keep DB/log volume bounded
+at the faster cadence.
 
 Run:
     python3 scripts/run_strategy_b.py          # normal loop
@@ -74,7 +81,7 @@ from src.execution.paper import PaperExecutionAdapter
 from src.execution.price_provider import DexScreenerPriceProvider
 from src.monitoring.alerts import send_imessage
 from src.monitoring.position_snapshots import snapshot_loop
-from src.risk.rugcheck import RugCheckClient
+from src.risk.rugcheck import RugCheckClient, RugCheckResult
 from src.signals.grok_xsearch import count_influencer_mentions, get_mentions_with_timestamps
 from src.strategy.gate_tuner import GateThresholds, GateTuner
 from src.strategy.position_manager import PositionManager
@@ -118,12 +125,11 @@ SCAN_INTERVAL = int(os.environ.get("STRATEGY_B_SCAN_INTERVAL", "2"))
 MONITOR_INTERVAL = 30
 FAST_MONITOR_INTERVAL_S = 5
 FAST_POLL_DROP_PCT = 0.05
-# MT-560: per-mint re-screening cooldown. At the 2s cadence, re-running the
-# full screen_coin (RugCheck HTTP call + candidate_log insert) on every
-# candidate every cycle would hammer RugCheck and flood candidate_log. Mints
-# are re-screened at most once per SCREEN_COOLDOWN_S, so gate results still
-# track evolving stats (a failing mint can pass later), but load stays bounded.
-SCREEN_COOLDOWN_S = 45
+# MT-566: per-mint throttle for candidate_log inserts and SCREEN log lines
+# (replaces the MT-560 screening cooldown). Gate evaluation itself runs every
+# cycle with the RugCheck cache; only persistence/logging is throttled so the
+# DB and log volume stay bounded at the 2s cadence.
+SCREEN_LOG_COOLDOWN_S = 45
 # MT-560: cycle summary cadence — at 2s the full "Gates:" line would flood the
 # log 30x/min. Logged at INFO every GATES_LOG_EVERY cycles (~60s), DEBUG in
 # between; the console print follows the same throttle.
@@ -198,6 +204,14 @@ except ImportError:
 seen_mints: dict[str, float] = {}
 SEEN_MINTS_TTL = 3600  # 1 hour in seconds
 _rugcheck = RugCheckClient(timeout_s=5.0)
+# MT-566: per-token RugCheck cache. First sight of a mint fetches the report
+# (~400ms); every re-evaluation within the TTL uses the cached copy, skipping
+# the API call entirely. Only provider_status == "ok" reports are cached —
+# transient errors (timeout/429/provider) retry on the next cycle.
+RUGCHECK_CACHE_TTL_S = 600  # 10 minutes
+_rugcheck_cache: dict[str, tuple[float, RugCheckResult]] = {}
+_rugcheck_cache_hits = 0
+_rugcheck_cache_misses = 0
 peak_prices: dict[str, float] = {}  # mint -> highest price seen
 
 # ── MT-560 latency telemetry state ────────────────────────────────────
@@ -217,8 +231,9 @@ _lag_by_source: dict[str, deque[float]] = {
 }
 _lag_summary_every = 100                # log DISCOVERY_LAG_REPORT every N samples
 
-# Screening cooldown bookkeeping (MT-560): mint -> last full screen_coin epoch.
-_screened_at: dict[str, float] = {}
+# MT-566: per-mint throttle state for candidate_log inserts + SCREEN log lines
+# (replaces the MT-560 screening cooldown). Gate evaluation runs every cycle.
+_last_candidate_log: dict[str, float] = {}
 
 # Cycle counter for log throttling (GATES_LOG_EVERY).
 cycle_number = 0
@@ -715,6 +730,30 @@ def _extract_creator_pct(report) -> float | None:
     return None
 
 
+async def _fetch_rugcheck_cached(
+    rugcheck_client: RugCheckClient,
+    mint: str,
+) -> tuple[RugCheckResult, bool]:
+    """Return (report, from_cache).
+
+    MT-566: RugCheck reports are cached per token for RUGCHECK_CACHE_TTL_S.
+    A fresh cache entry skips the API call entirely; only provider_status ==
+    "ok" results are cached so transient errors retry on the next cycle.
+    """
+    global _rugcheck_cache_hits, _rugcheck_cache_misses
+    cached = _rugcheck_cache.get(mint)
+    if cached is not None and time.monotonic() - cached[0] < RUGCHECK_CACHE_TTL_S:
+        _rugcheck_cache_hits += 1
+        return cached[1], True
+    _rugcheck_cache_misses += 1
+    report = await rugcheck_client.fetch_report(mint)
+    if report.provider_status == "ok":
+        _rugcheck_cache[mint] = (time.monotonic(), report)
+    else:
+        _rugcheck_cache.pop(mint, None)
+    return report, False
+
+
 async def screen_coin(
     coin: dict,
     http: httpx.AsyncClient,
@@ -797,12 +836,19 @@ async def screen_coin(
     except Exception as exc:
         log.warning("DexScreener search failed for %s: %s", mint[:8], exc)
 
+    t_rug = time.monotonic()
     try:
-        report = await rugcheck_client.fetch_report(mint)
+        report, rug_from_cache = await _fetch_rugcheck_cached(rugcheck_client, mint)
     except Exception as exc:
         return False, (
             f"age={age_min:.1f}m mcap=${mcap:.0f} \u2192 FAIL RugCheck error: {exc}"
         ), gates
+    if log.isEnabledFor(logging.DEBUG):
+        rug_ms = int((time.monotonic() - t_rug) * 1000)
+        log.debug(
+            "GATE_TIMING mint=%s rugcheck=%dms cached=%s cache_hits=%d cache_misses=%d",
+            mint[:16], rug_ms, rug_from_cache, _rugcheck_cache_hits, _rugcheck_cache_misses,
+        )
 
     if report.provider_status in ("timeout", "provider_error", "http_429"):
         return False, (
@@ -1290,11 +1336,11 @@ async def scan_loop(
             expired = [m for m, t in seen_mints.items() if now_ts - t > SEEN_MINTS_TTL]
             for m in expired:
                 del seen_mints[m]
-            # MT-560: prune stale screening-cooldown entries (1h TTL matches
-            # seen_mints; candidates are only eligible while < 22m old).
-            for m, t in list(_screened_at.items()):
+            # MT-566: prune stale per-mint persistence-throttle entries (1h TTL
+            # matches seen_mints; candidates are only eligible while < 22m old).
+            for m, t in list(_last_candidate_log.items()):
                 if now_ts - t > SEEN_MINTS_TTL:
-                    del _screened_at[m]
+                    del _last_candidate_log[m]
             if expired:
                 log.info("Expired %d stale seen_mints entries", len(expired))
             try:
@@ -1317,7 +1363,6 @@ async def scan_loop(
                     "rugcheck_pass": 0,
                     "holder_pass": 0,
                     "full_screen_pass": 0,
-                    "cooldown_skips": 0,
                     "entry_attempts": 0,
                     "entered": 0,
                 }
@@ -1332,20 +1377,27 @@ async def scan_loop(
                         ticker = coin["ticker"]
                         mint = coin["mint"]
 
-                        # MT-560: skip the full screen for mints screened within the
-                        # cooldown window. This keeps RugCheck calls, candidate_log
-                        # inserts, and gate re-evaluation bounded at the 2s cadence;
-                        # a mint that failed gates still gets re-screened every
-                        # SCREEN_COOLDOWN_S, so improving stats can still pass it.
-                        last_screen = _screened_at.get(mint, 0.0)
-                        if now_ts - last_screen < SCREEN_COOLDOWN_S:
-                            detailed["cooldown_skips"] += 1
-                            continue
-                        _screened_at[mint] = now_ts
-
+                        # MT-566: no screening cooldown — RugCheck is cached per
+                        # token, so gate re-evaluation runs every cycle (~0ms)
+                        # and a token enters on the cycle where it becomes
+                        # eligible (fixes the ~46s `gates` latency from the
+                        # MT-560 cooldown). candidate_log inserts and the
+                        # SCREEN log line stay throttled per mint so DB/log
+                        # volume stays bounded at the 2s cadence; a passing
+                        # mint always persists because its candidate row is
+                        # required for entry marking.
                         passed, reason, gates = await screen_coin(coin, http, _rugcheck)
-                        log.info("SCREEN %s (%s): %s", ticker, mint[:8], reason)
-                        candidate_id = await log_candidate(db_path, coin, gates, reason)
+                        last_persisted = _last_candidate_log.get(mint, 0.0)
+                        if now_ts - last_persisted >= SCREEN_LOG_COOLDOWN_S or passed:
+                            _last_candidate_log[mint] = now_ts
+                            log.info("SCREEN %s (%s): %s", ticker, mint[:8], reason)
+                            candidate_id = await log_candidate(db_path, coin, gates, reason)
+                        else:
+                            candidate_id = None
+                            log.debug(
+                                "SCREEN %s (%s): %s (persist throttled)",
+                                ticker, mint[:8], reason,
+                            )
 
                         # MT-563: discovery-lag telemetry — how old is this token
                         # (per its firstPool.createdAt) when we first saw it in a
@@ -1500,13 +1552,13 @@ async def scan_loop(
                 # between. The console print follows the same throttle.
                 gates_summary = (
                     "Gates: total=%d age=%d mcap=%d txns=%d vol=%d vol/mcap=%d low_fees~=%d "
-                    "b/s=%d rugcheck=%d holder=%d full_pass=%d cooldown_skips=%d "
+                    "b/s=%d rugcheck=%d holder=%d full_pass=%d "
                     "entry_attempts=%d entered=%d main_blocker=%s",
                     detailed["total"], detailed["age_pass"], detailed["mcap_pass"],
                     detailed["txn_pass"], detailed["volume_pass"], detailed["vol_mcap_pass"],
                     detailed["low_fees_warn_or_pass"], detailed["buy_sell_pass"],
                     detailed["rugcheck_pass"], detailed["holder_pass"],
-                    detailed["full_screen_pass"], detailed["cooldown_skips"],
+                    detailed["full_screen_pass"],
                     detailed["entry_attempts"], detailed["entered"], main_blocker,
                 )
                 if cycle_number % GATES_LOG_EVERY == 0:
@@ -1526,7 +1578,6 @@ async def scan_loop(
                         f"{detailed['rugcheck_pass']} rugcheck \u2192 "
                         f"{detailed['holder_pass']} holder \u2192 "
                         f"{detailed['full_screen_pass']} full_pass \u2192 "
-                        f"{detailed['cooldown_skips']} cooldown_skips \u2192 "
                         f"{detailed['entry_attempts']} entry_attempts \u2192 "
                         f"{detailed['entered']} entered "
                         f"(blocker: {main_blocker})",
