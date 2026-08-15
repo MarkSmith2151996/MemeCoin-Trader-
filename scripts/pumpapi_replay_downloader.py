@@ -25,7 +25,8 @@ ARCHIVE_ROOT = Path(r"D:\pumpapi-replay")
 ARCHIVE_BASE_URL = "https://replay.pumpapi.io"
 ARCHIVE_START = datetime(2026, 4, 18, tzinfo=UTC)
 DOWNLOAD_CONCURRENCY = 4
-MANIFEST_CONCURRENCY = 32
+MANIFEST_CONCURRENCY = 1
+MANIFEST_REQUEST_DELAY_SECONDS = 0.25
 POLL_INTERVAL_SECONDS = 60 * 60
 MAX_RETRIES = 5
 CHUNK_SIZE = 1024 * 1024
@@ -115,6 +116,8 @@ async def head_entry(
     async with semaphore:
         for attempt in range(MAX_RETRIES):
             try:
+                # Archive availability checks are deliberately paced during startup and polling.
+                await asyncio.sleep(MANIFEST_REQUEST_DELAY_SECONDS)
                 async with session.head(archive_hour.url, allow_redirects=True) as response:
                     if response.status == 200:
                         content_length = response.headers.get("Content-Length")
@@ -138,7 +141,13 @@ async def head_entry(
                             "status": "missing",
                         }
                     if response.status == 429 or response.status >= 500:
-                        await asyncio.sleep(min(60, 2**attempt + random.random()))
+                        retry_after = response.headers.get("Retry-After")
+                        delay = (
+                            float(retry_after)
+                            if retry_after and retry_after.isdigit()
+                            else min(120, 2**attempt + random.random())
+                        )
+                        await asyncio.sleep(delay)
                         continue
                     return {
                         "key": archive_hour.key,

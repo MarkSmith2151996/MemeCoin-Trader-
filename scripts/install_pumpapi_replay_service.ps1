@@ -61,7 +61,9 @@ if (Get-Service -Name $ServiceName -ErrorAction SilentlyContinue) {
 & $Nssm set $ServiceName AppRotateFiles 1
 & $Nssm set $ServiceName AppRotateBytes 50000000
 & $Nssm set $ServiceName AppRestartDelay 30000
-& $Nssm set $ServiceName AppExit Default Restart
+& $Nssm set $ServiceName AppExit Default Exit
+sc.exe failure $ServiceName reset= 86400 actions= restart/30000/restart/30000/restart/30000 | Out-Null
+sc.exe failureflag $ServiceName 1 | Out-Null
 & $Nssm set $ServiceName Start SERVICE_AUTO_START
 
 if ($Start) {
