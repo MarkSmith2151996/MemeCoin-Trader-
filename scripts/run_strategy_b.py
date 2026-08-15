@@ -94,15 +94,19 @@ SCAN_INTERVAL = 60
 MONITOR_INTERVAL = 30
 FAST_MONITOR_INTERVAL_S = 5
 FAST_POLL_DROP_PCT = 0.05
-TRAILING_STOP_PCT = 4.0
+# MT-553: optimized exit params from the MT-552 sweep (2% trail / 150% TP / 8%
+# hard stop) — +8.75 SOL vs +6.18 SOL baseline, PF 4.17 -> 7.63.
+TRAILING_STOP_PCT = 2.0
 TRAILING_ARM_PCT = 2.0
-TAKE_PROFIT_PCT = 80.0
-HARD_STOP_PCT = 10.0
+TAKE_PROFIT_PCT = 150.0
+HARD_STOP_PCT = 8.0
 TIME_STOP_MINUTES = 10
 ENTRY_CONFIRM_WINDOW_S = 90
 EARLY_EXIT_GREEN_PCT = 0.01
 # MT-537: UTC 21 added to the MT-516 blocked list (20:00-21:59 dead zone).
 BLOCKED_UTC_HOURS = frozenset({0, 7, 19, 20, 21})
+# MT-553: Wednesday (weekday 2) blocked per MT-552 sweep — 21.3% WR / -0.88 SOL.
+BLOCKED_WEEKDAYS = frozenset({2})
 SATURDAY_SIZE_MULTIPLIER = 0.5
 
 # Mode flags
@@ -877,6 +881,17 @@ async def try_enter(
             await record_entry_skip(
                 db_path, strategy="B", mint_address=mint, ticker=ticker,
                 gate="time_gate", reason=f"utc_hour={utc_now.hour}",
+            )
+        except Exception as exc:
+            log.debug("candidate_log write failed (non-fatal): %s", exc)
+        return None
+
+    if utc_now.weekday() in BLOCKED_WEEKDAYS:
+        log.warning("SKIP: Wednesday blocked — mint=%s ticker=%s", mint[:16], ticker)
+        try:
+            await record_entry_skip(
+                db_path, strategy="B", mint_address=mint, ticker=ticker,
+                gate="time_gate", reason=f"weekday={utc_now.weekday()} (Wednesday)",
             )
         except Exception as exc:
             log.debug("candidate_log write failed (non-fatal): %s", exc)

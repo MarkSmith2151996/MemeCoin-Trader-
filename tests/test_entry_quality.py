@@ -262,9 +262,9 @@ def test_strategy_b_early_exit_when_never_green_within_90s(db: Path) -> None:
 def test_strategy_b_take_profit_uses_tuned_threshold(db: Path) -> None:
     manager = FakeManager([make_position(entry=1.0)])
     strategy_b.peak_prices.clear()
-    danger = asyncio.run(strategy_b.monitor_positions(manager, FakePrice(2.05), db))
     trigger = 1.0 + strategy_b.TAKE_PROFIT_PCT / 100
-    assert manager.closed_with == [("Mint1", trigger, 2.05)]
+    danger = asyncio.run(strategy_b.monitor_positions(manager, FakePrice(trigger + 0.01), db))
+    assert manager.closed_with == [("Mint1", trigger, trigger + 0.01)]
     assert sell_trades(db) == [(trigger, "take_profit")]
     assert danger is False
 
