@@ -250,6 +250,22 @@ SCHEMA = (
       FOREIGN KEY (position_id) REFERENCES positions(id)
     )
     """,
+    """
+    CREATE TABLE IF NOT EXISTS discovery_lag (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      mint_address TEXT,
+      token_source TEXT,  -- 'pump', 'raydium', 'pumpswap', 'unknown'
+      created_at TEXT,
+      detected_at TEXT,
+      lag_seconds REAL,
+      passed_gates INTEGER,  -- 1 or 0
+      recorded_at TEXT DEFAULT CURRENT_TIMESTAMP
+    )
+    """,
+    """
+    CREATE INDEX IF NOT EXISTS idx_discovery_lag_recorded
+    ON discovery_lag (recorded_at)
+    """,
 )
 
 
@@ -960,6 +976,42 @@ async def record_jupiter_quote(
                 slippage_vs_paper_pct,
                 route_info,
                 quoted_at,
+            ),
+        )
+        await db.commit()
+
+
+async def record_discovery_lag(
+    path: str | Path,
+    *,
+    mint_address: str,
+    token_source: str,
+    created_at: str,
+    detected_at: str,
+    lag_seconds: float,
+    passed_gates: bool,
+) -> None:
+    """Persist one discovery-lag sample (MT-563).
+
+    Pass/reject outcome of the first screening is recorded alongside the
+    DISCOVERY_LAG log line so latency can later be split by gate outcome.
+    """
+
+    async with aiosqlite.connect(path) as db:
+        await db.execute(
+            """
+            INSERT INTO discovery_lag (
+                mint_address, token_source, created_at, detected_at,
+                lag_seconds, passed_gates
+            ) VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            (
+                mint_address,
+                token_source,
+                created_at,
+                detected_at,
+                float(lag_seconds),
+                1 if passed_gates else 0,
             ),
         )
         await db.commit()

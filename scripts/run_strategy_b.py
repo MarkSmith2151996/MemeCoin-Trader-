@@ -63,6 +63,7 @@ from src.core.config import load_settings
 from src.core.database import (
     init_db,
     mark_strategy_candidate_entered,
+    record_discovery_lag,
     record_jupiter_quote,
     record_strategy_candidate,
     record_trade,
@@ -206,7 +207,15 @@ first_seen_epoch: dict[str, float] = {}  # mint -> epoch seconds of first API si
 first_seen_mono: dict[str, float] = {}   # mint -> time.monotonic() of first API sighting
 _lag_logged: set[str] = set()            # mints whose DISCOVERY_LAG was already logged
 _lag_window: deque[float] = deque(maxlen=100)  # rolling discovery-lag seconds
-_lag_summary_every = 25                  # log DISCOVERY_STATS every N samples
+# MT-563: per-source lag samples (pump/raydium/pumpswap/unknown) so the
+# periodic DISCOVERY_LAG_REPORT can break the last 100 samples down by source.
+_lag_by_source: dict[str, deque[float]] = {
+    "pump": deque(maxlen=100),
+    "raydium": deque(maxlen=100),
+    "pumpswap": deque(maxlen=100),
+    "unknown": deque(maxlen=100),
+}
+_lag_summary_every = 100                # log DISCOVERY_LAG_REPORT every N samples
 
 # Screening cooldown bookkeeping (MT-560): mint -> last full screen_coin epoch.
 _screened_at: dict[str, float] = {}
@@ -558,6 +567,32 @@ def _synthesize_pair_dict(token: dict) -> dict:
     }
 
 
+def classify_token_source(token: dict) -> str:
+    """Best-effort launch-source label for a Jupiter token (MT-563).
+
+    pump.fun mints always end in the literal 'pump' suffix, and a pump.fun
+    bonding-curve firstPool id equals the mint itself. PumpSwap pool ids also
+    end in 'pump' while Raydium pool ids do not, so a pump.fun-suffixed mint
+    whose first pool no longer matches the mint (and lacks the suffix) has
+    migrated to Raydium — the classic pump.fun graduation target. Jupiter's
+    launchpad label covers the rest; anything else (e.g. 'met-dbc' Meteora
+    launches, Moonshot) is 'unknown' for this pump/raydium/pumpswap taxonomy.
+    """
+    mint = str(token.get("id") or "").lower()
+    launchpad = str(token.get("launchpad") or "").lower()
+    pool_id = str((token.get("firstPool") or {}).get("id") or "").lower()
+
+    if mint.endswith("pump"):
+        if pool_id and pool_id != mint and not pool_id.endswith("pump"):
+            return "raydium"
+        return "pump"
+    if launchpad == "pump.fun":
+        return "pump"
+    if pool_id.endswith("pump"):
+        return "pumpswap"
+    return "unknown"
+
+
 async def fetch_candidates_jupiter(http: httpx.AsyncClient) -> list[dict]:
     """Discover fresh Solana tokens from Jupiter Tokens V2."""
     tokens_by_mint: dict[str, dict] = {}
@@ -616,6 +651,7 @@ async def fetch_candidates_jupiter(http: httpx.AsyncClient) -> list[dict]:
         candidates.append({
             "mint": token["id"],
             "ticker": token.get("symbol", ""),
+            "token_source": classify_token_source(token),
             "usd_market_cap": token.get("mcap") or token.get("fdv") or 0,
             "created_timestamp": created_timestamp,
             "volume": (stats_1h.get("buyVolume", 0) or 0) + (stats_1h.get("sellVolume", 0) or 0),
@@ -1192,6 +1228,51 @@ async def _adapter_close(
 
 # ── Loops ────────────────────────────────────────────────────────────
 
+def _first_failed_gate(gates: dict[str, bool]) -> str:
+    """First failing gate name from a screen gates dict (MT-563)."""
+    for gate in (
+        "age_pass", "mcap_pass", "txn_pass", "volume_pass", "vol_mcap_pass",
+        "buy_sell_pass", "rugcheck_pass", "holder_pass", "creator_pass",
+    ):
+        if not gates.get(gate, True):
+            return gate.removesuffix("_pass")
+    return "none"
+
+
+def _log_lag_report() -> None:
+    """Log the MT-563 DISCOVERY_LAG_REPORT summary block (last 100 samples)."""
+    stats = sorted(_lag_window)
+    if not stats:
+        return
+    n = len(stats)
+    buckets = (
+        ("<5s", lambda s: s < 5),
+        ("5-10s", lambda s: 5 <= s < 10),
+        ("10-20s", lambda s: 10 <= s < 20),
+        ("20-30s", lambda s: 20 <= s < 30),
+        ("30-60s", lambda s: 30 <= s < 60),
+        ("60s+", lambda s: s >= 60),
+    )
+    lines = [f"DISCOVERY_LAG_REPORT n={n}"]
+    for label, predicate in buckets:
+        count = sum(1 for s in stats if predicate(s))
+        lines.append(f"  {label}: {count:2d} ({100.0 * count / n:3.0f}%)")
+    median = statistics.median(stats)
+    p95 = stats[min(n - 1, int(0.95 * n) - 1)]
+    lines.append(
+        f"  min={stats[0]:.0f}s avg={sum(stats) / n:.0f}s "
+        f"median={median:.0f}s p95={p95:.0f}s max={stats[-1]:.0f}s",
+    )
+    by_source = " ".join(
+        f"{source}={statistics.median(sorted(vals)):.0f}s"
+        for source, vals in sorted(_lag_by_source.items())
+        if vals
+    )
+    lines.append(f"  By source: {by_source}")
+    for line in lines:
+        log.info("%s", line)
+
+
 async def scan_loop(
     mark_provider: DexScreenerPriceProvider,
     adapter: PaperExecutionAdapter,
@@ -1266,6 +1347,44 @@ async def scan_loop(
                         log.info("SCREEN %s (%s): %s", ticker, mint[:8], reason)
                         candidate_id = await log_candidate(db_path, coin, gates, reason)
 
+                        # MT-563: discovery-lag telemetry — how old is this token
+                        # (per its firstPool.createdAt) when we first saw it in a
+                        # Jupiter API response? Recorded once per mint per process
+                        # for every screened candidate, passed or rejected, with
+                        # the first failing gate as the "why" on rejection.
+                        if mint not in _lag_logged:
+                            _lag_logged.add(mint)
+                            created_ms = coin.get("created_timestamp")
+                            detected_epoch = first_seen_epoch.get(mint, now_ts)
+                            if isinstance(created_ms, (int, float)) and created_ms > 0:
+                                lag_s = max(0.0, detected_epoch - created_ms / 1000)
+                                source = coin.get("token_source", "unknown")
+                                _lag_window.append(lag_s)
+                                _lag_by_source.setdefault(source, deque(maxlen=100)).append(lag_s)
+                                try:
+                                    await record_discovery_lag(
+                                        db_path,
+                                        mint_address=mint,
+                                        token_source=source,
+                                        created_at=datetime.fromtimestamp(
+                                            created_ms / 1000, tz=UTC,
+                                        ).isoformat(),
+                                        detected_at=datetime.fromtimestamp(
+                                            detected_epoch, tz=UTC,
+                                        ).isoformat(),
+                                        lag_seconds=lag_s,
+                                        passed_gates=passed,
+                                    )
+                                except Exception as exc:
+                                    log.warning("discovery_lag persist failed mint=%s: %s", mint[:8], exc)
+                                log.info(
+                                    "DISCOVERY_LAG mint=%s source=%s created=%d detected=%d lag=%.0fs gates=%s",
+                                    mint, source, int(created_ms / 1000), int(detected_epoch), lag_s,
+                                    "PASS" if passed else f"FAIL:{_first_failed_gate(gates)}",
+                                )
+                                if len(_lag_window) % _lag_summary_every == 0:
+                                    _log_lag_report()
+
                         # Aggregate per-gate diagnostics
                         for gk in ("age_pass", "mcap_pass", "txn_pass", "volume_pass",
                                    "vol_mcap_pass", "buy_sell_pass", "rugcheck_pass",
@@ -1292,29 +1411,6 @@ async def scan_loop(
                         seen_mints[mint] = time.time()
 
                         detailed["full_screen_pass"] += 1
-
-                        # MT-560: discovery-lag telemetry — how old is this token
-                        # (per its firstPool.createdAt) when we first saw it in a
-                        # Jupiter API response? Logged once per mint per process.
-                        if mint not in _lag_logged:
-                            _lag_logged.add(mint)
-                            created_ms = coin.get("created_timestamp")
-                            detected_epoch = first_seen_epoch.get(mint, now_ts)
-                            if isinstance(created_ms, (int, float)) and created_ms > 0:
-                                lag_s = max(0.0, detected_epoch - created_ms / 1000)
-                                _lag_window.append(lag_s)
-                                log.info(
-                                    "DISCOVERY_LAG mint=%s created=%d detected=%d lag=%.0fs",
-                                    mint, int(created_ms / 1000), int(detected_epoch), lag_s,
-                                )
-                                if len(_lag_window) % _lag_summary_every == 0:
-                                    stats = sorted(_lag_window)
-                                    log.info(
-                                        "DISCOVERY_STATS last_%d_tokens: min=%.0fs avg=%.0fs median=%.0fs max=%.0fs",
-                                        len(stats), stats[0],
-                                        sum(stats) / len(stats),
-                                        statistics.median(stats), stats[-1],
-                                    )
 
                         # MT-560: per-trade pipeline timing baseline. t_detect is
                         # the first API sighting; t_gate_pass now. try_enter stamps
