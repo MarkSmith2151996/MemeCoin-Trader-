@@ -201,8 +201,15 @@ except ImportError:
     load_tracked_wallets = None
     log.warning("whale_tracker sizing unavailable — whale conviction sizing disabled")
 
+# MT-584: in-memory dedup of evaluated mints. A mint is marked once it has
+# been screened (passed or failed) and skipped on subsequent cycles until
+# the TTL expires. Expired entries are cleaned every cycle in scan_loop.
 seen_mints: dict[str, float] = {}
 SEEN_MINTS_TTL = 3600  # 1 hour in seconds
+# MT-584: dedup-skip log lines are INFO once per mint (so the behavior is
+# verifiable in the log) and DEBUG afterwards (so the 2s cadence does not
+# flood the log with up to ~130 skip lines per cycle).
+_dedup_skip_logged: set[str] = set()
 _rugcheck = RugCheckClient(timeout_s=5.0)
 # MT-566: per-token RugCheck cache. First sight of a mint fetches the report
 # (~400ms); every re-evaluation within the TTL uses the cached copy, skipping
@@ -1207,14 +1214,19 @@ async def monitor_positions(
                     close_reason, pos.mint_address[:16],
                 )
                 continue
-            await manager.close_position(pos.mint_address, close_price, mode="paper", peak_price_sol=peak)
+            closed = await manager.close_position(pos.mint_address, close_price, mode="paper", peak_price_sol=peak)
             # AUTO-TUNER PAUSED — oscillating, not converging. See MT-537.
             # if gate_tuner is not None and await gate_tuner.maybe_tune():
             #     log.info("Auto-tuned Strategy B gates: %s", json.dumps(gate_tuner.thresholds.as_dict()))
             pnl_pct = ((close_price - pos.entry_price_sol) / pos.entry_price_sol) * 100 if pos.entry_price_sol else 0.0
+            # MT-584: adjusted_pnl_sol = raw realized PnL minus estimated
+            # round-trip execution costs (priority fee + dex fee + slippage).
+            adjusted_pnl = closed.adjusted_pnl_sol if closed is not None else None
             log.info(
-                "CLOSE [%s]: mint=%s entry=%.8f close=%.8f",
+                "CLOSE [%s]: mint=%s entry=%.8f close=%.8f raw_pnl=%+.6f adjusted_pnl=%s SOL",
                 close_reason, pos.mint_address[:16], pos.entry_price_sol, close_price,
+                closed.realized_pnl_sol if closed is not None else 0.0,
+                f"{adjusted_pnl:+.6f}" if adjusted_pnl is not None else "n/a",
             )
             send_imessage(
                 f"\U0001f534 [STRATEGY B] CLOSED {pos.mint_address[:8]}\n"
@@ -1377,6 +1389,19 @@ async def scan_loop(
                         ticker = coin["ticker"]
                         mint = coin["mint"]
 
+                        # MT-584: dedup — a mint evaluated this hour (passed
+                        # or failed screening) is skipped on subsequent cycles
+                        # until the TTL expires. INFO once per mint so the
+                        # dedup is verifiable, DEBUG thereafter to avoid
+                        # flooding the log at the 2s cadence.
+                        if mint in seen_mints:
+                            if mint not in _dedup_skip_logged:
+                                _dedup_skip_logged.add(mint)
+                                log.info("skipping %s (%s), already evaluated", mint[:8], ticker)
+                            else:
+                                log.debug("skipping %s (%s), already evaluated", mint[:8], ticker)
+                            continue
+
                         # MT-566: no screening cooldown — RugCheck is cached per
                         # token, so gate re-evaluation runs every cycle (~0ms)
                         # and a token enters on the cycle where it becomes
@@ -1387,6 +1412,9 @@ async def scan_loop(
                         # mint always persists because its candidate row is
                         # required for entry marking.
                         passed, reason, gates = await screen_coin(coin, http, _rugcheck)
+                        # MT-584: mark evaluated (pass or fail) so the dedup
+                        # check above skips it on subsequent cycles.
+                        seen_mints[mint] = now_ts
                         last_persisted = _last_candidate_log.get(mint, 0.0)
                         if now_ts - last_persisted >= SCREEN_LOG_COOLDOWN_S or passed:
                             _last_candidate_log[mint] = now_ts
@@ -1456,11 +1484,6 @@ async def scan_loop(
                                     main_blocker_count[bk] = main_blocker_count.get(bk, 0) + 1
                                     break
                             continue
-
-                        if mint in seen_mints:
-                            log.info("SKIP %s — already evaluated for entry this hour", ticker)
-                            continue
-                        seen_mints[mint] = time.time()
 
                         detailed["full_screen_pass"] += 1
 

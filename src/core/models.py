@@ -175,6 +175,10 @@ class Position(BaseModel):
     opened_at: datetime = Field(default_factory=utc_now)
     closed_at: datetime | None = None
     realized_pnl_sol: float = 0.0
+    # MT-584: realized_pnl_sol minus estimated round-trip execution costs
+    # (priority fees + dex fees + slippage). Populated when the position
+    # closes; None for positions closed before the field existed.
+    adjusted_pnl_sol: float | None = None
     close_price_sol: float | None = None
     peak_price_sol: float | None = None
     fill_quality: PaperFillQuality = PaperFillQuality.LEGACY_UNKNOWN

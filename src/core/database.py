@@ -77,6 +77,7 @@ SCHEMA = (
       opened_at TEXT NOT NULL,
       closed_at TEXT,
       realized_pnl_sol REAL NOT NULL,
+      adjusted_pnl_sol REAL,
       partial_exits_json TEXT NOT NULL,
       close_price_sol REAL,
       peak_price_sol REAL,
@@ -285,6 +286,10 @@ async def init_db(path: str | Path) -> None:
             pass
         try:
             await db.execute("ALTER TABLE positions ADD COLUMN strategy TEXT DEFAULT 'A'")
+        except aiosqlite.OperationalError:
+            pass
+        try:
+            await db.execute("ALTER TABLE positions ADD COLUMN adjusted_pnl_sol REAL")
         except aiosqlite.OperationalError:
             pass
         try:
@@ -570,9 +575,9 @@ async def record_position(path: str | Path, position: Position, *, strategy: str
             """
             INSERT OR REPLACE INTO positions (
                 id, mint_address, entry_trade_id, amount_sol, token_amount, entry_price_sol,
-                status, opened_at, closed_at, realized_pnl_sol, partial_exits_json,
-                close_price_sol, peak_price_sol, strategy
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                status, opened_at, closed_at, realized_pnl_sol, adjusted_pnl_sol,
+                partial_exits_json, close_price_sol, peak_price_sol, strategy
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 position.id,
@@ -585,6 +590,7 @@ async def record_position(path: str | Path, position: Position, *, strategy: str
                 position.opened_at.isoformat(),
                 position.closed_at.isoformat() if position.closed_at else None,
                 position.realized_pnl_sol,
+                position.adjusted_pnl_sol,
                 position.model_dump_json(),
                 position.close_price_sol,
                 position.peak_price_sol,

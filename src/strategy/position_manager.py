@@ -13,6 +13,28 @@ from src.core.database import record_position
 from src.core.models import PaperFillQuality, PartialExit, Position, PositionStatus, Signal, Trade
 from src.strategy.exits import build_partial_exits
 
+# ── Round-trip execution cost model (MT-584) ─────────────────────────
+# Estimated execution costs deducted from raw realized PnL to produce the
+# adjusted_pnl_sol column on closed positions. Per-leg values for calm
+# conditions, tuned via these module-level constants.
+PRIORITY_FEE_PER_LEG = 0.0002  # SOL priority fee per leg
+DEX_FEE_PCT = 0.01             # 1% bonding-curve fee per leg
+SLIPPAGE_PCT = 0.02            # 2% estimated slippage per leg
+
+
+def _estimated_round_trip_cost_sol(position: Position) -> float:
+    """Estimated round-trip execution cost in SOL for a position.
+
+    Cost = priority fee (per leg) + dex fee (per leg, % of entry size)
+           + slippage (per leg, % of entry size), both legs counted.
+    """
+    entry_sol = max(position.amount_sol, 0.0)
+    return (
+        PRIORITY_FEE_PER_LEG * 2
+        + DEX_FEE_PCT * entry_sol * 2
+        + SLIPPAGE_PCT * entry_sol * 2
+    )
+
 
 class PositionManager:
     def __init__(
@@ -170,6 +192,11 @@ class PositionManager:
                 "status": PositionStatus.CLOSED,
                 "closed_at": datetime.now(UTC),
                 "realized_pnl_sol": round(position.realized_pnl_sol + realized_pnl, 9),
+                # MT-584: raw PnL minus estimated round-trip execution costs.
+                "adjusted_pnl_sol": round(
+                    position.realized_pnl_sol + realized_pnl - _estimated_round_trip_cost_sol(position),
+                    9,
+                ),
                 "close_price_sol": close_price,
                 "peak_price_sol": peak_price_sol,
             }
