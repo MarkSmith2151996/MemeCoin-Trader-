@@ -20,6 +20,13 @@ graduated), graduated tokens get a lower score threshold than bonding-curve
 tokens, and priority fees are queried dynamically from the RPC
 (getRecentPrioritizationFees, 75th percentile, 30s cache).
 
+MT-590: pool-depth floors lowered to 10 SOL bonding curve / 25 SOL graduated
+and slippage tiers relaxed to >20 SOL / 5-20 SOL / <5 SOL skip. 66.7% of
+tokens entered Aug 15-18 had <50 SOL depth and 39.9% <30 SOL, so the MT-588
+floors were rejecting most of the previously-tradeable funnel. The MT-553
+Wednesday weekday block is lifted (funnel and gates changed since the MT-552
+sweep it was based on).
+
 MT-560: scan cadence reduced from 60s to 2s. The old 60s interval was legacy
 from the Chrome/DexScreener era, where every cycle needed an 8-second
 browser-pc capture. Jupiter tokens/v2 free tier allows ~1 RPS; two discovery
@@ -125,10 +132,12 @@ JUPITER_HEADERS = {"x-api-key": JUPITER_API_KEY}
 # Jupiter Developer tier (10 RPS) is active — 3 discovery endpoints per 1s
 # cycle is ~3 req/s, well within limits.
 # Pool-depth floor (replaces the old $5K mcap floor, MT-588): bonding-curve
-# pools must hold >= 30 SOL, PumpSwap/Raydium pools >= 50 SOL. Tokens with no
-# pool liquidity data are skipped outright.
-POOL_MIN_SOL_BONDING = 30.0
-POOL_MIN_SOL_GRADUATED = 50.0
+# pools must hold >= 10 SOL, PumpSwap/Raydium pools >= 25 SOL. Tokens with no
+# pool liquidity data are skipped outright. MT-590: floors lowered from 30/50
+# SOL — 66.7% of tokens entered Aug 15-18 had <50 SOL depth and 39.9% <30 SOL,
+# so the MT-588 floors were rejecting most of the previously-tradeable funnel.
+POOL_MIN_SOL_BONDING = 10.0
+POOL_MIN_SOL_GRADUATED = 25.0
 # SOL/USD price lookup cache for converting Jupiter's USD liquidity to SOL
 # depth. One extra Jupiter call every SOL_PRICE_CACHE_TTL_S, never per cycle.
 SOL_PRICE_CACHE_TTL_S = 60.0
@@ -137,14 +146,15 @@ SOL_PRICE_CACHE_TTL_S = 60.0
 # enter (the stronger signal justifies the higher fee).
 MIN_SCORE_GRADUATED = 40.0
 MIN_SCORE_BONDING_CURVE = 55.0
-# Tighter slippage tiers by pool SOL depth (entry path, MT-588):
-#   >50 SOL depth  -> 1% max slippage (100 bps)
-#   20-50 SOL depth -> 3% max slippage (300 bps)
-#   <20 SOL depth  -> skipped as too thin
+# Tighter slippage tiers by pool SOL depth (entry path, MT-588; MT-590:
+# thresholds relaxed to 20/5 SOL to match the pre-MT-588 tradeable funnel):
+#   >20 SOL depth  -> 1% max slippage (100 bps)
+#   5-20 SOL depth -> 3% max slippage (300 bps)
+#   <5 SOL depth   -> skipped as too thin
 SLIPPAGE_BPS_THICK_POOL = 100
 SLIPPAGE_BPS_MID_POOL = 300
-THICK_POOL_MIN_SOL = 50.0
-MID_POOL_MIN_SOL = 20.0
+THICK_POOL_MIN_SOL = 20.0
+MID_POOL_MIN_SOL = 5.0
 
 PAPER_SIZE_SOL = 0.05
 MIN_MENTIONS = 3
@@ -181,8 +191,10 @@ ENTRY_CONFIRM_WINDOW_S = 90
 EARLY_EXIT_GREEN_PCT = 0.01
 # MT-537: UTC 21 added to the MT-516 blocked list (20:00-21:59 dead zone).
 BLOCKED_UTC_HOURS = frozenset({0, 7, 19, 20, 21})
-# MT-553: Wednesday (weekday 2) blocked per MT-552 sweep — 21.3% WR / -0.88 SOL.
-BLOCKED_WEEKDAYS = frozenset({2})
+# MT-553 blocked Wednesday (weekday 2) per the MT-552 sweep (21.3% WR /
+# -0.88 SOL). MT-590: lifted — the sweep predates the MT-588 Jupiter funnel,
+# and the MT-590 pool-depth/slippage retune changed the entry population.
+BLOCKED_WEEKDAYS = frozenset()
 SATURDAY_SIZE_MULTIPLIER = 0.5
 
 # Mode flags
@@ -716,9 +728,9 @@ def _candidate_strength_score(coin: dict, age_min: float) -> float:
 
 
 def _slippage_bps_for_pool(pool_sol: float | None) -> int | None:
-    """Tiered max entry slippage by pool SOL depth (MT-588).
+    """Tiered max entry slippage by pool SOL depth (MT-588, retuned MT-590).
 
-    >50 SOL -> 1% (100 bps); 20-50 SOL -> 3% (300 bps); <20 SOL or unknown
+    >20 SOL -> 1% (100 bps); 5-20 SOL -> 3% (300 bps); <5 SOL or unknown
     depth -> None (too thin, skip).
     """
     if pool_sol is None:
@@ -964,8 +976,8 @@ async def screen_coin(
     if not isinstance(mcap, (int, float)) or mcap <= 0:
         return False, f"age={age_min:.1f}m no usd_market_cap", gates
     # MT-588: the old $5K market-cap floor is replaced by an actual pool-depth
-    # check below (pool_sol >= 30 SOL bonding curve / >= 50 SOL graduated).
-    # The upper cap stays — an over-cap mcap is still rejected.
+    # check below (pool_sol >= 10 SOL bonding curve / >= 25 SOL graduated,
+    # MT-590 retune). The upper cap stays — an over-cap mcap is still rejected.
     if mcap > MAX_MCAP_USD:
         return False, f"age={age_min:.1f}m mcap=${mcap:.0f} > ${MAX_MCAP_USD:.0f}", gates
     gates["mcap_pass"] = True
@@ -1239,6 +1251,7 @@ async def try_enter(
 
     if len(await manager.get_all_open(mode="paper")) >= MAX_OPEN:
         log.warning("SKIP %s ticker=%s — strategy capacity reached", mint[:16], ticker)
+        log.debug("DEBUG ENTRY_EVAL mint=%s result=rejected reason=capacity", mint[:16])
         return None
 
     utc_now = datetime.now(UTC)
@@ -1254,6 +1267,10 @@ async def try_enter(
             )
         except Exception as exc:
             log.debug("candidate_log write failed (non-fatal): %s", exc)
+        log.debug(
+            "DEBUG ENTRY_EVAL mint=%s result=rejected reason=time_gate_utc_hour=%d",
+            mint[:16], utc_now.hour,
+        )
         return None
 
     if utc_now.weekday() in BLOCKED_WEEKDAYS:
@@ -1265,6 +1282,10 @@ async def try_enter(
             )
         except Exception as exc:
             log.debug("candidate_log write failed (non-fatal): %s", exc)
+        log.debug(
+            "DEBUG ENTRY_EVAL mint=%s result=rejected reason=weekday_blocked=%d",
+            mint[:16], utc_now.weekday(),
+        )
         return None
 
     if await has_losing_close(db_path, mint):
@@ -1279,6 +1300,7 @@ async def try_enter(
             )
         except Exception as exc:
             log.debug("candidate_log write failed (non-fatal): %s", exc)
+        log.debug("DEBUG ENTRY_EVAL mint=%s result=rejected reason=repeat_loser", mint[:16])
         return None
 
     if utc_now.weekday() == 5:
@@ -1287,29 +1309,40 @@ async def try_enter(
 
     existing = await manager.get_position(mint, mode="paper")
     if existing is not None:
+        log.debug("DEBUG ENTRY_EVAL mint=%s result=rejected reason=already_open", mint[:16])
         return None
 
     price = await mark_provider.get_current_price(mint)
     timing["t_quote"] = time.monotonic()
     if price is None or price <= 0:
         log.warning("SKIP %s ticker=%s \u2014 no valid DexScreener price", mint[:16], ticker)
+        log.debug("DEBUG ENTRY_EVAL mint=%s result=rejected reason=no_price", mint[:16])
         return None
 
-    # MT-588: tiered slippage by pool SOL depth. <20 SOL depth (or unknown
-    # depth) is too thin to trade — skip instead of entering with loose
-    # slippage. screen_coin already passed the pool-depth floor (30/50 SOL),
-    # so this only rejects tokens whose depth went stale or vanished.
+    # MT-588: tiered slippage by pool SOL depth (MT-590: thin tier relaxed to
+    # <5 SOL). A depth below the thin tier is too thin to trade — skip instead
+    # of entering with loose slippage. screen_coin already passed the
+    # pool-depth floor (10/25 SOL), so this only rejects tokens whose depth
+    # went stale or vanished.
     slippage_bps = _slippage_bps_for_pool(pool_sol)
     if slippage_bps is None:
         log.warning(
             "SKIP %s ticker=%s pool_depth=%s SOL below minimum (too thin for tiered slippage)",
             mint[:16], ticker, f"{pool_sol:.1f}" if pool_sol is not None else "N/A",
         )
+        log.debug(
+            "DEBUG ENTRY_EVAL mint=%s result=rejected reason=pool_depth=%s SOL below thin tier",
+            mint[:16], f"{pool_sol:.1f}" if pool_sol is not None else "N/A",
+        )
         return None
     log.info(
         "SLIPPAGE mint=%s ticker=%s pool_sol=%s slippage_bps=%d (tiered)",
         mint[:16], ticker, f"{pool_sol:.1f}" if pool_sol is not None else "N/A",
         slippage_bps,
+    )
+    log.debug(
+        "DEBUG ENTRY_EVAL mint=%s result=accepted reason=all_gates_passed pool_sol=%s slippage_bps=%d",
+        mint[:16], f"{pool_sol:.1f}" if pool_sol is not None else "N/A", slippage_bps,
     )
 
     size_sol = PAPER_SIZE_SOL * size_multiplier
@@ -1319,11 +1352,13 @@ async def try_enter(
         trade = await adapter.execute_swap(mint, Side.BUY, size_sol, slippage_bps)
     except Exception as exc:
         log.warning("SKIP %s ticker=%s \u2014 execute_swap failed: %s", mint[:16], ticker, exc)
+        log.debug("DEBUG ENTRY_EVAL mint=%s result=rejected reason=execute_swap_failed", mint[:16])
         return None
     t_swap_end = time.monotonic()
 
     if trade is None:
         log.warning("SKIP %s ticker=%s \u2014 execute_swap returned None", mint[:16], ticker)
+        log.debug("DEBUG ENTRY_EVAL mint=%s result=rejected reason=execute_swap_none", mint[:16])
         return None
 
     if isinstance(pair, dict):
@@ -1335,6 +1370,7 @@ async def try_enter(
         await record_trade(db_path, trade)
     except Exception as exc:
         log.warning("SKIP %s ticker=%s \u2014 record_trade failed: %s", mint[:16], ticker, exc)
+        log.debug("DEBUG ENTRY_EVAL mint=%s result=rejected reason=record_trade_failed", mint[:16])
         return None
 
     try:
@@ -1349,6 +1385,7 @@ async def try_enter(
         position = await manager.open_position(trade, dummy_signal)
     except Exception as exc:
         log.warning("SKIP %s ticker=%s \u2014 open_position failed: %s", mint[:16], ticker, exc)
+        log.debug("DEBUG ENTRY_EVAL mint=%s result=rejected reason=open_position_failed", mint[:16])
         return None
 
     timing["t_confirmed"] = time.monotonic()

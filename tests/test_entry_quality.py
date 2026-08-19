@@ -485,7 +485,7 @@ def test_strategy_b_saturday_halves_position_size(
     )
     assert result == "pos-1"
     assert adapter.sizes == [strategy_b.PAPER_SIZE_SOL * strategy_b.SATURDAY_SIZE_MULTIPLIER]
-    # MT-588: thick pool (>50 SOL) -> 1% (100 bps) tiered slippage.
+    # MT-588/MT-590: thick pool (>20 SOL) -> 1% (100 bps) tiered slippage.
     assert adapter.slippages == [strategy_b.SLIPPAGE_BPS_THICK_POOL]
 
 
@@ -494,7 +494,7 @@ def test_strategy_b_skips_entry_when_pool_too_thin(db: Path) -> None:
     manager = FakeManager()
     result = asyncio.run(
         strategy_b.try_enter(
-            "ThinMint", "TST", FakePrice(1.0), adapter, manager, db, pool_sol=15.0,
+            "ThinMint", "TST", FakePrice(1.0), adapter, manager, db, pool_sol=4.0,
         ),
     )
     assert result is None

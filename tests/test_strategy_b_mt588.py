@@ -186,7 +186,7 @@ def test_bonding_threshold_is_higher_than_graduated() -> None:
 
 def test_slippage_tiers_by_pool_depth() -> None:
     assert _slippage_bps_for_pool(THICK_POOL_MIN_SOL + 1) == SLIPPAGE_BPS_THICK_POOL
-    assert _slippage_bps_for_pool(30.0) == SLIPPAGE_BPS_MID_POOL
+    assert _slippage_bps_for_pool(15.0) == SLIPPAGE_BPS_MID_POOL
     assert _slippage_bps_for_pool(MID_POOL_MIN_SOL) == SLIPPAGE_BPS_MID_POOL
     assert _slippage_bps_for_pool(MID_POOL_MIN_SOL - 0.01) is None
     assert _slippage_bps_for_pool(None) is None
@@ -255,26 +255,26 @@ def test_screen_coin_accepts_graduated_token_with_enough_depth() -> None:
     assert gates["score_pass"]
 
 
-def test_screen_coin_rejects_graduated_token_below_50_sol() -> None:
-    # Raydium pool with 40 SOL depth -> below the 50 SOL graduated floor.
+def test_screen_coin_rejects_graduated_token_below_25_sol() -> None:
+    # Raydium pool with 20 SOL depth -> below the 25 SOL graduated floor.
     coin = _make_coin(
         mint="abc123pump",
         pool_id="raydiumPoolId123",
-        liquidity_usd=40.0 * SOL_PRICE,
+        liquidity_usd=20.0 * SOL_PRICE,
         buys=40, sells=5, vol=10_000.0, mcap=10_000.0,
     )
     passed, reason, gates = asyncio.run(_screen(coin))
     assert not passed
     assert not gates["liquidity_pass"]
-    assert "pool_depth=40.0SOL below minimum 50SOL" in reason
+    assert "pool_depth=20.0SOL below minimum 25SOL" in reason
 
 
-def test_screen_coin_accepts_bonding_curve_token_at_30_sol() -> None:
-    # Bonding-curve pool at exactly 30 SOL -> passes the 30 SOL floor.
+def test_screen_coin_accepts_bonding_curve_token_at_10_sol() -> None:
+    # Bonding-curve pool at exactly 10 SOL -> passes the 10 SOL floor.
     coin = _make_coin(
         mint="abc123pump",
         pool_id="abc123pump",
-        liquidity_usd=30.0 * SOL_PRICE,
+        liquidity_usd=10.0 * SOL_PRICE,
         buys=40, sells=5, vol=10_000.0, mcap=10_000.0,
     )
     passed, _, gates = asyncio.run(_screen(coin))
@@ -282,17 +282,17 @@ def test_screen_coin_accepts_bonding_curve_token_at_30_sol() -> None:
     assert gates["liquidity_pass"]
 
 
-def test_screen_coin_rejects_bonding_curve_token_below_30_sol() -> None:
+def test_screen_coin_rejects_bonding_curve_token_below_10_sol() -> None:
     coin = _make_coin(
         mint="abc123pump",
         pool_id="abc123pump",
-        liquidity_usd=20.0 * SOL_PRICE,
+        liquidity_usd=8.0 * SOL_PRICE,
         buys=40, sells=5, vol=10_000.0, mcap=10_000.0,
     )
     passed, reason, gates = asyncio.run(_screen(coin))
     assert not passed
     assert not gates["liquidity_pass"]
-    assert "pool_depth=20.0SOL below minimum 30SOL" in reason
+    assert "pool_depth=8.0SOL below minimum 10SOL" in reason
 
 
 def test_screen_coin_skips_token_without_liquidity_data() -> None:
