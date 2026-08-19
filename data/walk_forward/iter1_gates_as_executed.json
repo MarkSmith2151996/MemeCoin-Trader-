@@ -1,0 +1,205 @@
+{
+  "meta": {
+    "task": "MT-592",
+    "iteration": "iter1",
+    "window": "2026-04-18..2026-05-31 (train) -> 2026-06 (blind)",
+    "window_start": "2026-04-18",
+    "window_end": "2026-05-31",
+    "method": "single-variable threshold scan + greedy forward selection; stability (both halves), tier preservation, 0.7 x avg-PnL + 0.3 x PF objective, cohort >= 15% of train",
+    "min_cohort": 50,
+    "min_cohort_frac": 0.15,
+    "tier_retain_min": 0.6,
+    "max_gates": 5,
+    "created_at": "2026-08-19T16:32:11.764810+00:00"
+  },
+  "baseline": {
+    "trades": 94487,
+    "wins": 39858,
+    "losses": 54629,
+    "win_rate": 42.18358081005852,
+    "total_pnl_sol": 364.974415,
+    "avg_pnl_sol": 0.003863,
+    "profit_factor": 2.3302
+  },
+  "baseline_halves": {
+    "first": {
+      "trades": 47243,
+      "wins": 19003,
+      "losses": 28240,
+      "win_rate": 40.22394852147408,
+      "total_pnl_sol": 171.291014,
+      "avg_pnl_sol": 0.003626,
+      "profit_factor": 2.2233
+    },
+    "second": {
+      "trades": 47244,
+      "wins": 20855,
+      "losses": 26389,
+      "win_rate": 44.14317161967657,
+      "total_pnl_sol": 193.683401,
+      "avg_pnl_sol": 0.0041,
+      "profit_factor": 2.4417
+    }
+  },
+  "train_eval": {
+    "tuned": {
+      "trades": 26786,
+      "wins": 13852,
+      "losses": 12934,
+      "win_rate": 51.71358172179497,
+      "total_pnl_sol": 184.408201,
+      "avg_pnl_sol": 0.006884,
+      "profit_factor": 3.9338
+    },
+    "tuned_halves": {
+      "first": {
+        "trades": 13387,
+        "wins": 6659,
+        "losses": 6728,
+        "win_rate": 49.74228729364309,
+        "total_pnl_sol": 87.198105,
+        "avg_pnl_sol": 0.006514,
+        "profit_factor": 3.6936
+      },
+      "second": {
+        "trades": 13399,
+        "wins": 7193,
+        "losses": 6206,
+        "win_rate": 53.68311067990148,
+        "total_pnl_sol": 97.210096,
+        "avg_pnl_sol": 0.007255,
+        "profit_factor": 4.189
+      }
+    },
+    "baseline": {
+      "trades": 94487,
+      "wins": 39858,
+      "losses": 54629,
+      "win_rate": 42.18358081005852,
+      "total_pnl_sol": 364.974415,
+      "avg_pnl_sol": 0.003863,
+      "profit_factor": 2.3302
+    },
+    "improvement_pnl_sol": -180.566214,
+    "improvement_avg_pnl_sol": 0.003021,
+    "retention_pct": 28.3
+  },
+  "gates": {
+    "score_v1_min": 2.203429,
+    "age_max_minutes": 8.5088,
+    "pool_sol_min": 14.275071,
+    "vol_mcap_max": 2.581956,
+    "buy_sell_min": 1.383184
+  },
+  "selection_order": [
+    "score_v1_min",
+    "age_max_minutes",
+    "pool_sol_min",
+    "vol_mcap_max",
+    "buy_sell_min"
+  ],
+  "gate_search": [
+    {
+      "trades": 75589,
+      "wins": 33595,
+      "losses": 41994,
+      "win_rate": 44.44429745068727,
+      "total_pnl_sol": 358.3757,
+      "avg_pnl_sol": 0.004741,
+      "profit_factor": 2.8392,
+      "threshold": 2.203429,
+      "retained": 79.99936499200948,
+      "avg_lift": 0.2273,
+      "pf_lift": 0.2184,
+      "score": 0.2246,
+      "gate": "score_v1_min",
+      "feature": "score_v1",
+      "direction": "min"
+    },
+    {
+      "trades": 80314,
+      "wins": 36849,
+      "losses": 43465,
+      "win_rate": 45.881166421794454,
+      "total_pnl_sol": 357.299752,
+      "avg_pnl_sol": 0.004449,
+      "profit_factor": 3.0526,
+      "threshold": 16.364266,
+      "retained": 85.00005291733255,
+      "avg_lift": 0.1517,
+      "pf_lift": 0.31,
+      "score": 0.1992,
+      "gate": "pool_sol_min",
+      "feature": "pool_sol",
+      "direction": "min"
+    },
+    {
+      "trades": 70865,
+      "wins": 31408,
+      "losses": 39457,
+      "win_rate": 44.3208918365907,
+      "total_pnl_sol": 330.450496,
+      "avg_pnl_sol": 0.004663,
+      "profit_factor": 2.4793,
+      "threshold": 8.767,
+      "retained": 74.99973541333729,
+      "avg_lift": 0.2071,
+      "pf_lift": 0.064,
+      "score": 0.1642,
+      "gate": "age_max_minutes",
+      "feature": "age_minutes",
+      "direction": "max"
+    },
+    {
+      "trades": 66451,
+      "wins": 30659,
+      "losses": 35792,
+      "win_rate": 46.13775563949376,
+      "total_pnl_sol": 292.735858,
+      "avg_pnl_sol": 0.004405,
+      "profit_factor": 2.7529,
+      "threshold": 81.7,
+      "retained": 70.32819329643232,
+      "avg_lift": 0.1403,
+      "pf_lift": 0.1814,
+      "score": 0.1526,
+      "gate": "score_min",
+      "feature": "score_proxy",
+      "direction": "min"
+    },
+    {
+      "trades": 70865,
+      "wins": 31584,
+      "losses": 39281,
+      "win_rate": 44.569251393494675,
+      "total_pnl_sol": 302.857994,
+      "avg_pnl_sol": 0.004274,
+      "profit_factor": 2.6174,
+      "threshold": 1.09137,
+      "retained": 74.99973541333729,
+      "avg_lift": 0.1064,
+      "pf_lift": 0.1233,
+      "score": 0.1115,
+      "gate": "buy_sell_min",
+      "feature": "buy_sell_ratio",
+      "direction": "min"
+    },
+    {
+      "trades": 85038,
+      "wins": 35720,
+      "losses": 49318,
+      "win_rate": 42.00475081728169,
+      "total_pnl_sol": 329.144648,
+      "avg_pnl_sol": 0.003871,
+      "profit_factor": 2.2995,
+      "threshold": 40893.64478,
+      "retained": 89.99968249600474,
+      "avg_lift": 0.0021,
+      "pf_lift": -0.0132,
+      "score": -0.0025,
+      "gate": "mcap_max_usd",
+      "feature": "mcap_usd",
+      "direction": "max"
+    }
+  ]
+}

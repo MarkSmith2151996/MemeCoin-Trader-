@@ -1,0 +1,122 @@
+{
+  "meta": {
+    "task": "MT-592",
+    "iteration": "iter1",
+    "window": "2026-04-18..2026-05-31 (train) -> 2026-06 (blind)",
+    "window_start": "2026-04-18",
+    "window_end": "2026-05-31",
+    "method": "single-variable threshold scan + greedy forward selection; stability (avg PnL/trade per half), tier preservation, four blind-test criteria as train objective (v2.2), retention floor 60%, max 3 gates",
+    "min_cohort": 50,
+    "min_cohort_frac": 0.15,
+    "tier_retain_min": 0.6,
+    "max_gates": 3,
+    "objective_mode": "checks",
+    "stability": "total",
+    "created_at": "2026-08-19T16:40:00.454376+00:00"
+  },
+  "baseline": {
+    "trades": 94487,
+    "wins": 39858,
+    "losses": 54629,
+    "win_rate": 42.18358081005852,
+    "total_pnl_sol": 364.974415,
+    "avg_pnl_sol": 0.003863,
+    "profit_factor": 2.3302
+  },
+  "baseline_halves": {
+    "first": {
+      "trades": 47243,
+      "wins": 19003,
+      "losses": 28240,
+      "win_rate": 40.22394852147408,
+      "total_pnl_sol": 171.291014,
+      "avg_pnl_sol": 0.003626,
+      "profit_factor": 2.2233
+    },
+    "second": {
+      "trades": 47244,
+      "wins": 20855,
+      "losses": 26389,
+      "win_rate": 44.14317161967657,
+      "total_pnl_sol": 193.683401,
+      "avg_pnl_sol": 0.0041,
+      "profit_factor": 2.4417
+    }
+  },
+  "train_eval": {
+    "tuned": {
+      "trades": 86915,
+      "wins": 38612,
+      "losses": 48303,
+      "win_rate": 44.425012943680606,
+      "total_pnl_sol": 382.375042,
+      "avg_pnl_sol": 0.004399,
+      "profit_factor": 2.8545
+    },
+    "tuned_halves": {
+      "first": {
+        "trades": 43226,
+        "wins": 18366,
+        "losses": 24860,
+        "win_rate": 42.488317216490074,
+        "total_pnl_sol": 181.028749,
+        "avg_pnl_sol": 0.004188,
+        "profit_factor": 2.7345
+      },
+      "second": {
+        "trades": 43689,
+        "wins": 20246,
+        "losses": 23443,
+        "win_rate": 46.341184279795826,
+        "total_pnl_sol": 201.346293,
+        "avg_pnl_sol": 0.004609,
+        "profit_factor": 2.9774
+      }
+    },
+    "baseline": {
+      "trades": 94487,
+      "wins": 39858,
+      "losses": 54629,
+      "win_rate": 42.18358081005852,
+      "total_pnl_sol": 364.974415,
+      "avg_pnl_sol": 0.003863,
+      "profit_factor": 2.3302
+    },
+    "improvement_pnl_sol": 17.400627,
+    "improvement_avg_pnl_sol": 0.000536,
+    "retention_pct": 92.0
+  },
+  "gates": {
+    "pool_sol_min": 4.659425,
+    "creator_holdings_max": 0.0,
+    "mcap_min_usd": 5104.824172
+  },
+  "selection_order": [
+    "pool_sol_min",
+    "creator_holdings_max",
+    "mcap_min_usd"
+  ],
+  "gate_search": [
+    {
+      "trades": 87872,
+      "wins": 38920,
+      "losses": 48952,
+      "win_rate": 44.29169701383831,
+      "total_pnl_sol": 385.18725,
+      "avg_pnl_sol": 0.004384,
+      "profit_factor": 2.831,
+      "threshold": 4.659425,
+      "retained": 92.99903690454772,
+      "checks": {
+        "total_pnl_ge": true,
+        "win_rate_pp": true,
+        "retention": true,
+        "avg_ge": true
+      },
+      "score": 20.212835,
+      "gate": "pool_sol_min",
+      "feature": "pool_sol",
+      "direction": "min"
+    }
+  ]
+}

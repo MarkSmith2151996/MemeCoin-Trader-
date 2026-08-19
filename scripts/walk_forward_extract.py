@@ -149,14 +149,20 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--db", type=Path, default=DEFAULT_DB)
     parser.add_argument("--out-dir", type=Path, default=DEFAULT_OUT_DIR)
+    parser.add_argument("--start", help="Extract a single window: start YYYY-MM-DD.")
+    parser.add_argument("--end", help="Extract a single window: end YYYY-MM-DD (inclusive).")
+    parser.add_argument("--out-csv", type=Path, help="Output CSV when --start/--end are given.")
     args = parser.parse_args()
 
     out_dir = args.out_dir
     out_dir.mkdir(parents=True, exist_ok=True)
     connection = sqlite3.connect(args.db)
     try:
-        week1 = extract_window(connection, date(2026, 8, 5), date(2026, 8, 11))
-        week2 = extract_window(connection, date(2026, 8, 12), date(2026, 8, 18))
+        if args.start and args.end:
+            window = extract_window(connection, date.fromisoformat(args.start), date.fromisoformat(args.end))
+        else:
+            week1 = extract_window(connection, date(2026, 8, 5), date(2026, 8, 11))
+            week2 = extract_window(connection, date(2026, 8, 12), date(2026, 8, 18))
     finally:
         connection.close()
 
@@ -168,6 +174,17 @@ def main() -> None:
         "rugcheck_result", "profile", "vol_mcap_ratio", "score_proxy", "mint_is_pump",
         "realized_pnl_sol", "adjusted_pnl_sol", "win",
     ]
+    if args.start and args.end:
+        output = args.out_csv or (out_dir / f"{args.start}_{args.end}_features.csv")
+        with output.open("w", newline="", encoding="utf-8") as target:
+            writer = csv.DictWriter(target, fieldnames=fields, extrasaction="ignore")
+            writer.writeheader()
+            writer.writerows(window)
+        print(f"WINDOW ({args.start}..{args.end}):")
+        print(coverage_report(window))
+        print(f"Wrote {output} ({len(window)} rows)")
+        return
+
     with (out_dir / "week1_features.csv").open("w", newline="", encoding="utf-8") as output:
         writer = csv.DictWriter(output, fieldnames=fields, extrasaction="ignore")
         writer.writeheader()
