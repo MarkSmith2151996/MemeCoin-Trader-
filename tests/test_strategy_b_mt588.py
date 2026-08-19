@@ -83,7 +83,7 @@ def _rugcheck_response() -> httpx.Response:
             "mintAuthorityRevoked": True,
             "freezeAuthorityRevoked": True,
             "topHolders": [{"pct": 5.0}],
-            "creators": [{"isCreator": True, "pct": 2.0}],
+            "creators": [{"isCreator": True, "pct": 0.0}],
             "score": 100,
             "riskLevel": "safe",
         },
@@ -177,8 +177,11 @@ def test_strength_score_is_bounded_at_100() -> None:
     assert _candidate_strength_score(coin, 5.0) <= 100.0
 
 
-def test_bonding_threshold_is_higher_than_graduated() -> None:
-    assert MIN_SCORE_BONDING_CURVE > MIN_SCORE_GRADUATED
+def test_bonding_threshold_matches_graduated_after_mt593() -> None:
+    # MT-593: walk-forward tuner found the score gate useful in only 1 of 3
+    # iterations; the 55 bonding-curve threshold was filtering too aggressively
+    # (937 FAIL:score in logs), so both thresholds are 40 now.
+    assert MIN_SCORE_BONDING_CURVE == MIN_SCORE_GRADUATED == 40.0
 
 
 # ── Slippage tiers ────────────────────────────────────────────────────
@@ -255,26 +258,26 @@ def test_screen_coin_accepts_graduated_token_with_enough_depth() -> None:
     assert gates["score_pass"]
 
 
-def test_screen_coin_rejects_graduated_token_below_25_sol() -> None:
-    # Raydium pool with 20 SOL depth -> below the 25 SOL graduated floor.
+def test_screen_coin_rejects_graduated_token_below_5_sol() -> None:
+    # Raydium pool with 4 SOL depth -> below the MT-593 5 SOL graduated floor.
     coin = _make_coin(
         mint="abc123pump",
         pool_id="raydiumPoolId123",
-        liquidity_usd=20.0 * SOL_PRICE,
+        liquidity_usd=4.0 * SOL_PRICE,
         buys=40, sells=5, vol=10_000.0, mcap=10_000.0,
     )
     passed, reason, gates = asyncio.run(_screen(coin))
     assert not passed
     assert not gates["liquidity_pass"]
-    assert "pool_depth=20.0SOL below minimum 25SOL" in reason
+    assert "pool_depth=4.0SOL below minimum 5SOL" in reason
 
 
-def test_screen_coin_accepts_bonding_curve_token_at_10_sol() -> None:
-    # Bonding-curve pool at exactly 10 SOL -> passes the 10 SOL floor.
+def test_screen_coin_accepts_bonding_curve_token_at_5_sol() -> None:
+    # Bonding-curve pool at exactly 5 SOL -> passes the MT-593 5 SOL floor.
     coin = _make_coin(
         mint="abc123pump",
         pool_id="abc123pump",
-        liquidity_usd=10.0 * SOL_PRICE,
+        liquidity_usd=5.0 * SOL_PRICE,
         buys=40, sells=5, vol=10_000.0, mcap=10_000.0,
     )
     passed, _, gates = asyncio.run(_screen(coin))
@@ -282,17 +285,17 @@ def test_screen_coin_accepts_bonding_curve_token_at_10_sol() -> None:
     assert gates["liquidity_pass"]
 
 
-def test_screen_coin_rejects_bonding_curve_token_below_10_sol() -> None:
+def test_screen_coin_rejects_bonding_curve_token_below_5_sol() -> None:
     coin = _make_coin(
         mint="abc123pump",
         pool_id="abc123pump",
-        liquidity_usd=8.0 * SOL_PRICE,
+        liquidity_usd=4.0 * SOL_PRICE,
         buys=40, sells=5, vol=10_000.0, mcap=10_000.0,
     )
     passed, reason, gates = asyncio.run(_screen(coin))
     assert not passed
     assert not gates["liquidity_pass"]
-    assert "pool_depth=8.0SOL below minimum 10SOL" in reason
+    assert "pool_depth=4.0SOL below minimum 5SOL" in reason
 
 
 def test_screen_coin_skips_token_without_liquidity_data() -> None:
@@ -314,19 +317,33 @@ def test_screen_coin_skips_token_when_sol_price_unavailable() -> None:
 
 
 def test_screen_coin_bonding_curve_weak_signal_fails_score_gate() -> None:
-    # On-curve token with a middling signal: passes liquidity but not the
-    # higher bonding-curve score threshold.
+    # On-curve token with a weak signal (score ~31 < 40 after MT-593 lowered
+    # the bonding threshold): passes liquidity but not the score threshold.
     coin = _make_coin(
         mint="abc123pump",
         pool_id="abc123pump",
         liquidity_usd=40.0 * SOL_PRICE,
-        buys=7, sells=5, vol=500.0, mcap=25_000.0,
+        buys=5, sells=5, vol=300.0, mcap=25_000.0,
     )
     passed, reason, gates = asyncio.run(_screen(coin))
     assert not passed
     assert gates["liquidity_pass"]
     assert not gates["score_pass"]
     assert "score=" in reason
+
+
+def test_screen_coin_bonding_curve_mid_signal_now_passes_score_gate() -> None:
+    # MT-593: the 55 bonding threshold was filtering too aggressively (937
+    # FAIL:score); a mid signal (score ~45) that failed at 55 now passes at 40.
+    coin = _make_coin(
+        mint="abc123pump",
+        pool_id="abc123pump",
+        liquidity_usd=40.0 * SOL_PRICE,
+        buys=7, sells=5, vol=500.0, mcap=25_000.0,
+    )
+    passed, _, gates = asyncio.run(_screen(coin))
+    assert passed
+    assert gates["score_pass"]
 
 
 def test_screen_coin_graduated_same_signal_passes_score_gate() -> None:
@@ -348,8 +365,86 @@ def test_screen_coin_bonding_curve_strong_signal_passes() -> None:
         mint="abc123pump",
         pool_id="abc123pump",
         liquidity_usd=40.0 * SOL_PRICE,
-        buys=80, sells=5, vol=20_000.0, mcap=5_000.0,
+        buys=80, sells=5, vol=20_000.0, mcap=10_000.0,
     )
     passed, _, gates = asyncio.run(_screen(coin))
     assert passed
     assert gates["score_pass"]
+
+
+# ── MT-593: creator-holdings gate (creator_pct > 0 rejects) ──────────
+
+
+def _rugcheck_creator_response(creator_pct: float | None) -> httpx.Response:
+    payload = {
+        "mintAuthorityRevoked": True,
+        "freezeAuthorityRevoked": True,
+        "topHolders": [{"pct": 5.0}],
+        "score": 100,
+        "riskLevel": "safe",
+    }
+    if creator_pct is not None:
+        payload["creators"] = [{"isCreator": True, "pct": creator_pct}]
+    return httpx.Response(200, json=payload)
+
+
+async def _screen_with_creator(
+    creator_pct: float | None,
+) -> tuple[bool, str, dict]:
+    import scripts.run_strategy_b as sb
+
+    sb._sol_price_cache = None
+    sb._rugcheck_cache.clear()
+    transport, _ = _transport(sol_price=SOL_PRICE)
+
+    async def _fetch_rugcheck(client: httpx.AsyncClient, mint: str) -> httpx.Response:
+        return _rugcheck_creator_response(creator_pct)
+
+    rugcheck = RugCheckClient(fetcher=_fetch_rugcheck)
+    coin = _make_coin(
+        mint="abc123pump",
+        pool_id="raydiumPoolId123",
+        liquidity_usd=40.0 * SOL_PRICE,
+        buys=40, sells=5, vol=10_000.0, mcap=10_000.0,
+    )
+    async with httpx.AsyncClient(transport=transport) as http:
+        return await screen_coin(coin, http, rugcheck)
+
+
+def test_screen_coin_rejects_creator_still_holding() -> None:
+    # MT-593: creator_holdings > 0 rejects — walk-forward selected 0.0 in all
+    # 3 iterations. The old >10% gate (MT-588 fixture creator pct 2.0) would
+    # have passed this token.
+    passed, reason, gates = asyncio.run(_screen_with_creator(2.0))
+    assert not passed
+    assert not gates["creator_pass"]
+    assert "creator_holdings>0" in reason
+
+
+def test_screen_coin_passes_creator_with_zero_holdings() -> None:
+    passed, _, gates = asyncio.run(_screen_with_creator(0.0))
+    assert passed
+    assert gates["creator_pass"]
+
+
+def test_screen_coin_passes_creator_holdings_unavailable() -> None:
+    # Missing creator data must not block the token (MT-593).
+    passed, _, gates = asyncio.run(_screen_with_creator(None))
+    assert passed
+    assert gates["creator_pass"]
+
+
+# ── MT-593: mcap floor $5,100 ────────────────────────────────────────
+
+
+def test_screen_coin_rejects_below_mcap_floor() -> None:
+    coin = _make_coin(
+        mint="abc123pump",
+        pool_id="raydiumPoolId123",
+        liquidity_usd=40.0 * SOL_PRICE,
+        buys=40, sells=5, vol=10_000.0, mcap=5_000.0,
+    )
+    passed, reason, gates = asyncio.run(_screen(coin))
+    assert not passed
+    assert not gates["mcap_pass"]
+    assert "$5,100" in reason or "5100" in reason

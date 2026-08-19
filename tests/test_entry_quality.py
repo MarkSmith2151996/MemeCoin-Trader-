@@ -385,7 +385,10 @@ def test_strategy_a_repeat_loser_allowed_after_cooldown(
     assert adapter.sizes == [expected_size]
 
 
-def test_strategy_b_repeat_loser_blocked(db: Path) -> None:
+def test_strategy_b_repeat_loser_blocked(db: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    # MT-593: Wednesday is blocked again — freeze the weekday gate open so the
+    # repeat_loser gate (the gate under test) is the one that rejects.
+    monkeypatch.setattr(strategy_b, "BLOCKED_WEEKDAYS", frozenset())
     seed_closed_position(db, "Loser", pnl=-0.002)
     manager = FakeManager()
     result = asyncio.run(

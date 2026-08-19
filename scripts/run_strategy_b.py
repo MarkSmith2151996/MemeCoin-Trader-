@@ -27,6 +27,14 @@ floors were rejecting most of the previously-tradeable funnel. The MT-553
 Wednesday weekday block is lifted (funnel and gates changed since the MT-552
 sweep it was based on).
 
+MT-593: walk-forward validated gates (MT-592) applied to the live loop:
+pool floors 5 SOL bonding / 5 SOL graduated (tuner: ~4.5-4.7 SOL across all
+3 iterations), creator-holdings gate tightened to >0% (selected in all 3
+iterations; missing data passes), mcap floor re-enforced at $5,100 (2 of 3
+iterations), Wednesday re-blocked (paper: -0.72 SOL / 23.7% WR), and the
+bonding-curve strength threshold lowered 55 -> 40 (score gate useful in 1 of
+3 iterations; 937 FAIL:score was over-filtering).
+
 MT-560: scan cadence reduced from 60s to 2s. The old 60s interval was legacy
 from the Chrome/DexScreener era, where every cycle needed an 8-second
 browser-pc capture. Jupiter tokens/v2 free tier allows ~1 RPS; two discovery
@@ -118,7 +126,9 @@ BROWSER_PC_WAIT_SECONDS = 8
 # MT-537: auto-tuner paused, so these constants ARE the live gate values.
 # Frozen manually after the tuner oscillated (mcap dropped to $1,250 garbage tier).
 MAX_AGE_MINUTES = 22
-MIN_MCAP_USD = 5_000
+# MT-593: walk-forward validated mcap floor — 2 of 3 iterations found
+# mcap >= ~$5.1K (iter1 $5,105 / iter3 $5,117); tightened from $5,000.
+MIN_MCAP_USD = 5_100
 MIN_VOLUME_USD = 500
 MIN_TXNS = 3
 SOURCE_MAX_AGE_MINUTES = MAX_AGE_MINUTES
@@ -132,20 +142,26 @@ JUPITER_HEADERS = {"x-api-key": JUPITER_API_KEY}
 # Jupiter Developer tier (10 RPS) is active — 3 discovery endpoints per 1s
 # cycle is ~3 req/s, well within limits.
 # Pool-depth floor (replaces the old $5K mcap floor, MT-588): bonding-curve
-# pools must hold >= 10 SOL, PumpSwap/Raydium pools >= 25 SOL. Tokens with no
+# pools must hold >= 5 SOL, PumpSwap/Raydium pools >= 5 SOL. Tokens with no
 # pool liquidity data are skipped outright. MT-590: floors lowered from 30/50
 # SOL — 66.7% of tokens entered Aug 15-18 had <50 SOL depth and 39.9% <30 SOL,
 # so the MT-588 floors were rejecting most of the previously-tradeable funnel.
-POOL_MIN_SOL_BONDING = 10.0
-POOL_MIN_SOL_GRADUATED = 25.0
+# MT-593: walk-forward tuner found ~4.5-4.7 SOL optimal across all 3
+# iterations, so both floors drop to 5 SOL (bonding + graduated).
+POOL_MIN_SOL_BONDING = 5.0
+POOL_MIN_SOL_GRADUATED = 5.0
 # SOL/USD price lookup cache for converting Jupiter's USD liquidity to SOL
 # depth. One extra Jupiter call every SOL_PRICE_CACHE_TTL_S, never per cycle.
 SOL_PRICE_CACHE_TTL_S = 60.0
 # Graduated tokens (PumpSwap/Raydium) trade at 0.25% DEX fees vs 1.25% on the
 # bonding curve — still-on-curve tokens must clear a higher strength score to
 # enter (the stronger signal justifies the higher fee).
+# MT-593: the walk-forward tuner found the score gate useful in only 1 of 3
+# iterations, and the 55 threshold was filtering too aggressively (937
+# FAIL:score in recent logs) — bonding-curve threshold lowered back to 40,
+# equal to the graduated threshold.
 MIN_SCORE_GRADUATED = 40.0
-MIN_SCORE_BONDING_CURVE = 55.0
+MIN_SCORE_BONDING_CURVE = 40.0
 # Tighter slippage tiers by pool SOL depth (entry path, MT-588; MT-590:
 # thresholds relaxed to 20/5 SOL to match the pre-MT-588 tradeable funnel):
 #   >20 SOL depth  -> 1% max slippage (100 bps)
@@ -191,10 +207,10 @@ ENTRY_CONFIRM_WINDOW_S = 90
 EARLY_EXIT_GREEN_PCT = 0.01
 # MT-537: UTC 21 added to the MT-516 blocked list (20:00-21:59 dead zone).
 BLOCKED_UTC_HOURS = frozenset({0, 7, 19, 20, 21})
-# MT-553 blocked Wednesday (weekday 2) per the MT-552 sweep (21.3% WR /
-# -0.88 SOL). MT-590: lifted — the sweep predates the MT-588 Jupiter funnel,
-# and the MT-590 pool-depth/slippage retune changed the entry population.
-BLOCKED_WEEKDAYS = frozenset()
+# MT-593: Wednesday (weekday 2) re-blocked. MT-590 lifted it, but paper data
+# since then shows Wednesday at -0.72 SOL / 23.7% win rate — the walk-forward
+# and paper cohorts both say the block belongs back in.
+BLOCKED_WEEKDAYS = frozenset({2})
 SATURDAY_SIZE_MULTIPLIER = 0.5
 
 # Mode flags
@@ -209,7 +225,10 @@ GATES = GateThresholds(
 )
 MAX_MCAP_USD = 50_000
 
-MAX_DEV_HOLDINGS_PCT = 10.0
+# MT-593: creator-holdings gate tightened from >10% to >0% — the walk-forward
+# tuner selected creator_holdings_max=0.0 in all 3 iterations (skip any token
+# where the creator still holds). Missing data passes (no block on unknown).
+MAX_DEV_HOLDINGS_PCT = 0.0
 MAX_TOP10_HOLDER_PCT = 100.0
 MAX_MCAP_RUGCHECK = 50_000
 
@@ -975,9 +994,14 @@ async def screen_coin(
     mcap = coin.get("usd_market_cap")
     if not isinstance(mcap, (int, float)) or mcap <= 0:
         return False, f"age={age_min:.1f}m no usd_market_cap", gates
-    # MT-588: the old $5K market-cap floor is replaced by an actual pool-depth
-    # check below (pool_sol >= 10 SOL bonding curve / >= 25 SOL graduated,
-    # MT-590 retune). The upper cap stays — an over-cap mcap is still rejected.
+    # MT-593: walk-forward validated mcap floor re-enforced at $5,100 (2 of 3
+    # iterations found mcap >= ~$5.1K; the tuner grid extended below the 10th
+    # percentile specifically to find this cut). The upper cap stays — an
+    # over-cap mcap is still rejected.
+    if mcap < MIN_MCAP_USD:
+        return False, (
+            f"age={age_min:.1f}m mcap=${mcap:.0f} < ${MIN_MCAP_USD:.0f} floor"
+        ), gates
     if mcap > MAX_MCAP_USD:
         return False, f"age={age_min:.1f}m mcap=${mcap:.0f} > ${MAX_MCAP_USD:.0f}", gates
     gates["mcap_pass"] = True
@@ -1102,7 +1126,6 @@ async def screen_coin(
     else:
         log.warning("RugCheck: no report for %s", mint[:8])
     coin["rugcheck_report"] = report
-
     # Build reason string
     fail_reasons = []
     if not gates["txn_pass"] and txns is not None:
@@ -1128,7 +1151,7 @@ async def screen_coin(
         _, hard_holder = _age_holder_tier(age_min)
         fail_reasons.append(f"top10={report.top_holder_pct:.1f}%>={hard_holder}%")
     if not gates["creator_pass"]:
-        fail_reasons.append("dev_holdings")
+        fail_reasons.append("creator_holdings>0")
     if not gates["rugcheck_pass"] and report.found:
         if report.mint_authority_revoked is False:
             fail_reasons.append("mint_authority")
@@ -1361,6 +1384,18 @@ async def try_enter(
         log.debug("DEBUG ENTRY_EVAL mint=%s result=rejected reason=execute_swap_none", mint[:16])
         return None
 
+    # MT-593: a simulated swap that filled 0 tokens (price lookup failed at
+    # swap time) must not open a position — a 0-token OPEN position can never
+    # be closed by _adapter_close's sol_out<=0 guard and would hold a capacity
+    # slot forever (5 such zombies blocked all entries on 2026-08-19).
+    if trade.token_amount is None or trade.token_amount <= 0:
+        log.warning(
+            "SKIP %s ticker=%s \u2014 execute_swap filled 0 tokens (price=%s)",
+            mint[:16], ticker, trade.price_sol,
+        )
+        log.debug("DEBUG ENTRY_EVAL mint=%s result=rejected reason=zero_token_fill", mint[:16])
+        return None
+
     if isinstance(pair, dict):
         metadata = dict(trade.metadata or {})
         metadata.update(_pair_metadata(pair))
@@ -1436,6 +1471,17 @@ async def monitor_positions(
     danger = False
     positions = await manager.get_all_open(mode="paper")
     for pos in positions:
+        # MT-593: zombie positions — a 0-token fill can never produce a
+        # positive sol_out, so _adapter_close refuses to close it and the
+        # slot is held forever. Close it outright (nothing to sell) to free
+        # the capacity slot.
+        if pos.token_amount is None or pos.token_amount <= 0:
+            log.warning(
+                "ZOMBIE CLOSE mint=%s entry_trade=%s token_amount=%s \u2014 closing 0-token position to free slot",
+                pos.mint_address[:16], pos.entry_trade_id[:8], pos.token_amount,
+            )
+            await manager.close_position(pos.mint_address, mode="paper")
+            continue
         current_price = await mark_provider.get_current_price(pos.mint_address)
         if current_price is None:
             continue
@@ -1537,6 +1583,9 @@ async def _adapter_close(
 
     token_remaining = pos.token_amount
     sol_out = token_remaining * close_price
+    if sol_out <= 0:
+        log.warning("SKIP close %s: sol_out=0", pos.mint_address)
+        return None
     trade = Trade(
         id=str(uuid.uuid4()),
         mint_address=pos.mint_address,
