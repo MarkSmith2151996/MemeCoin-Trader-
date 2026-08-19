@@ -34,6 +34,7 @@ from solders.message import to_bytes_versioned
 from solders.transaction import VersionedTransaction
 
 from src.chain.jupiter import LAMPORTS_PER_SOL, SOL_MINT
+from src.chain.priority_fee import FeeCallback
 
 load_dotenv()
 
@@ -96,6 +97,7 @@ class JupiterSwapClient:
         confirm_timeout_s: float = 30.0,
         poll_interval_s: float = 1.0,
         max_retries: int = 2,
+        priority_fee_callback: FeeCallback | None = None,
     ) -> None:
         self._base_url = base_url.rstrip("/")
         self._solana_rpc_url = (
@@ -112,6 +114,7 @@ class JupiterSwapClient:
         self._poll_interval_s = poll_interval_s
         self._max_retries = max_retries
         self._decimals_cache: dict[str, int] = {}
+        self._priority_fee_callback = priority_fee_callback
 
     @staticmethod
     def _load_keypair() -> Keypair:
@@ -363,14 +366,8 @@ class JupiterSwapClient:
             "userPublicKey": self.wallet_pubkey,
             "wrapAndUnwrapSol": True,
             "dynamicSlippage": True,
-            "prioritizationFeeLamports": {
-                "priorityLevelWithMaxLamports": {
-                    "priorityLevel": _PRIORITY_LEVEL,
-                    "maxLamports": _PRIORITY_MAX_LAMPORTS,
-                    "global": False,
-                },
-            },
         }
+        body["prioritizationFeeLamports"] = await self._prioritization_fee_body()
         try:
             response = await self._client.post(
                 f"{self._base_url}/swap/v1/swap",
@@ -403,6 +400,31 @@ class JupiterSwapClient:
             except (KeyError, ValueError, TypeError):
                 fees = None
         return swap_transaction, last_valid, fees
+
+    async def _prioritization_fee_body(self) -> int | dict[str, object]:
+        """MT-588: dynamic priority fee from the RPC when a callback is wired.
+
+        Returns the exact lamport fee when the callback provides one (75th
+        percentile of recent RPC fees, cached 30s). Falls back to Jupiter's
+        ``priorityLevelWithMaxLamports`` (veryHigh, 1M cap) otherwise — the
+        previous static behavior — so a fee-lookup failure never blocks a swap.
+        """
+        if self._priority_fee_callback is not None:
+            try:
+                fee_lamports = await self._priority_fee_callback()
+            except Exception as exc:  # noqa: BLE001 — degrade, never block a trade
+                log.warning("LIVE dynamic priority fee lookup failed: %s", exc)
+                fee_lamports = None
+            if fee_lamports is not None and fee_lamports > 0:
+                log.info("LIVE swap priority fee lamports=%d (dynamic)", fee_lamports)
+                return fee_lamports
+        return {
+            "priorityLevelWithMaxLamports": {
+                "priorityLevel": _PRIORITY_LEVEL,
+                "maxLamports": _PRIORITY_MAX_LAMPORTS,
+                "global": False,
+            },
+        }
 
     def _sign_transaction(self, swap_transaction_b64: str) -> str:
         """Decode the base64 versioned transaction, sign with the wallet keypair."""

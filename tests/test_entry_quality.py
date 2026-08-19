@@ -41,9 +41,13 @@ class FakePrice:
 class FakeAdapter:
     def __init__(self) -> None:
         self.sizes: list[float] = []
+        self.slippages: list[int] = []
 
-    async def execute_swap(self, mint: str, side: Side, size_sol: float) -> Trade:
+    async def execute_swap(
+        self, mint: str, side: Side, size_sol: float, slippage_bps: int = 300,
+    ) -> Trade:
         self.sizes.append(size_sol)
+        self.slippages.append(slippage_bps)
         return Trade(
             mint_address=mint,
             side=side,
@@ -475,10 +479,26 @@ def test_strategy_b_saturday_halves_position_size(
     adapter = FakeAdapter()
     manager = FakeManager()
     result = asyncio.run(
-        strategy_b.try_enter("SatMint", "TST", FakePrice(1.0), adapter, manager, db),
+        strategy_b.try_enter(
+            "SatMint", "TST", FakePrice(1.0), adapter, manager, db, pool_sol=100.0,
+        ),
     )
     assert result == "pos-1"
     assert adapter.sizes == [strategy_b.PAPER_SIZE_SOL * strategy_b.SATURDAY_SIZE_MULTIPLIER]
+    # MT-588: thick pool (>50 SOL) -> 1% (100 bps) tiered slippage.
+    assert adapter.slippages == [strategy_b.SLIPPAGE_BPS_THICK_POOL]
+
+
+def test_strategy_b_skips_entry_when_pool_too_thin(db: Path) -> None:
+    adapter = FakeAdapter()
+    manager = FakeManager()
+    result = asyncio.run(
+        strategy_b.try_enter(
+            "ThinMint", "TST", FakePrice(1.0), adapter, manager, db, pool_sol=15.0,
+        ),
+    )
+    assert result is None
+    assert adapter.sizes == []
 
 
 # ── DB helper: record_entry_skip ─────────────────────────────────────

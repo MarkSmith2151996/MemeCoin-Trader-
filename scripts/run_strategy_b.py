@@ -2,19 +2,28 @@
 
 Uses Jupiter Tokens V2 to scan fresh Solana tokens under 22 minutes old.
 
-SCAN (every 2s by default, STRATEGY_B_SCAN_INTERVAL in .env):
-  1. Jupiter Tokens V2 discovers fresh and organic tokens
-  2. Screen through age/mcap/txns/vol/ratio/RugCheck gates
+SCAN (every 1s by default, STRATEGY_B_SCAN_INTERVAL in .env):
+  1. Jupiter Tokens V2 discovers fresh, organic, and trending tokens
+     (/toporganicscore/5m, /recent, /toptrending/5m — MT-588)
+  2. Screen through age/mcap/txns/vol/ratio/pool-depth/RugCheck/score gates
   3. Grok mention check via 0-5min temporal bucket
   4. Paper enter if mentions >= MIN_MENTIONS and slots available
 
 MONITOR (every 30s):
   5. Re-mark open positions and close on take-profit / hard-stop / time-stop
 
+MT-588: Jupiter Developer tier (10 RPS) is active. The scan cadence drops to
+1s (three discovery endpoints per cycle ≈ 3 req/s), a third discovery endpoint
+(/toptrending/5m) is added, slippage is tiered by pool SOL depth, the $5K mcap
+floor is replaced by a pool-depth floor (30 SOL bonding curve / 50 SOL
+graduated), graduated tokens get a lower score threshold than bonding-curve
+tokens, and priority fees are queried dynamically from the RPC
+(getRecentPrioritizationFees, 75th percentile, 30s cache).
+
 MT-560: scan cadence reduced from 60s to 2s. The old 60s interval was legacy
 from the Chrome/DexScreener era, where every cycle needed an 8-second
 browser-pc capture. Jupiter tokens/v2 free tier allows ~1 RPS; two discovery
-endpoints per cycle at a 2s cadence stays at ~1 req/s. Discovery lag and
+endpoints per cycle at a 2s cadence stayed at ~1 req/s. Discovery lag and
 end-to-end pipeline latency are logged per candidate/trade (DISCOVERY_LAG /
 LATENCY).
 
@@ -66,6 +75,7 @@ from dotenv import load_dotenv
 
 from src.chain.jupiter import LAMPORTS_PER_SOL
 from src.chain.jupiter_quote import JupiterQuoteV2, JupiterV2QuoteClient
+from src.chain.priority_fee import PriorityFeeProvider
 from src.core.config import load_settings
 from src.core.database import (
     init_db,
@@ -111,26 +121,52 @@ JUPITER_API_BASE = "https://api.jup.ag/tokens/v2"
 JUPITER_API_KEY = os.environ.get("JUPITER_API_KEY", "")
 JUPITER_HEADERS = {"x-api-key": JUPITER_API_KEY}
 
+# ── MT-588: pool depth / graduation / slippage / fees ─────────────────
+# Jupiter Developer tier (10 RPS) is active — 3 discovery endpoints per 1s
+# cycle is ~3 req/s, well within limits.
+# Pool-depth floor (replaces the old $5K mcap floor, MT-588): bonding-curve
+# pools must hold >= 30 SOL, PumpSwap/Raydium pools >= 50 SOL. Tokens with no
+# pool liquidity data are skipped outright.
+POOL_MIN_SOL_BONDING = 30.0
+POOL_MIN_SOL_GRADUATED = 50.0
+# SOL/USD price lookup cache for converting Jupiter's USD liquidity to SOL
+# depth. One extra Jupiter call every SOL_PRICE_CACHE_TTL_S, never per cycle.
+SOL_PRICE_CACHE_TTL_S = 60.0
+# Graduated tokens (PumpSwap/Raydium) trade at 0.25% DEX fees vs 1.25% on the
+# bonding curve — still-on-curve tokens must clear a higher strength score to
+# enter (the stronger signal justifies the higher fee).
+MIN_SCORE_GRADUATED = 40.0
+MIN_SCORE_BONDING_CURVE = 55.0
+# Tighter slippage tiers by pool SOL depth (entry path, MT-588):
+#   >50 SOL depth  -> 1% max slippage (100 bps)
+#   20-50 SOL depth -> 3% max slippage (300 bps)
+#   <20 SOL depth  -> skipped as too thin
+SLIPPAGE_BPS_THICK_POOL = 100
+SLIPPAGE_BPS_MID_POOL = 300
+THICK_POOL_MIN_SOL = 50.0
+MID_POOL_MIN_SOL = 20.0
+
 PAPER_SIZE_SOL = 0.05
 MIN_MENTIONS = 3
 MENTION_WINDOW_MINUTES = 5
 MAX_OPEN = 5
 # MT-560: 60s was legacy from the Chrome/DexScreener era (8s browser-pc
-# capture per cycle). Jupiter tokens/v2 free tier allows ~1 RPS; two
-# discovery endpoints per cycle at 2s keeps us at ~1 req/s. The cycle sleep
-# is `max(0.0, SCAN_INTERVAL - elapsed)` — if screening takes longer than the
-# interval the next cycle starts immediately rather than queuing up, which is
-# the rate-limit protection. Tune via STRATEGY_B_SCAN_INTERVAL in .env.
-SCAN_INTERVAL = int(os.environ.get("STRATEGY_B_SCAN_INTERVAL", "2"))
+# capture per cycle). MT-588: with the Jupiter Developer tier (10 RPS) active
+# and three discovery endpoints per cycle, the default cadence drops to 1s
+# (~3 req/s). The cycle sleep is `max(0.0, SCAN_INTERVAL - elapsed)` — if
+# screening takes longer than the interval the next cycle starts immediately
+# rather than queuing up, which is the rate-limit protection. Tune via
+# STRATEGY_B_SCAN_INTERVAL in .env.
+SCAN_INTERVAL = int(os.environ.get("STRATEGY_B_SCAN_INTERVAL", "1"))
 MONITOR_INTERVAL = 30
 FAST_MONITOR_INTERVAL_S = 5
 FAST_POLL_DROP_PCT = 0.05
 # MT-566: per-mint throttle for candidate_log inserts and SCREEN log lines
 # (replaces the MT-560 screening cooldown). Gate evaluation itself runs every
 # cycle with the RugCheck cache; only persistence/logging is throttled so the
-# DB and log volume stay bounded at the 2s cadence.
+# DB and log volume stay bounded at the fast cadence (2s at MT-560, 1s since MT-588).
 SCREEN_LOG_COOLDOWN_S = 45
-# MT-560: cycle summary cadence — at 2s the full "Gates:" line would flood the
+# MT-560: cycle summary cadence — the full "Gates:" line would flood the
 # log 30x/min. Logged at INFO every GATES_LOG_EVERY cycles (~60s), DEBUG in
 # between; the console print follows the same throttle.
 GATES_LOG_EVERY = 30
@@ -207,7 +243,7 @@ except ImportError:
 seen_mints: dict[str, float] = {}
 SEEN_MINTS_TTL = 3600  # 1 hour in seconds
 # MT-584: dedup-skip log lines are INFO once per mint (so the behavior is
-# verifiable in the log) and DEBUG afterwards (so the 2s cadence does not
+# verifiable in the log) and DEBUG afterwards (so the fast cadence does not
 # flood the log with up to ~130 skip lines per cycle).
 _dedup_skip_logged: set[str] = set()
 _rugcheck = RugCheckClient(timeout_s=5.0)
@@ -257,6 +293,16 @@ pipe_stats: dict[str, int] = {}
 
 _shadow_client = JupiterV2QuoteClient()
 _shadow_tasks: set[asyncio.Task] = set()
+
+# ── MT-588: dynamic priority fee + SOL price state ────────────────────
+# The priority fee provider queries the connected RPC
+# (getRecentPrioritizationFees, 75th percentile) and refreshes its cache at
+# most every 30s — module-level state so the fee persists across cycles.
+# In live mode the fee is passed to the swap client; in paper mode it is
+# telemetry only (logged on each refresh).
+_priority_fee_provider = PriorityFeeProvider()
+# Cached Jupiter SOL/USD price (monotonic, usd) for pool-depth conversion.
+_sol_price_cache: tuple[float, float] | None = None
 
 
 def _fire_shadow_task(coro) -> None:
@@ -615,12 +661,117 @@ def classify_token_source(token: dict) -> str:
     return "unknown"
 
 
+def _token_graduation(token: dict | None) -> str:
+    """Return "bonding" or "graduated" for a raw Jupiter token record (MT-588).
+
+    A pump.fun mint still on the bonding curve has a firstPool whose id equals
+    the mint itself (the curve pool IS the mint). Any other firstPool id means
+    the token graduated to PumpSwap (pool id still ends in "pump") or Raydium
+    (no "pump" suffix). Non-pump mints (Meteora/Moonshot launches, etc.) never
+    trade on the pump.fun bonding curve, so they count as graduated. Tokens
+    with no usable data fall back to "graduated" (normal threshold) rather
+    than being rejected on this gate.
+    """
+    if not isinstance(token, dict):
+        return "graduated"
+    mint = str(token.get("id") or "").lower()
+    pool_id = str((token.get("firstPool") or {}).get("id") or "").lower()
+    if not mint.endswith("pump"):
+        return "graduated"
+    if pool_id and pool_id != mint:
+        return "graduated"
+    return "bonding"
+
+
+def _candidate_strength_score(coin: dict, age_min: float) -> float:
+    """0-100 composite signal strength used by the graduated gate (MT-588).
+
+    Components (all capped):
+      - buy/sell ratio vs 2.0                        -> 0-40 pts
+      - 1h vol/mcap ratio vs 0.05                    -> 0-30 pts
+      - 1h txns vs 4x the age-adjusted minimum       -> 0-15 pts
+      - 1h volume vs 10x the minimum volume gate     -> 0-15 pts
+    """
+    pair = coin.get("pair") or {}
+    h1 = (pair.get("txns") or {}).get("h1") or {}
+    buys = int(h1.get("buys") or 0)
+    sells = int(h1.get("sells") or 0)
+    txns = buys + sells
+    vol = float((pair.get("volume") or {}).get("h1") or 0)
+    mcap = float(coin.get("usd_market_cap") or 0)
+    bs_ratio = buys / max(sells, 1)
+    vol_ratio = vol / mcap if mcap > 0 else 0.0
+    min_txns = max(_age_adjusted_min_txns(age_min), 1)
+    score = 0.0
+    score += min(bs_ratio / 2.0, 1.0) * 40.0
+    score += min(vol_ratio / 0.05, 1.0) * 30.0
+    score += min(txns / (4.0 * min_txns), 1.0) * 15.0
+    score += min(vol / (10.0 * max(GATES.min_volume_usd, 1.0)), 1.0) * 15.0
+    return round(score, 1)
+
+
+def _slippage_bps_for_pool(pool_sol: float | None) -> int | None:
+    """Tiered max entry slippage by pool SOL depth (MT-588).
+
+    >50 SOL -> 1% (100 bps); 20-50 SOL -> 3% (300 bps); <20 SOL or unknown
+    depth -> None (too thin, skip).
+    """
+    if pool_sol is None:
+        return None
+    if pool_sol > THICK_POOL_MIN_SOL:
+        return SLIPPAGE_BPS_THICK_POOL
+    if pool_sol >= MID_POOL_MIN_SOL:
+        return SLIPPAGE_BPS_MID_POOL
+    return None
+
+
+async def _get_sol_price_usd(http: httpx.AsyncClient) -> float | None:
+    """Cached Jupiter SOL/USD price for pool-depth conversion (MT-588).
+
+    Refreshed at most every SOL_PRICE_CACHE_TTL_S via one /search lookup of
+    the SOL mint. On refresh failure the last known price is returned (stale
+    within 10 minutes) so a hiccup does not reject every pool-depth gate in a
+    cycle; with no cached value at all, returns None.
+    """
+    global _sol_price_cache
+    now = time.monotonic()
+    if _sol_price_cache is not None and now - _sol_price_cache[0] < SOL_PRICE_CACHE_TTL_S:
+        return _sol_price_cache[1]
+    try:
+        response = await http.get(
+            f"{JUPITER_API_BASE}/search",
+            params={"query": WRAPPED_SOL_MINT},
+            headers=JUPITER_HEADERS,
+            timeout=10.0,
+        )
+        response.raise_for_status()
+        payload = response.json()
+        for token in payload if isinstance(payload, list) else []:
+            if str(token.get("id", "")).lower() == WRAPPED_SOL_MINT.lower():
+                price = float(token.get("usdPrice") or 0)
+                if price > 0:
+                    _sol_price_cache = (time.monotonic(), price)
+                    return price
+        log.warning("SOL price lookup: SOL mint not found in Jupiter /search response")
+    except Exception as exc:
+        log.warning("SOL price lookup failed: %s", exc)
+    if _sol_price_cache is not None and now - _sol_price_cache[0] < 600.0:
+        return _sol_price_cache[1]
+    return None
+
+
 async def fetch_candidates_jupiter(http: httpx.AsyncClient) -> list[dict]:
-    """Discover fresh Solana tokens from Jupiter Tokens V2."""
+    """Discover fresh Solana tokens from Jupiter Tokens V2.
+
+    MT-588: three discovery endpoints per cycle — /toporganicscore/5m,
+    /recent, and /toptrending/5m — deduplicated by mint address before
+    screening. 250ms spacing between the three calls (Developer tier, 10 RPS).
+    """
     tokens_by_mint: dict[str, dict] = {}
     endpoints = (
         ("/toporganicscore/5m", {"limit": 100}),
         ("/recent", {"limit": 30}),
+        ("/toptrending/5m", {"limit": 100}),
     )
 
     for index, (path, params) in enumerate(endpoints):
@@ -636,6 +787,7 @@ async def fetch_candidates_jupiter(http: httpx.AsyncClient) -> list[dict]:
             if not isinstance(payload, list):
                 log.warning("Jupiter %s returned a non-list response", path)
                 continue
+            log.debug("Jupiter %s fetched %d tokens", path, len(payload))
             for token in payload:
                 mint = token.get("id") if isinstance(token, dict) else None
                 if isinstance(mint, str) and mint:
@@ -674,6 +826,9 @@ async def fetch_candidates_jupiter(http: httpx.AsyncClient) -> list[dict]:
             "mint": token["id"],
             "ticker": token.get("symbol", ""),
             "token_source": classify_token_source(token),
+            # MT-588: raw Jupiter token record for graduation / pool-depth
+            # gates (bonding curve vs PumpSwap/Raydium, USD liquidity).
+            "token": token,
             "usd_market_cap": token.get("mcap") or token.get("fdv") or 0,
             "created_timestamp": created_timestamp,
             "volume": (stats_1h.get("buyVolume", 0) or 0) + (stats_1h.get("sellVolume", 0) or 0),
@@ -786,6 +941,10 @@ async def screen_coin(
         "rugcheck_pass": False,
         "holder_pass": False,
         "creator_pass": True,
+        # MT-588: pool-depth floor (replaces the $5K mcap floor) and the
+        # graduated-token strength-score gate.
+        "liquidity_pass": False,
+        "score_pass": False,
     }
 
     created_ts = coin.get("created_timestamp")
@@ -799,11 +958,35 @@ async def screen_coin(
     mcap = coin.get("usd_market_cap")
     if not isinstance(mcap, (int, float)) or mcap <= 0:
         return False, f"age={age_min:.1f}m no usd_market_cap", gates
-    if mcap < GATES.min_mcap_usd:
-        return False, f"age={age_min:.1f}m mcap=${mcap:.0f} < ${GATES.min_mcap_usd:.0f}", gates
+    # MT-588: the old $5K market-cap floor is replaced by an actual pool-depth
+    # check below (pool_sol >= 30 SOL bonding curve / >= 50 SOL graduated).
+    # The upper cap stays — an over-cap mcap is still rejected.
     if mcap > MAX_MCAP_USD:
-        return False, f"age={age_min:.1f}m mcap=${mcap:.0f} > ${MAX_MCAP_USD}", gates
+        return False, f"age={age_min:.1f}m mcap=${mcap:.0f} > ${MAX_MCAP_USD:.0f}", gates
     gates["mcap_pass"] = True
+
+    # MT-588: pool-depth floor. Jupiter reports liquidity in USD; convert to
+    # SOL with the cached SOL/USD price. Tokens with no liquidity data are
+    # skipped outright, per the MT-588 spec.
+    graduation = _token_graduation(coin.get("token"))
+    on_bonding_curve = graduation == "bonding"
+    pool_min_sol = POOL_MIN_SOL_BONDING if on_bonding_curve else POOL_MIN_SOL_GRADUATED
+    liquidity_usd = float(coin.get("liquidity") or 0)
+    sol_price_usd = await _get_sol_price_usd(http)
+    pool_sol = liquidity_usd / sol_price_usd if liquidity_usd > 0 and sol_price_usd else None
+    coin["pool_sol"] = pool_sol
+    if pool_sol is None:
+        return False, (
+            f"age={age_min:.1f}m mcap=${mcap:.0f} \u2192 FAIL no_pool_liquidity"
+            f" (liquidity_usd={liquidity_usd:.0f} sol_price={sol_price_usd})"
+        ), gates
+    if pool_sol < pool_min_sol:
+        return False, (
+            f"age={age_min:.1f}m mcap=${mcap:.0f} \u2192 FAIL "
+            f"pool_depth={pool_sol:.1f}SOL<{pool_min_sol:.0f}SOL "
+            f"(graduation={graduation})"
+        ), gates
+    gates["liquidity_pass"] = True
 
     txns = None
     vol = None
@@ -842,6 +1025,22 @@ async def screen_coin(
             log.warning("DexScreener: no API pair attached for %s", mint[:8])
     except Exception as exc:
         log.warning("DexScreener search failed for %s: %s", mint[:8], exc)
+
+    # MT-588: graduated-token preference. Bonding-curve pools charge 1.25%
+    # DEX fees vs 0.25% on PumpSwap/Raydium, so a still-on-curve token must be
+    # a stronger signal (higher composite score) to justify the higher fee.
+    # Graduated tokens use the normal (lower) threshold.
+    strength_score = _candidate_strength_score(coin, age_min)
+    coin["strength_score"] = strength_score
+    score_threshold = MIN_SCORE_BONDING_CURVE if on_bonding_curve else MIN_SCORE_GRADUATED
+    if strength_score >= score_threshold:
+        gates["score_pass"] = True
+    log.info(
+        "GRADUATION mint=%s ticker=%s graduation=%s bonding_curve=%s "
+        "score=%.1f threshold=%.1f score_pass=%s",
+        mint[:16], coin.get("ticker", "?"), graduation, on_bonding_curve,
+        strength_score, score_threshold, gates["score_pass"],
+    )
 
     t_rug = time.monotonic()
     try:
@@ -902,6 +1101,11 @@ async def screen_coin(
         fail_reasons.append(f"low_fees_warn({estimated_fees:.3f}SOL)")
     if not gates["buy_sell_pass"] and bs_ratio is not None:
         fail_reasons.append(f"buys/sells={bs_ratio:.1f}<{GATES.min_buy_sell_ratio:.1f}")
+    if not gates["score_pass"]:
+        label = "curve" if on_bonding_curve else "grad"
+        fail_reasons.append(
+            f"score={strength_score:.1f}<{score_threshold:.0f}({label})",
+        )
     if not gates["holder_pass"] and report.found and report.top_holder_pct is not None:
         _, hard_holder = _age_holder_tier(age_min)
         fail_reasons.append(f"top10={report.top_holder_pct:.1f}%>={hard_holder}%")
@@ -917,6 +1121,8 @@ async def screen_coin(
     all_pass = (
         gates["age_pass"]
         and gates["mcap_pass"]
+        and gates["liquidity_pass"]
+        and gates["score_pass"]
         and gates["txn_pass"]
         and gates["volume_pass"]
         and gates["vol_mcap_pass"]
@@ -966,6 +1172,7 @@ async def log_candidate(db_path: Path, coin: dict, gates: dict[str, bool], reaso
     passed = [name.removesuffix("_pass") for name, value in gates.items() if name.endswith("_pass") and value]
     values = {
         "age": coin.get("source_age_minutes"), "mcap": coin.get("usd_market_cap"),
+        "liquidity": coin.get("pool_sol"), "score": coin.get("strength_score"),
         "txns": int(h1.get("buys") or 0) + int(h1.get("sells") or 0),
         "volume": (pair.get("volume") or {}).get("h1"),
         "buy_sell": coin.get("buy_sell_ratio"),
@@ -974,8 +1181,10 @@ async def log_candidate(db_path: Path, coin: dict, gates: dict[str, bool], reaso
         "creator": _extract_creator_pct(report) if report is not None else None,
     }
     sequence = (
-        ("age_pass", "age"), ("mcap_pass", "mcap"), ("txn_pass", "txns"),
-        ("volume_pass", "volume"), ("vol_mcap_pass", "volume"),
+        ("age_pass", "age"), ("mcap_pass", "mcap"),
+        ("liquidity_pass", "liquidity"), ("score_pass", "score"),
+        ("txn_pass", "txns"), ("volume_pass", "volume"),
+        ("vol_mcap_pass", "volume"),
         ("buy_sell_pass", "buy_sell"), ("rugcheck_pass", "rugcheck"),
         ("holder_pass", "holder"), ("creator_pass", "creator"),
     )
@@ -1012,6 +1221,7 @@ async def try_enter(
     size_multiplier: float = 1.0,
     pair: dict | None = None,
     timing: dict | None = None,
+    pool_sol: float | None = None,
 ) -> str | None:
     from src.core.database import has_losing_close, record_entry_skip
 
@@ -1079,11 +1289,28 @@ async def try_enter(
         log.warning("SKIP %s ticker=%s \u2014 no valid DexScreener price", mint[:16], ticker)
         return None
 
+    # MT-588: tiered slippage by pool SOL depth. <20 SOL depth (or unknown
+    # depth) is too thin to trade — skip instead of entering with loose
+    # slippage. screen_coin already passed the pool-depth floor (30/50 SOL),
+    # so this only rejects tokens whose depth went stale or vanished.
+    slippage_bps = _slippage_bps_for_pool(pool_sol)
+    if slippage_bps is None:
+        log.warning(
+            "SKIP %s ticker=%s — pool too thin to trade (pool_sol=%s)",
+            mint[:16], ticker, f"{pool_sol:.1f}" if pool_sol is not None else "N/A",
+        )
+        return None
+    log.info(
+        "SLIPPAGE mint=%s ticker=%s pool_sol=%s slippage_bps=%d (tiered)",
+        mint[:16], ticker, f"{pool_sol:.1f}" if pool_sol is not None else "N/A",
+        slippage_bps,
+    )
+
     size_sol = PAPER_SIZE_SOL * size_multiplier
     timing["t_signed"] = time.monotonic()
     timing["t_sent"] = time.monotonic()
     try:
-        trade = await adapter.execute_swap(mint, Side.BUY, size_sol)
+        trade = await adapter.execute_swap(mint, Side.BUY, size_sol, slippage_bps)
     except Exception as exc:
         log.warning("SKIP %s ticker=%s \u2014 execute_swap failed: %s", mint[:16], ticker, exc)
         return None
@@ -1289,7 +1516,8 @@ async def _adapter_close(
 def _first_failed_gate(gates: dict[str, bool]) -> str:
     """First failing gate name from a screen gates dict (MT-563)."""
     for gate in (
-        "age_pass", "mcap_pass", "txn_pass", "volume_pass", "vol_mcap_pass",
+        "age_pass", "mcap_pass", "liquidity_pass", "score_pass",
+        "txn_pass", "volume_pass", "vol_mcap_pass",
         "buy_sell_pass", "rugcheck_pass", "holder_pass", "creator_pass",
     ):
         if not gates.get(gate, True):
@@ -1367,6 +1595,8 @@ async def scan_loop(
                     "total": 0,
                     "age_pass": 0,
                     "mcap_pass": 0,
+                    "liquidity_pass": 0,
+                    "score_pass": 0,
                     "txn_pass": 0,
                     "volume_pass": 0,
                     "vol_mcap_pass": 0,
@@ -1393,7 +1623,7 @@ async def scan_loop(
                         # or failed screening) is skipped on subsequent cycles
                         # until the TTL expires. INFO once per mint so the
                         # dedup is verifiable, DEBUG thereafter to avoid
-                        # flooding the log at the 2s cadence.
+                        # flooding the log at the fast cadence.
                         if mint in seen_mints:
                             if mint not in _dedup_skip_logged:
                                 _dedup_skip_logged.add(mint)
@@ -1408,7 +1638,7 @@ async def scan_loop(
                         # eligible (fixes the ~46s `gates` latency from the
                         # MT-560 cooldown). candidate_log inserts and the
                         # SCREEN log line stay throttled per mint so DB/log
-                        # volume stays bounded at the 2s cadence; a passing
+                        # volume stays bounded at the fast cadence; a passing
                         # mint always persists because its candidate row is
                         # required for entry marking.
                         passed, reason, gates = await screen_coin(coin, http, _rugcheck)
@@ -1466,9 +1696,9 @@ async def scan_loop(
                                     _log_lag_report()
 
                         # Aggregate per-gate diagnostics
-                        for gk in ("age_pass", "mcap_pass", "txn_pass", "volume_pass",
-                                   "vol_mcap_pass", "buy_sell_pass", "rugcheck_pass",
-                                   "holder_pass"):
+                        for gk in ("age_pass", "mcap_pass", "liquidity_pass", "score_pass",
+                                   "txn_pass", "volume_pass", "vol_mcap_pass",
+                                   "buy_sell_pass", "rugcheck_pass", "holder_pass"):
                             if gates.get(gk):
                                 detailed[gk] += 1
                         if gates.get("low_fees_pass") or gates.get("low_fees_warn"):
@@ -1476,7 +1706,8 @@ async def scan_loop(
 
                         if not passed:
                             # Identify the main blocker from the reason string
-                            blockers = ["txn_pass", "volume_pass", "vol_mcap_pass",
+                            blockers = ["liquidity_pass", "score_pass",
+                                        "txn_pass", "volume_pass", "vol_mcap_pass",
                                         "low_fees_pass", "buy_sell_pass", "rugcheck_pass",
                                         "holder_pass", "creator_pass"]
                             for bk in blockers:
@@ -1560,6 +1791,7 @@ async def scan_loop(
                         position_id = await try_enter(
                             mint, ticker, mark_provider, adapter, manager, db_path, size_multiplier,
                             pair=coin.get("pair"), timing=timing,
+                            pool_sol=coin.get("pool_sol"),
                         )
                         if position_id:
                             await mark_strategy_candidate_entered(db_path, candidate_id, position_id)
@@ -1570,14 +1802,16 @@ async def scan_loop(
                             break
 
                 main_blocker = max(main_blocker_count, key=main_blocker_count.get) if main_blocker_count else "none"
-                # MT-560: at 2s cadence the per-cycle Gates line would flood the
+                # MT-560: the per-cycle Gates line would flood the
                 # log 30x/min — full line every GATES_LOG_EVERY cycles, DEBUG
                 # between. The console print follows the same throttle.
                 gates_summary = (
-                    "Gates: total=%d age=%d mcap=%d txns=%d vol=%d vol/mcap=%d low_fees~=%d "
+                    "Gates: total=%d age=%d mcap=%d pool=%d score=%d txns=%d vol=%d "
+                    "vol/mcap=%d low_fees~=%d "
                     "b/s=%d rugcheck=%d holder=%d full_pass=%d "
                     "entry_attempts=%d entered=%d main_blocker=%s",
                     detailed["total"], detailed["age_pass"], detailed["mcap_pass"],
+                    detailed["liquidity_pass"], detailed["score_pass"],
                     detailed["txn_pass"], detailed["volume_pass"], detailed["vol_mcap_pass"],
                     detailed["low_fees_warn_or_pass"], detailed["buy_sell_pass"],
                     detailed["rugcheck_pass"], detailed["holder_pass"],
@@ -1593,6 +1827,8 @@ async def scan_loop(
                         f"Gates: {detailed['total']} pairs \u2192 "
                         f"{detailed['age_pass']} age \u2192 "
                         f"{detailed['mcap_pass']} mcap \u2192 "
+                        f"{detailed['liquidity_pass']} pool_depth \u2192 "
+                        f"{detailed['score_pass']} score \u2192 "
                         f"{detailed['txn_pass']} txns \u2192 "
                         f"{detailed['volume_pass']} vol \u2192 "
                         f"{detailed['vol_mcap_pass']} vol/mcap \u2192 "
@@ -1635,6 +1871,19 @@ async def monitor_loop(
         elapsed = time.monotonic() - cycle_start
         interval = FAST_MONITOR_INTERVAL_S if danger else MONITOR_INTERVAL
         await asyncio.sleep(max(0.0, interval - elapsed))
+
+
+async def priority_fee_loop(interval_s: float = 30.0) -> None:
+    """MT-588: keep the dynamic priority fee warm and visible in the log.
+
+    Refreshes the 75th-percentile fee from the RPC every 30s (matching the
+    provider's own cache TTL) so the fee value is logged periodically even in
+    paper mode, where swaps never query it. Read-only RPC call — safe.
+    """
+    await _priority_fee_provider.refresh()
+    while True:
+        await asyncio.sleep(interval_s)
+        await _priority_fee_provider.refresh()
 
 
 async def record_manual_freeze(db_path: Path) -> None:
@@ -1681,10 +1930,18 @@ async def main() -> None:
     # real Jupiter swaps via src/execution/live.py.
     execution_mode = os.environ.get("EXECUTION_MODE", "paper").strip().lower()
     if execution_mode == "live":
+        from src.chain.jupiter_swap import JupiterSwapClient
         from src.execution.live import LiveExecutionAdapter
 
-        adapter = LiveExecutionAdapter(reference_price_provider=mark_provider)
-        log.info("Strategy B execution adapter: LIVE (Jupiter swap)")
+        # MT-588: the live swap client uses the dynamic RPC priority fee
+        # (75th percentile of getRecentPrioritizationFees, 30s cache) instead
+        # of a static constant. Falls back to Jupiter's priority level when
+        # the lookup is unavailable.
+        client = JupiterSwapClient(
+            priority_fee_callback=_priority_fee_provider.get_fee_lamports,
+        )
+        adapter = LiveExecutionAdapter(reference_price_provider=mark_provider, client=client)
+        log.info("Strategy B execution adapter: LIVE (Jupiter swap, dynamic priority fee)")
     else:
         adapter = PaperExecutionAdapter(price_provider=mark_provider)
         log.info("Strategy B execution adapter: PAPER (EXECUTION_MODE=%s)", execution_mode)
@@ -1715,14 +1972,17 @@ async def main() -> None:
         await scan_loop(mark_provider, adapter, manager, db_path, tracked_wallets=tracked_wallets, test_mode=True)
         await _drain_shadow_tasks()
         await _shadow_client.close()
+        await _priority_fee_provider.close()
         return
     await asyncio.gather(
         scan_loop(mark_provider, adapter, manager, db_path, tracked_wallets=tracked_wallets),
         monitor_loop(manager, mark_provider, db_path, gate_tuner, adapter),
         snapshot_loop(manager, mark_provider, db_path),
+        priority_fee_loop(),
     )
     await _drain_shadow_tasks()
     await _shadow_client.close()
+    await _priority_fee_provider.close()
 
 
 if __name__ == "__main__":
