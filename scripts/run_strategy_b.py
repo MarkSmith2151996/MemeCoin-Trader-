@@ -50,6 +50,13 @@ the LATENCY telemetry. candidate_log inserts and SCREEN log lines remain
 throttled per mint (see SCREEN_LOG_COOLDOWN_S) to keep DB/log volume bounded
 at the faster cadence.
 
+MT-596: the weekday (Wednesday) and dead-zone UTC hour blocks are checked at
+the top of each scan cycle, before discovery. While a blocked window is
+active the loop skips all Jupiter discovery and gate evaluation, keeps open
+positions monitored at a 60s cadence, and resumes the normal 1s scan within a
+minute of the block lifting. The per-candidate checks in try_enter remain as
+a defense-in-depth safety net.
+
 Run:
     python3 scripts/run_strategy_b.py          # normal loop
     timeout 120 python3 scripts/run_strategy_b.py --test  # 2-minute test
@@ -211,6 +218,11 @@ BLOCKED_UTC_HOURS = frozenset({0, 7, 19, 20, 21})
 # since then shows Wednesday at -0.72 SOL / 23.7% win rate — the walk-forward
 # and paper cohorts both say the block belongs back in.
 BLOCKED_WEEKDAYS = frozenset({2})
+# MT-596: while a blocked window is active (blocked weekday or dead-zone UTC
+# hour), the scan loop skips discovery entirely and only re-checks the window
+# + monitors open positions at this slow cadence, so trading resumes within a
+# minute of a block lifting without burning Jupiter API calls meanwhile.
+BLOCKED_CHECK_INTERVAL_S = 60
 SATURDAY_SIZE_MULTIPLIER = 0.5
 
 # Mode flags
@@ -1665,6 +1677,35 @@ async def scan_loop(
     async with httpx.AsyncClient() as http:
         while True:
             now_ts = time.time()
+            utc_now = datetime.now(UTC)
+
+            # MT-596: weekday + dead-zone gate at the top of the loop. When a
+            # blocked window is active, skip discovery and gate evaluation
+            # entirely — no Jupiter calls, no candidate screening — and only
+            # keep open positions managed (trailing stops, exits) at the slow
+            # 60s cadence. The per-candidate checks inside try_enter stay as a
+            # defense-in-depth safety net.
+            if utc_now.weekday() in BLOCKED_WEEKDAYS or utc_now.hour in BLOCKED_UTC_HOURS:
+                open_positions = await manager.get_all_open(mode="paper")
+                log.info(
+                    "BLOCKED window active (weekday=%d hour=%d) — skipping discovery, "
+                    "monitoring %d open position(s) at %ds cadence",
+                    utc_now.weekday(), utc_now.hour, len(open_positions),
+                    BLOCKED_CHECK_INTERVAL_S,
+                )
+                try:
+                    await monitor_positions(manager, mark_provider, db_path, adapter=adapter)
+                except Exception as exc:
+                    log.error(
+                        "CRASH in blocked-window monitor_positions: %s", exc,
+                        exc_info=True,
+                    )
+                if test_mode:
+                    log.info("Test mode: blocked-window check complete")
+                    return
+                await asyncio.sleep(BLOCKED_CHECK_INTERVAL_S)
+                continue
+
             expired = [m for m, t in seen_mints.items() if now_ts - t > SEEN_MINTS_TTL]
             for m in expired:
                 del seen_mints[m]
