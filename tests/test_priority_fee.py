@@ -177,3 +177,44 @@ def test_refresh_logs_fee_value() -> None:
 
     asyncio.run(run())
     assert any("PRIORITY_FEE lamports=40" in line for line in records)
+
+
+def test_falls_back_to_public_rpc_when_primary_fails() -> None:
+    async def run() -> tuple[int | None, list[tuple[str, str]]]:
+        calls: list[tuple[str, str]] = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            calls.append((str(request.url), request.content.decode()))
+            if request.url.host == "rpc.test":
+                return httpx.Response(429, text="quota exhausted")
+            return _rpc_response([10, 20, 30, 40, 50])
+
+        client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+        provider = PriorityFeeProvider(rpc_url="http://rpc.test", client=client)
+        try:
+            fee = await provider.get_fee_lamports()
+        finally:
+            await provider.close()
+        return fee, calls
+
+    fee, calls = asyncio.run(run())
+    assert fee == 1_000  # p75 = 40, clamped to the 1,000-lamport minimum floor
+    assert len(calls) == 2
+    assert calls[0][0] == "http://rpc.test"
+    assert "api.mainnet-beta.solana.com" in calls[1][0]
+
+
+def test_cached_fee_lamports_property() -> None:
+    async def run() -> tuple[int | None, int | None]:
+        provider, _ = _provider([10, 20, 30, 40, 50])
+        try:
+            before = provider.cached_fee_lamports
+            await provider.get_fee_lamports()
+            after = provider.cached_fee_lamports
+        finally:
+            await provider.close()
+        return before, after
+
+    before, after = asyncio.run(run())
+    assert before is None
+    assert after == 40

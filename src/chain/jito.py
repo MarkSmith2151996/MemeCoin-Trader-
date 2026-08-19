@@ -13,9 +13,6 @@ from typing import Any, Protocol
 
 import httpx
 
-from src.execution.redaction import sanitize_provider_error
-
-
 DEFAULT_JITO_ENDPOINT = "https://mainnet.block-engine.jito.wtf/api/v1/bundles"
 
 
@@ -117,6 +114,11 @@ class JitoBlockEngineClient:
         except httpx.TimeoutException:
             return self._failure("request timed out", request)
         except Exception as exc:
+            # Lazy import: src.execution.redaction must not be pulled in at
+            # module import time — it triggers src.execution/__init__.py which
+            # eagerly imports the live adapter (circular import, MT-589).
+            from src.execution.redaction import sanitize_provider_error
+
             return self._failure(f"provider exception: {sanitize_provider_error(exc)}", request)
 
         status_code = getattr(response, "status_code", None)

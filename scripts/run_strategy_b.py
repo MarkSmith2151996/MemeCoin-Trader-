@@ -216,13 +216,18 @@ HOLDER_TIERS = [
 
 DB_PATH = Path("data/trades.db")
 
+# MT-589: single-writer logging. The watchdog starts this script with
+# `> /tmp/strategy_b.log 2>&1`, so an extra FileHandler on the same path made
+# every line appear twice. Only a StreamHandler is configured here — the
+# shell redirect owns the file. Handlers are cleared first so re-initializing
+# (e.g. under pytest or a supervisor that imports this module twice) can
+# never attach a duplicate handler.
+_root_logger = logging.getLogger()
+_root_logger.handlers.clear()
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s %(levelname)s %(message)s",
-    handlers=[
-        logging.StreamHandler(sys.stdout),
-        logging.FileHandler("/tmp/strategy_b.log"),
-    ],
+    handlers=[logging.StreamHandler(sys.stdout)],
 )
 log = logging.getLogger("strategy_b")
 logging.getLogger("httpx").setLevel(logging.WARNING)
@@ -981,9 +986,10 @@ async def screen_coin(
             f" (liquidity_usd={liquidity_usd:.0f} sol_price={sol_price_usd})"
         ), gates
     if pool_sol < pool_min_sol:
+        log.info("SKIP %s pool_depth=%.1f SOL below minimum", mint, pool_sol)
         return False, (
             f"age={age_min:.1f}m mcap=${mcap:.0f} \u2192 FAIL "
-            f"pool_depth={pool_sol:.1f}SOL<{pool_min_sol:.0f}SOL "
+            f"pool_depth={pool_sol:.1f}SOL below minimum {pool_min_sol:.0f}SOL "
             f"(graduation={graduation})"
         ), gates
     gates["liquidity_pass"] = True
@@ -1296,7 +1302,7 @@ async def try_enter(
     slippage_bps = _slippage_bps_for_pool(pool_sol)
     if slippage_bps is None:
         log.warning(
-            "SKIP %s ticker=%s — pool too thin to trade (pool_sol=%s)",
+            "SKIP %s ticker=%s pool_depth=%s SOL below minimum (too thin for tiered slippage)",
             mint[:16], ticker, f"{pool_sol:.1f}" if pool_sol is not None else "N/A",
         )
         return None
@@ -1822,6 +1828,15 @@ async def scan_loop(
                     log.info(*gates_summary)
                 else:
                     log.debug(*gates_summary)
+                # MT-589: periodic visibility of the dynamic priority fee
+                # (75th percentile of getRecentPrioritizationFees, 30s cache).
+                # Logged every 100 cycles (~100s); also drives the Jito tip.
+                if cycle_number % 100 == 0:
+                    _dynamic_fee = _priority_fee_provider.cached_fee_lamports
+                    log.info(
+                        "dynamic_priority_fee: %s microlamports",
+                        _dynamic_fee if _dynamic_fee is not None else "N/A (static fallback)",
+                    )
                 if cycle_number % GATES_LOG_EVERY == 0:
                     print(
                         f"Gates: {detailed['total']} pairs \u2192 "

@@ -10,11 +10,20 @@ This is the live execution path — every network interaction is injectable via
 Flow per swap:
 1. ``get_quote`` — read-only price quote (SOL<->token, amounts in lamports).
 2. ``execute_swap`` — POST /swap for the raw transaction, sign it with the
-   wallet keypair, send via the RPC ``sendTransaction``, poll
-   ``getSignatureStatuses`` for confirmation, rebuild with a fresh blockhash
-   and retry when the blockhash expires (up to ``max_retries``).
+   wallet keypair, send via the Jito block engine as a single-transaction
+   bundle with a tip (MT-589, when ``USE_JITO_BUNDLES`` is on) or via the RPC
+   ``sendTransaction`` fallback, poll ``getSignatureStatuses`` for
+   confirmation, rebuild with a fresh blockhash and retry when the blockhash
+   expires (up to ``max_retries``).
 3. Reconcile — always read the wallet token/SOL balance after the swap to
    verify the fill actually landed.
+
+MT-589: Jito bundle routing. Every swap is wrapped as a bundle
+``[tip_transfer, swap]`` submitted to the Jito block engine; the tip is
+``max(dynamic_priority_fee, 0.001 SOL)`` paid to a randomly chosen canonical
+tip account. A failed Jito submission logs a warning and falls back to the
+plain RPC send — a bundle failure never blocks a trade. Flip
+``USE_JITO_BUNDLES`` to False to disable.
 """
 
 from __future__ import annotations
@@ -23,16 +32,22 @@ import asyncio
 import base64
 import logging
 import os
+import random
 import time
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 
 import httpx
 from dotenv import load_dotenv
+from solders.hash import Hash
 from solders.keypair import Keypair
 from solders.message import to_bytes_versioned
-from solders.transaction import VersionedTransaction
+from solders.pubkey import Pubkey
+from solders.signature import Signature
+from solders.system_program import TransferParams, transfer
+from solders.transaction import Transaction, VersionedTransaction
 
+from src.chain.jito import JitoBlockEngineClient
 from src.chain.jupiter import LAMPORTS_PER_SOL, SOL_MINT
 from src.chain.priority_fee import FeeCallback
 
@@ -45,6 +60,29 @@ _DEFAULT_SOLANA_RPC = "https://api.mainnet-beta.solana.com"
 _FALLBACK_DECIMALS = 9
 _PRIORITY_LEVEL = "veryHigh"
 _PRIORITY_MAX_LAMPORTS = 1_000_000
+
+# ── MT-589: Jito bundle routing ────────────────────────────────────────
+# Master switch for Jito bundle submission of every swap. When True, each
+# signed swap is wrapped in a bundle with a tip to one of the canonical Jito
+# tip accounts below; on bundle failure the client falls back to the plain
+# RPC sendTransaction path with a warning log.
+USE_JITO_BUNDLES = True
+JITO_BLOCK_ENGINE_URL = "https://mainnet.block-engine.jito.wtf/api/v1/bundles"
+# Canonical Jito tip accounts (pick one at random per bundle).
+JITO_TIP_ACCOUNTS = (
+    "96gYZGLnJYVFmbjzopPSU6QiEV5fGqZNyN9nmNhvrZU5",
+    "HFqU5x63VTqvQss8hp11i4bVqkfRtQo3EZLFNi1Aqtg",
+    "Cw8CFyM9FkoMi7K7Crf6HNQqf4uEMzpKw6QNghXLvLkY",
+    "ADaUMid9yfUC5i4YSf4kAqoMfchVbswbPoz8CYmJRBpHt",
+    "DfXygSm4jCyNCybVYYK6DwvWqjKee8pbDmJGcLWNDXjh",
+    "ADuUkR4vqLUMWXxW9gh6D6L8pMSawimctcNZ5pGwDcEt",
+    "DttWaMuVvTiduZRnguLF7jNxTgiMBZ1hyAumKUiL2KRL",
+    "3AVi9Tg9Uo68tJfuvoKvqKNWKkC5wPdSSdeBnizKZ6jT",
+)
+# Minimum Jito tip: 0.001 SOL. The dynamic priority fee (75th percentile of
+# getRecentPrioritizationFees, microlamports) is the base; the tip is
+# max(dynamic_fee, MIN_JITO_TIP_LAMPORTS).
+MIN_JITO_TIP_LAMPORTS = int(0.001 * LAMPORTS_PER_SOL)
 
 
 @dataclass(frozen=True, slots=True)
@@ -98,6 +136,8 @@ class JupiterSwapClient:
         poll_interval_s: float = 1.0,
         max_retries: int = 2,
         priority_fee_callback: FeeCallback | None = None,
+        use_jito_bundles: bool | None = None,
+        jito_client: JitoBlockEngineClient | None = None,
     ) -> None:
         self._base_url = base_url.rstrip("/")
         self._solana_rpc_url = (
@@ -115,6 +155,16 @@ class JupiterSwapClient:
         self._max_retries = max_retries
         self._decimals_cache: dict[str, int] = {}
         self._priority_fee_callback = priority_fee_callback
+        # MT-589: Jito bundle routing. `use_jito_bundles` defaults to the
+        # module-level USE_JITO_BUNDLES flag; the Jito client shares this
+        # client's HTTP transport so tests never touch the real network.
+        self._use_jito_bundles = (
+            USE_JITO_BUNDLES if use_jito_bundles is None else use_jito_bundles
+        )
+        self._jito_client = jito_client or JitoBlockEngineClient(
+            endpoint=JITO_BLOCK_ENGINE_URL,
+            http_client=self._client,
+        )
 
     @staticmethod
     def _load_keypair() -> Keypair:
@@ -437,6 +487,84 @@ class JupiterSwapClient:
             raise RuntimeError(f"transaction signing failed: {exc}") from exc
 
     async def _send_transaction(self, signed_b64: str) -> str | None:
+        """Send the signed swap via Jito bundle (MT-589) or plain RPC.
+
+        Returns the swap transaction signature on success, ``None`` on
+        failure. With Jito enabled the bundle ``[tip_transfer, swap]`` is
+        submitted first; any bundle failure logs a warning and falls back to
+        the standard RPC ``sendTransaction`` path.
+        """
+        if self._use_jito_bundles:
+            bundle_signature = await self._send_via_jito(signed_b64)
+            if bundle_signature is not None:
+                return bundle_signature
+        return await self._send_via_rpc(signed_b64)
+
+    async def _send_via_jito(self, signed_b64: str) -> str | None:
+        """Submit the signed swap as a one-transaction Jito bundle with a tip.
+
+        The tip transfer uses the same recent blockhash as the swap (Jito
+        requires one blockhash per bundle) and pays
+        ``max(dynamic_priority_fee, 0.001 SOL)`` to a randomly chosen
+        canonical tip account. Returns the swap signature when the bundle is
+        accepted, ``None`` on any failure (the caller falls back to RPC).
+        """
+        try:
+            signed_bytes = base64.b64decode(signed_b64)
+            swap_signature = str(Signature.from_bytes(signed_bytes[:64]))
+            blockhash = VersionedTransaction.from_bytes(signed_bytes).message.recent_blockhash
+            tip_lamports = await self._jito_tip_lamports()
+            tip_account = random.choice(JITO_TIP_ACCOUNTS)
+            tip_tx_b64 = self._build_tip_transaction(tip_lamports, tip_account, blockhash)
+            result = await self._jito_client._submit_bundle_for_guarded_adapter(
+                [tip_tx_b64, signed_b64],
+            )
+        except Exception as exc:  # noqa: BLE001 — a bundle failure never blocks a trade
+            log.warning("JITO bundle submission failed: %s — falling back to RPC send", exc)
+            return None
+        if not result.ok:
+            log.warning(
+                "JITO bundle submission failed: %s — falling back to RPC send",
+                result.error or "unknown",
+            )
+            return None
+        log.info(
+            "JITO bundle submitted bundle_id=%s tip_lamports=%d tip_account=%s sig=%s",
+            result.bundle_id, tip_lamports, tip_account[:8], swap_signature,
+        )
+        return swap_signature
+
+    async def _jito_tip_lamports(self) -> int:
+        """MT-589: Jito tip = max(dynamic priority fee, 0.001 SOL)."""
+        dynamic = 0
+        if self._priority_fee_callback is not None:
+            try:
+                fee = await self._priority_fee_callback()
+                if fee is not None and fee > 0:
+                    dynamic = fee
+            except Exception as exc:  # noqa: BLE001 — degrade to the minimum tip
+                log.warning("JITO tip dynamic fee lookup failed: %s", exc)
+        return max(dynamic, MIN_JITO_TIP_LAMPORTS)
+
+    def _build_tip_transaction(self, tip_lamports: int, tip_account: str, blockhash: Hash) -> str:
+        """Build a signed legacy SOL transfer to a Jito tip account (base64).
+
+        The tip transfer shares the swap transaction's recent blockhash —
+        Jito bundles require a single blockhash across all transactions.
+        """
+        instruction = transfer(
+            TransferParams(
+                from_pubkey=self._keypair.pubkey(),
+                to_pubkey=Pubkey.from_string(tip_account),
+                lamports=tip_lamports,
+            ),
+        )
+        transaction = Transaction.new_signed_with_payer(
+            [instruction], self._keypair.pubkey(), [self._keypair], blockhash,
+        )
+        return base64.b64encode(bytes(transaction)).decode()
+
+    async def _send_via_rpc(self, signed_b64: str) -> str | None:
         """Send the signed transaction via the RPC ``sendTransaction`` method."""
         payload = {
             "jsonrpc": "2.0",

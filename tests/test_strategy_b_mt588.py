@@ -266,7 +266,7 @@ def test_screen_coin_rejects_graduated_token_below_50_sol() -> None:
     passed, reason, gates = asyncio.run(_screen(coin))
     assert not passed
     assert not gates["liquidity_pass"]
-    assert "pool_depth=40.0SOL<50SOL" in reason
+    assert "pool_depth=40.0SOL below minimum 50SOL" in reason
 
 
 def test_screen_coin_accepts_bonding_curve_token_at_30_sol() -> None:
@@ -292,7 +292,7 @@ def test_screen_coin_rejects_bonding_curve_token_below_30_sol() -> None:
     passed, reason, gates = asyncio.run(_screen(coin))
     assert not passed
     assert not gates["liquidity_pass"]
-    assert "pool_depth=20.0SOL<30SOL" in reason
+    assert "pool_depth=20.0SOL below minimum 30SOL" in reason
 
 
 def test_screen_coin_skips_token_without_liquidity_data() -> None:

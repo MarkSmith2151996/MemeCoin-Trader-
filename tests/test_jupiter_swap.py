@@ -16,10 +16,11 @@ from solders.instruction import CompiledInstruction
 from solders.keypair import Keypair
 from solders.message import MessageHeader, MessageV0, to_bytes_versioned
 from solders.pubkey import Pubkey
+from solders.signature import Signature
 from solders.transaction import VersionedTransaction
 
 from src.chain.jupiter import SOL_MINT
-from src.chain.jupiter_swap import JupiterSwapClient
+from src.chain.jupiter_swap import MIN_JITO_TIP_LAMPORTS, JupiterSwapClient
 
 TOKEN_MINT = "tok12345678901234567890123456789012"
 WSOL_MINT = SOL_MINT
@@ -473,3 +474,173 @@ def test_reconcile_sol_balance_after_swap() -> None:
 
     assert result.ok is True
     assert result.token_balance_after == pytest.approx(0.049)
+
+
+# ── MT-589: Jito bundle routing ──────────────────────────────────────
+
+def test_execute_swap_submits_jito_bundle_when_enabled() -> None:
+    keypair = _make_keypair()
+    tx_b64 = _signed_tx_b64(keypair)
+    jito_calls = {"n": 0}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/swap/v1/quote":
+            return httpx.Response(200, json=_quote_response())
+        if request.url.path == "/swap/v1/swap":
+            return httpx.Response(
+                200,
+                json={"swapTransaction": tx_b64, "lastValidBlockHeight": 12345},
+            )
+        if request.url.path == "/api/v1/bundles":
+            payload = json.loads(request.content)
+            assert payload["method"] == "sendBundle"
+            transactions = payload["params"][0]
+            # Bundle = [tip transfer, swap].
+            assert len(transactions) == 2
+            assert transactions[1] == tx_b64
+            jito_calls["n"] += 1
+            return httpx.Response(
+                200,
+                json={"jsonrpc": "2.0", "id": 1, "result": "bundle-jito-1"},
+            )
+        payload = json.loads(request.content)
+        method = payload["method"]
+        if method == "getTokenSupply":
+            return httpx.Response(200, json=RPC_DECIMALS_BODY)
+        if method == "getSignatureStatuses":
+            return httpx.Response(
+                200,
+                json={
+                    "jsonrpc": "2.0",
+                    "id": 1,
+                    "result": {"value": [{"slot": 42, "confirmations": 1, "err": None,
+                                "confirmationStatus": "confirmed"}]},
+                },
+            )
+        if method == "getTokenAccountsByOwner":
+            return httpx.Response(
+                200,
+                json={
+                    "jsonrpc": "2.0",
+                    "id": 1,
+                    "result": {"value": [{"account": {"data": {"parsed": {"info":
+                                {"tokenAmount": {"amount": "1000000"}}}}}}]},
+                },
+            )
+        raise AssertionError(f"unexpected RPC method {method}")
+
+    client = _make_client(handler, keypair=keypair)
+    client._use_jito_bundles = True
+
+    quote = asyncio.run(client.get_quote(WSOL_MINT, TOKEN_MINT, 50_000_000))
+    assert quote is not None
+    result = asyncio.run(client.execute_swap(quote))
+
+    # The bundle carried the tip transfer + swap; RPC sendTransaction never ran.
+    assert jito_calls["n"] == 1
+    assert result.ok is True
+    assert result.confirmation_status == "confirmed"
+    # The swap signature is the wallet's signature over the swap message.
+    expected_sig = str(Signature.from_bytes(base64.b64decode(tx_b64)[:64]))
+    assert result.signature == expected_sig
+
+
+def test_execute_swap_falls_back_to_rpc_when_jito_fails() -> None:
+    keypair = _make_keypair()
+    tx_b64 = _signed_tx_b64(keypair)
+    jito_calls = {"n": 0}
+    send_calls = {"n": 0}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/swap/v1/quote":
+            return httpx.Response(200, json=_quote_response())
+        if request.url.path == "/swap/v1/swap":
+            return httpx.Response(
+                200,
+                json={"swapTransaction": tx_b64, "lastValidBlockHeight": 12345},
+            )
+        if request.url.path == "/api/v1/bundles":
+            jito_calls["n"] += 1
+            return httpx.Response(503, json={"error": "busy"})
+        payload = json.loads(request.content)
+        method = payload["method"]
+        if method == "getTokenSupply":
+            return httpx.Response(200, json=RPC_DECIMALS_BODY)
+        if method == "sendTransaction":
+            send_calls["n"] += 1
+            return httpx.Response(
+                200,
+                json={"jsonrpc": "2.0", "id": 1, "result": "sig-rpc-fallback"},
+            )
+        if method == "getSignatureStatuses":
+            return httpx.Response(
+                200,
+                json={
+                    "jsonrpc": "2.0",
+                    "id": 1,
+                    "result": {"value": [{"slot": 7, "confirmations": 0, "err": None,
+                                "confirmationStatus": "confirmed"}]},
+                },
+            )
+        if method == "getTokenAccountsByOwner":
+            return httpx.Response(
+                200,
+                json={
+                    "jsonrpc": "2.0",
+                    "id": 1,
+                    "result": {"value": [{"account": {"data": {"parsed": {"info":
+                                {"tokenAmount": {"amount": "1000000"}}}}}}]},
+                },
+            )
+        raise AssertionError(f"unexpected RPC method {method}")
+
+    client = _make_client(handler, keypair=keypair)
+    client._use_jito_bundles = True
+
+    quote = asyncio.run(client.get_quote(WSOL_MINT, TOKEN_MINT, 50_000_000))
+    assert quote is not None
+    result = asyncio.run(client.execute_swap(quote))
+
+    assert jito_calls["n"] == 1
+    assert send_calls["n"] == 1
+    assert result.ok is True
+    assert result.signature == "sig-rpc-fallback"
+
+
+def test_jito_tip_uses_dynamic_fee_with_minimum_floor() -> None:
+    async def run() -> tuple[int, int]:
+        async def callback_high() -> int | None:
+            return 5_000_000
+
+        async def callback_none() -> int | None:
+            return None
+
+        high_client = JupiterSwapClient(
+            solana_rpc_url=RPC,
+            http_client=httpx.AsyncClient(
+                transport=httpx.MockTransport(lambda request: httpx.Response(200)),
+            ),
+            keypair=_make_keypair(),
+            api_key="test-key",
+            priority_fee_callback=callback_high,
+        )
+        none_client = JupiterSwapClient(
+            solana_rpc_url=RPC,
+            http_client=httpx.AsyncClient(
+                transport=httpx.MockTransport(lambda request: httpx.Response(200)),
+            ),
+            keypair=_make_keypair(),
+            api_key="test-key",
+            priority_fee_callback=callback_none,
+        )
+        try:
+            high = await high_client._jito_tip_lamports()
+            low = await none_client._jito_tip_lamports()
+        finally:
+            await high_client.close()
+            await none_client.close()
+        return high, low
+
+    high, low = asyncio.run(run())
+    assert high == 5_000_000
+    assert low == MIN_JITO_TIP_LAMPORTS
