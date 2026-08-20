@@ -798,6 +798,13 @@ async def screen_coin(
     mcap = coin.get("usd_market_cap")
     if not isinstance(mcap, (int, float)) or mcap <= 0:
         return False, f"age={age_min:.1f}m no usd_market_cap", gates
+    # MT-593: walk-forward validated mcap floor re-enforced at $5,100 (2 of 3
+    # iterations found mcap >= ~$5.1K). Restored after MT-603 accidentally
+    # removed it during DexScreener cleanup.
+    if mcap < MIN_MCAP_USD:
+        return False, (
+            f"age={age_min:.1f}m mcap=${mcap:.0f} < ${MIN_MCAP_USD:.0f} floor"
+        ), gates
     if mcap > MAX_MCAP_USD:
         return False, f"age={age_min:.1f}m mcap=${mcap:.0f} > ${MAX_MCAP_USD:.0f}", gates
     gates["mcap_pass"] = True
