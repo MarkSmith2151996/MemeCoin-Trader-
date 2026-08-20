@@ -434,10 +434,10 @@ def test_screen_coin_passes_creator_holdings_unavailable() -> None:
     assert gates["creator_pass"]
 
 
-# ── MT-593: mcap floor $5,100 ────────────────────────────────────────
+# ── MT-601: mcap floor removed ────────────────────────────────────────
 
 
-def test_screen_coin_rejects_below_mcap_floor() -> None:
+def test_screen_coin_passes_below_former_mcap_floor() -> None:
     coin = _make_coin(
         mint="abc123pump",
         pool_id="raydiumPoolId123",
@@ -445,6 +445,5 @@ def test_screen_coin_rejects_below_mcap_floor() -> None:
         buys=40, sells=5, vol=10_000.0, mcap=5_000.0,
     )
     passed, reason, gates = asyncio.run(_screen(coin))
-    assert not passed
-    assert not gates["mcap_pass"]
-    assert "$5,100" in reason or "5100" in reason
+    assert passed, reason
+    assert gates["mcap_pass"]

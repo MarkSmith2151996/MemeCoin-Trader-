@@ -5,40 +5,14 @@ from __future__ import annotations
 import asyncio
 import json
 import sqlite3
-import time
 from pathlib import Path
-
-import httpx
 
 from scripts.run_strategy_b import (
     MAX_TOP10_HOLDER_PCT,
-    SOURCE_MAX_AGE_MINUTES,
     _age_holder_tier,
-    _search_fresh_pair,
 )
 from src.core.database import init_db, mark_strategy_candidate_entered, record_strategy_candidate
 from src.strategy.gate_tuner import GateThresholds, GateTuner
-
-
-def test_search_source_discards_stale_pairs() -> None:
-    now_ms = time.time() * 1000
-
-    def handler(_: httpx.Request) -> httpx.Response:
-        return httpx.Response(200, json={
-            "pairs": [
-                _pair(now_ms - 40 * 60_000, "stale"),
-                _pair(now_ms - 5 * 60_000, "fresh"),
-            ],
-        })
-
-    async def run() -> dict | None:
-        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
-            return await _search_fresh_pair("fresh", client)
-
-    candidate = asyncio.run(run())
-    assert candidate is not None
-    assert candidate["ticker"] == "fresh"
-    assert candidate["source_age_minutes"] <= SOURCE_MAX_AGE_MINUTES
 
 
 def test_holder_gate_accepts_concentrated_fresh_tokens() -> None:
@@ -103,16 +77,3 @@ def test_tuner_caps_each_adjustment_at_25_percent(tmp_path: Path) -> None:
     assert thresholds.min_mcap_usd == 1_500
     assert thresholds.min_volume_usd == 150
     assert thresholds.min_buy_sell_ratio == 0.3
-
-
-def _pair(created_ms: float, ticker: str) -> dict:
-    return {
-        "chainId": "solana",
-        "baseToken": {"address": ticker + "Mint", "symbol": ticker},
-        "quoteToken": {"address": "So11111111111111111111111111111111111111112"},
-        "pairCreatedAt": created_ms,
-        "marketCap": 5_000,
-        "volume": {"h1": 300},
-        "txns": {"h1": {"buys": 4, "sells": 2}},
-        "liquidity": {"usd": 1_000},
-    }

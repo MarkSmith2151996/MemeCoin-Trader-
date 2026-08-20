@@ -122,14 +122,6 @@ load_dotenv()
 
 WRAPPED_SOL_MINT = "So11111111111111111111111111111111111111112"
 
-BROWSER_PC_URL = "http://localhost:8099"
-# DEPRECATED: replaced by Jupiter API (MT-550).
-# Browser rows are only discovery hints. DexScreener's URL age filters are
-# client-side and can be stale, so API pairCreatedAt is authoritative.
-STRATEGY_B_DEXSCREENER_URL = "https://dexscreener.com/new-pairs/solana"
-BROWSER_PC_WAIT_SECONDS = 8
-# API-side age filtering follows the widened Strategy B gate, rather than the
-# unreliable client-side maxAge query parameter.
 # MT-537: auto-tuner paused, so these constants ARE the live gate values.
 # Frozen manually after the tuner oscillated (mcap dropped to $1,250 garbage tier).
 MAX_AGE_MINUTES = 22
@@ -139,7 +131,6 @@ MIN_MCAP_USD = 5_100
 MIN_VOLUME_USD = 500
 MIN_TXNS = 3
 SOURCE_MAX_AGE_MINUTES = MAX_AGE_MINUTES
-MAX_SOURCE_ROWS = 30
 
 JUPITER_API_BASE = "https://api.jup.ag/tokens/v2"
 JUPITER_API_KEY = os.environ.get("JUPITER_API_KEY", "")
@@ -213,7 +204,7 @@ TIME_STOP_MINUTES = 10
 ENTRY_CONFIRM_WINDOW_S = 90
 EARLY_EXIT_GREEN_PCT = 0.01
 # MT-537: UTC 21 added to the MT-516 blocked list (20:00-21:59 dead zone).
-BLOCKED_UTC_HOURS = frozenset({0, 7, 19, 20, 21})
+BLOCKED_UTC_HOURS = frozenset({0, 19, 20, 21})
 # MT-593: Wednesday (weekday 2) re-blocked. MT-590 lifted it, but paper data
 # since then shows Wednesday at -0.72 SOL / 23.7% win rate — the walk-forward
 # and paper cohorts both say the block belongs back in.
@@ -483,176 +474,6 @@ def _age_holder_tier(age_min: float) -> tuple[float, float]:
     return 30.0, MAX_TOP10_HOLDER_PCT
 
 
-# ── browser-pc data source ──────────────────────────────────────────
-
-def _parse_usd_string(s: str) -> float:
-    """Parse a USD string like '$12.4K' or '$1.5M' to float."""
-    if not isinstance(s, str):
-        return 0.0
-    s = s.replace("$", "").replace(",", "").strip().upper()
-    if not s:
-        return 0.0
-    multiplier = 1.0
-    if s.endswith("K"):
-        multiplier = 1_000
-        s = s[:-1]
-    elif s.endswith("M"):
-        multiplier = 1_000_000
-        s = s[:-1]
-    elif s.endswith("B"):
-        multiplier = 1_000_000_000
-        s = s[:-1]
-    try:
-        return float(s) * multiplier
-    except (TypeError, ValueError):
-        return 0.0
-
-
-def _parse_age_minutes(s: str) -> float:
-    """Parse an age string like '3m', '15m', '1h', '30s' to minutes."""
-    if not isinstance(s, str):
-        return 999.0
-    s = s.strip().lower()
-    if not s:
-        return 999.0
-    if s.endswith("h"):
-        try:
-            return float(s[:-1]) * 60
-        except (TypeError, ValueError):
-            return 999.0
-    if s.endswith("m"):
-        try:
-            return float(s[:-1])
-        except (TypeError, ValueError):
-            return 999.0
-    if s.endswith("s"):
-        try:
-            return float(s[:-1]) / 60
-        except (TypeError, ValueError):
-            return 999.0
-    try:
-        return float(s)
-    except (TypeError, ValueError):
-        return 999.0
-
-
-# DEPRECATED: replaced by Jupiter API (MT-550).
-def parse_row(row: dict) -> dict:
-    """Map a browser-pc row to a coin dict for screen_coin()."""
-    ticker = row.get("name") or row.get("symbol") or "?"
-    # market_cap_usd is a float from browser-pc; mcap is a string from older format
-    if row.get("market_cap_usd") is not None:
-        mcap = float(row["market_cap_usd"])
-    else:
-        mcap = _parse_usd_string(row.get("mcap", "0"))
-    # age: prefer age_minutes float, fallback to parsing age string
-    if row.get("age_minutes") is not None:
-        age_min = float(row["age_minutes"])
-    else:
-        age_min = _parse_age_minutes(row.get("age", "0"))
-    now = datetime.now(UTC)
-    created_ts = int((now.timestamp() - age_min * 60) * 1000)
-    buys = int(row.get("buys", 0) or 0)
-    sells = int(row.get("sells", 0) or 0)
-    volume = float(row.get("volume_usd", 0) or 0)
-    txns = buys + sells
-    bs_ratio = buys / max(sells, 1)
-    return {
-        "ticker": ticker,
-        "usd_market_cap": mcap,
-        "created_timestamp": max(created_ts, 0),
-        "volume": volume,
-        "txns": txns,
-        "buy_sell_ratio": bs_ratio,
-        "liquidity": float(row.get("liquidity_usd", 0) or 0),
-    }
-
-
-# DEPRECATED: replaced by Jupiter API (MT-550).
-async def _search_fresh_pair(ticker: str, http: httpx.AsyncClient) -> dict | None:
-    """Resolve a browser hint through search and return an API-aged Solana pair."""
-    try:
-        response = await http.get(
-            "https://api.dexscreener.com/latest/dex/search",
-            params={"q": ticker},
-            timeout=10.0,
-        )
-        response.raise_for_status()
-        pairs = response.json().get("pairs") or []
-    except Exception as exc:
-        log.debug("DexScreener search failed for %s: %s", ticker, exc)
-        return None
-
-    now_ms = time.time() * 1000
-    choices: list[tuple[float, dict]] = []
-    for pair in pairs:
-        if not isinstance(pair, dict) or pair.get("chainId") != "solana":
-            continue
-        quote = pair.get("quoteToken") or {}
-        if quote.get("address") != WRAPPED_SOL_MINT:
-            continue
-        created_ms = pair.get("pairCreatedAt")
-        if not isinstance(created_ms, (int, float)) or created_ms <= 0:
-            continue
-        age_minutes = max(0.0, (now_ms - created_ms) / 60_000)
-        if age_minutes <= SOURCE_MAX_AGE_MINUTES:
-            choices.append((age_minutes, pair))
-    if not choices:
-        return None
-
-    age_minutes, pair = min(choices, key=lambda item: item[0])
-    base = pair.get("baseToken") or {}
-    mint = base.get("address")
-    if not isinstance(mint, str) or not mint:
-        return None
-    txns = (pair.get("txns") or {}).get("h1") or {}
-    buys = int(txns.get("buys") or 0)
-    sells = int(txns.get("sells") or 0)
-    return {
-        "mint": mint,
-        "ticker": base.get("symbol") or ticker,
-        "usd_market_cap": float(pair.get("marketCap") or pair.get("fdv") or 0),
-        "created_timestamp": int(pair["pairCreatedAt"]),
-        "volume": float((pair.get("volume") or {}).get("h1") or 0),
-        "txns": buys + sells,
-        "buy_sell_ratio": buys / max(sells, 1),
-        "liquidity": float((pair.get("liquidity") or {}).get("usd") or 0),
-        "pair": pair,
-        "source_age_minutes": age_minutes,
-    }
-
-
-# DEPRECATED: replaced by Jupiter API (MT-550).
-async def fetch_candidates(http: httpx.AsyncClient) -> list[dict]:
-    """Return only candidates whose API pair timestamps pass the live age gate."""
-    try:
-        resp = await http.post(
-            f"{BROWSER_PC_URL}/capture",
-            json={"url": STRATEGY_B_DEXSCREENER_URL, "wait": BROWSER_PC_WAIT_SECONDS},
-            timeout=60,
-        )
-        resp.raise_for_status()
-        data = resp.json()
-        rows = data.get("candidates", data.get("rows", []))
-        tickers = []
-        for row in rows:
-            ticker = row.get("name") or row.get("symbol") or row.get("token")
-            if isinstance(ticker, str) and ticker.strip() and ticker not in tickers:
-                tickers.append(ticker.strip())
-        candidates = await asyncio.gather(
-            *(_search_fresh_pair(ticker, http) for ticker in tickers[:MAX_SOURCE_ROWS]),
-        )
-        fresh = [candidate for candidate in candidates if candidate is not None]
-        log.info(
-            "browser-pc discovery rows=%d; DexScreener API fresh candidates=%d (all <= %.0fm)",
-            len(rows), len(fresh), SOURCE_MAX_AGE_MINUTES,
-        )
-        return fresh
-    except Exception as e:
-        log.warning("browser-pc error: %s", e)
-        return []
-
-
 def _synthesize_pair_dict(token: dict) -> dict:
     """Map Jupiter token fields to the DexScreener pair shape used downstream."""
     s1h = token.get("stats1h", {})
@@ -894,35 +715,6 @@ async def fetch_candidates_jupiter(http: httpx.AsyncClient) -> list[dict]:
     return candidates
 
 
-async def resolve_mint(name: str, http: httpx.AsyncClient) -> str | None:
-    """Search DexScreener for the coin name, return Solana mint address or None."""
-    try:
-        resp = await http.get(
-            "https://api.dexscreener.com/latest/dex/search",
-            params={"q": name},
-            timeout=10.0,
-        )
-        resp.raise_for_status()
-        pairs = resp.json().get("pairs") or []
-    except Exception as exc:
-        log.debug("DexScreener search failed for %s: %s", name, exc)
-        return None
-
-    for pair in pairs:
-        if not isinstance(pair, dict):
-            continue
-        if pair.get("chainId") != "solana":
-            continue
-        quote = pair.get("quoteToken", {})
-        if quote.get("address") != WRAPPED_SOL_MINT:
-            continue
-        mint = (pair.get("baseToken") or {}).get("address")
-        if mint and isinstance(mint, str):
-            log.info("RESOLVED %s \u2192 %s", name, mint)
-            return mint
-    return None
-
-
 # ── Screening ────────────────────────────────────────────────────────
 
 def _extract_creator_pct(report) -> float | None:
@@ -1006,14 +798,6 @@ async def screen_coin(
     mcap = coin.get("usd_market_cap")
     if not isinstance(mcap, (int, float)) or mcap <= 0:
         return False, f"age={age_min:.1f}m no usd_market_cap", gates
-    # MT-593: walk-forward validated mcap floor re-enforced at $5,100 (2 of 3
-    # iterations found mcap >= ~$5.1K; the tuner grid extended below the 10th
-    # percentile specifically to find this cut). The upper cap stays — an
-    # over-cap mcap is still rejected.
-    if mcap < MIN_MCAP_USD:
-        return False, (
-            f"age={age_min:.1f}m mcap=${mcap:.0f} < ${MIN_MCAP_USD:.0f} floor"
-        ), gates
     if mcap > MAX_MCAP_USD:
         return False, f"age={age_min:.1f}m mcap=${mcap:.0f} > ${MAX_MCAP_USD:.0f}", gates
     gates["mcap_pass"] = True
@@ -1076,9 +860,9 @@ async def screen_coin(
             if bs_ratio >= GATES.min_buy_sell_ratio:
                 gates["buy_sell_pass"] = True
         else:
-            log.warning("DexScreener: no API pair attached for %s", mint[:8])
+            log.warning("no pair metadata attached for %s", mint[:8])
     except Exception as exc:
-        log.warning("DexScreener search failed for %s: %s", mint[:8], exc)
+        log.warning("pair metadata lookup failed for %s: %s", mint[:8], exc)
 
     # MT-588: graduated-token preference. Bonding-curve pools charge 1.25%
     # DEX fees vs 0.25% on PumpSwap/Raydium, so a still-on-curve token must be
@@ -1202,7 +986,7 @@ async def screen_coin(
 
 
 def _pair_metadata(pair: dict) -> dict[str, object]:
-    """Store the DexScreener fields used to make this entry decision."""
+    """Store the synthesized pair fields used to make this entry decision."""
     created_ms = pair.get("pairCreatedAt")
     age_minutes = None
     if isinstance(created_ms, (int, float)) and created_ms > 0:
@@ -1686,11 +1470,19 @@ async def scan_loop(
             # 60s cadence. The per-candidate checks inside try_enter stay as a
             # defense-in-depth safety net.
             if utc_now.weekday() in BLOCKED_WEEKDAYS or utc_now.hour in BLOCKED_UTC_HOURS:
-                open_positions = await manager.get_all_open(mode="paper")
+                # MT-603: both calls are individually guarded so a transient DB
+                # error in the blocked branch can never kill the loop — and a
+                # failed position-count read still lets exit management run.
+                try:
+                    open_positions = await manager.get_all_open(mode="paper")
+                    open_count = len(open_positions)
+                except Exception as exc:
+                    log.error("BLOCKED window: position count failed: %s", exc, exc_info=True)
+                    open_count = -1
                 log.info(
                     "BLOCKED window active (weekday=%d hour=%d) — skipping discovery, "
                     "monitoring %d open position(s) at %ds cadence",
-                    utc_now.weekday(), utc_now.hour, len(open_positions),
+                    utc_now.weekday(), utc_now.hour, open_count,
                     BLOCKED_CHECK_INTERVAL_S,
                 )
                 try:
