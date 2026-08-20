@@ -47,7 +47,7 @@ from solders.signature import Signature
 from solders.system_program import TransferParams, transfer
 from solders.transaction import Transaction, VersionedTransaction
 
-from src.chain.jito import JitoBlockEngineClient
+from src.chain.jito import JITO_TIP_ACCOUNTS, JitoBlockEngineClient
 from src.chain.jupiter import LAMPORTS_PER_SOL, SOL_MINT
 from src.chain.priority_fee import FeeCallback
 
@@ -68,17 +68,6 @@ _PRIORITY_MAX_LAMPORTS = 1_000_000
 # RPC sendTransaction path with a warning log.
 USE_JITO_BUNDLES = True
 JITO_BLOCK_ENGINE_URL = "https://mainnet.block-engine.jito.wtf/api/v1/bundles"
-# Canonical Jito tip accounts (pick one at random per bundle).
-JITO_TIP_ACCOUNTS = (
-    "96gYZGLnJYVFmbjzopPSU6QiEV5fGqZNyN9nmNhvrZU5",
-    "HFqU5x63VTqvQss8hp11i4bVqkfRtQo3EZLFNi1Aqtg",
-    "Cw8CFyM9FkoMi7K7Crf6HNQqf4uEMzpKw6QNghXLvLkY",
-    "ADaUMid9yfUC5i4YSf4kAqoMfchVbswbPoz8CYmJRBpHt",
-    "DfXygSm4jCyNCybVYYK6DwvWqjKee8pbDmJGcLWNDXjh",
-    "ADuUkR4vqLUMWXxW9gh6D6L8pMSawimctcNZ5pGwDcEt",
-    "DttWaMuVvTiduZRnguLF7jNxTgiMBZ1hyAumKUiL2KRL",
-    "3AVi9Tg9Uo68tJfuvoKvqKNWKkC5wPdSSdeBnizKZ6jT",
-)
 # Minimum Jito tip: 0.001 SOL. The dynamic priority fee (75th percentile of
 # getRecentPrioritizationFees, microlamports) is the base; the tip is
 # max(dynamic_fee, MIN_JITO_TIP_LAMPORTS).
