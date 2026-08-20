@@ -5,11 +5,18 @@ from __future__ import annotations
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 import math
+import os
 
 import httpx
 
 
 DEXSCREENER_TOKEN_URL = "https://api.dexscreener.com/latest/dex/tokens/{mint_address}"
+# MT-602: Jupiter Price API V3. The V2 endpoint (/price/v2) is deprecated and
+# returns 404; V3 is the current endpoint with the same x-api-key auth and
+# the same per-mint usdPrice response (mints without a reliable price are
+# omitted entirely). vsToken is ignored by V3, so SOL denomination is derived
+# by batching the mint together with the SOL mint in one request.
+JUPITER_PRICE_URL = "https://api.jup.ag/price/v3"
 WRAPPED_SOL_MINT = "So11111111111111111111111111111111111111112"
 
 
@@ -147,25 +154,84 @@ def _safe_float(data: object, key: str, default: float = 0.0) -> float:
 
 
 class JupiterPriceProvider(PriceProvider):
+    """Jupiter Price API v3 mark provider (MT-602).
+
+    Returns the SOL-denominated price of a mint by batching the mint and the
+    wrapped-SOL mint into one price/v3 request and dividing the two USD
+    prices. Unknown or unreliable mints are omitted by the API — those return
+    None with a diagnostic reason so the caller decides how to handle them.
+    """
+
     @property
     def name(self) -> str:
         return "jupiter"
 
-    def __init__(self, client: "JupiterClient | None" = None, reference_sol: float = 0.01) -> None:
-        from src.chain.jupiter import JupiterClient
-        self._client = client or JupiterClient()
-        self._reference_sol = reference_sol
+    def __init__(
+        self,
+        price_url: str = JUPITER_PRICE_URL,
+        api_key: str | None = None,
+        http_client: httpx.AsyncClient | None = None,
+    ) -> None:
+        self._price_url = price_url
+        self._api_key = api_key if api_key is not None else os.environ.get("JUPITER_API_KEY", "")
+        self._client = http_client
 
     async def get_current_price(self, mint_address: str) -> float | None:
-        from src.core.models import Side
+        result = await self.get_price_with_diagnostic(mint_address)
+        return result.price_sol
+
+    async def get_price_with_diagnostic(self, mint_address: str) -> PriceResult:
+        client = self._client or httpx.AsyncClient(timeout=10.0)
+        headers = {"x-api-key": self._api_key} if self._api_key else {}
         try:
-            quote = await self._client.get_quote(mint_address, Side.BUY, self._reference_sol)
-            return quote.price_sol
-        except Exception:
-            return None
+            response = await client.get(
+                self._price_url,
+                params={"ids": f"{mint_address},{WRAPPED_SOL_MINT}"},
+                headers=headers,
+            )
+            response.raise_for_status()
+            data = response.json()
+        except httpx.TimeoutException:
+            return PriceResult(None, "provider_timeout")
+        except httpx.HTTPStatusError as exc:
+            if exc.response.status_code == 429:
+                return PriceResult(None, "rate_limited")
+            return PriceResult(None, "provider_error")
+        except httpx.HTTPError:
+            return PriceResult(None, "provider_error")
+        except ValueError:
+            return PriceResult(None, "malformed_response")
+        finally:
+            if self._client is None:
+                await client.aclose()
+
+        if not isinstance(data, dict):
+            return PriceResult(None, "malformed_response")
+
+        token_entry = data.get(mint_address)
+        sol_entry = data.get(WRAPPED_SOL_MINT)
+        if not isinstance(token_entry, dict):
+            return PriceResult(None, "no_price")
+        if not isinstance(sol_entry, dict):
+            return PriceResult(None, "no_sol_price")
+
+        token_usd = _safe_float(token_entry, "usdPrice", default=-1.0)
+        sol_usd = _safe_float(sol_entry, "usdPrice", default=-1.0)
+        if not math.isfinite(token_usd) or token_usd <= 0:
+            return PriceResult(None, "invalid_price")
+        if not math.isfinite(sol_usd) or sol_usd <= 0:
+            return PriceResult(None, "invalid_sol_price")
+
+        liquidity_usd = _safe_float(token_entry, "liquidity", default=-1.0)
+        return PriceResult(
+            token_usd / sol_usd,
+            "live_jupiter",
+            liquidity_usd=liquidity_usd if liquidity_usd >= 0 else None,
+        )
 
     async def close(self) -> None:
-        await self._client.close()
+        if self._client is not None:
+            await self._client.aclose()
 
 
 def _is_requested_mint_sol_pair(pair: dict[str, object], mint_address: str) -> bool:

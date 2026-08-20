@@ -110,7 +110,7 @@ from src.core.database import (
 from src.core.models import Side, Trade
 from src.execution.base import ExecutionAdapter
 from src.execution.paper import PaperExecutionAdapter
-from src.execution.price_provider import DexScreenerPriceProvider
+from src.execution.price_provider import JupiterPriceProvider
 from src.monitoring.alerts import send_imessage
 from src.monitoring.position_snapshots import snapshot_loop
 from src.risk.rugcheck import RugCheckClient, RugCheckResult
@@ -1267,7 +1267,7 @@ async def log_candidate(db_path: Path, coin: dict, gates: dict[str, bool], reaso
 async def try_enter(
     mint: str,
     ticker: str,
-    mark_provider: DexScreenerPriceProvider,
+    mark_provider: JupiterPriceProvider,
     adapter: PaperExecutionAdapter,
     manager: PositionManager,
     db_path: Path,
@@ -1350,7 +1350,7 @@ async def try_enter(
     price = await mark_provider.get_current_price(mint)
     timing["t_quote"] = time.monotonic()
     if price is None or price <= 0:
-        log.warning("SKIP %s ticker=%s \u2014 no valid DexScreener price", mint[:16], ticker)
+        log.warning("SKIP %s ticker=%s \u2014 no valid Jupiter price", mint[:16], ticker)
         log.debug("DEBUG ENTRY_EVAL mint=%s result=rejected reason=no_price", mint[:16])
         return None
 
@@ -1473,7 +1473,7 @@ async def try_enter(
 
 async def monitor_positions(
     manager: PositionManager,
-    mark_provider: DexScreenerPriceProvider,
+    mark_provider: JupiterPriceProvider,
     db_path: Path,
     gate_tuner: GateTuner | None = None,
     adapter: ExecutionAdapter | None = None,
@@ -1664,7 +1664,7 @@ def _log_lag_report() -> None:
 
 
 async def scan_loop(
-    mark_provider: DexScreenerPriceProvider,
+    mark_provider: JupiterPriceProvider,
     adapter: PaperExecutionAdapter,
     manager: PositionManager,
     db_path: Path,
@@ -2002,7 +2002,7 @@ async def scan_loop(
 
 async def monitor_loop(
     manager: PositionManager,
-    mark_provider: DexScreenerPriceProvider,
+    mark_provider: JupiterPriceProvider,
     db_path: Path,
     gate_tuner: GateTuner,
     adapter: ExecutionAdapter | None = None,
@@ -2066,7 +2066,7 @@ async def main() -> None:
     await gate_tuner.ensure_initial_config()
     await record_manual_freeze(db_path)
 
-    mark_provider = DexScreenerPriceProvider()
+    mark_provider = JupiterPriceProvider()
     # MT-544: EXECUTION_MODE selects the execution adapter. paper = current
     # behavior (default), shadow = paper + Jupiter quotes (MT-538), live =
     # real Jupiter swaps via src/execution/live.py.
