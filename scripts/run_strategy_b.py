@@ -201,6 +201,13 @@ TRAILING_ARM_PCT = 2.0
 TAKE_PROFIT_PCT = 150.0
 HARD_STOP_PCT = 8.0
 TIME_STOP_MINUTES = 10
+
+# Watch phase: don't evaluate tokens younger than this. The characterization
+# study validated signals using 2 minutes of accumulated activity data.
+# Evaluating tokens at 10 seconds old (6 txns) produces false positives
+# that dump immediately. By deferring, Jupiter returns the same token on
+# subsequent polls with updated activity, and the screen runs on real data.
+MIN_EVAL_AGE_S = 120
 ENTRY_CONFIRM_WINDOW_S = 90
 EARLY_EXIT_GREEN_PCT = 0.01
 # MT-537: UTC 21 added to the MT-516 blocked list (20:00-21:59 dead zone).
@@ -280,6 +287,8 @@ except ImportError:
 # been screened (passed or failed) and skipped on subsequent cycles until
 # the TTL expires. Expired entries are cleaned every cycle in scan_loop.
 seen_mints: dict[str, float] = {}
+watch_list: dict[str, dict] = {}  # mint -> {coin, ticker, created_ms, first_seen, last_updated}
+WATCH_STALE_S = 90  # If Jupiter stops returning a token for this long, screen with last data
 SEEN_MINTS_TTL = 3600  # 1 hour in seconds
 # MT-584: dedup-skip log lines are INFO once per mint (so the behavior is
 # verifiable in the log) and DEBUG afterwards (so the fast cadence does not
@@ -1286,10 +1295,30 @@ async def monitor_positions(
             await manager.close_position(pos.mint_address, mode="paper")
             continue
         current_price = await mark_provider.get_current_price(pos.mint_address)
-        if current_price is None:
-            continue
 
         age_min = (datetime.now(UTC) - pos.opened_at).total_seconds() / 60
+
+        # Time stop must fire even when the price provider returns None —
+        # otherwise unquotable tokens hold a capacity slot forever.
+        if current_price is None:
+            if age_min >= TIME_STOP_MINUTES:
+                log.warning(
+                    "TIME_STOP (no price) mint=%s age=%.1fm — closing unquotable position",
+                    pos.mint_address[:16], age_min,
+                )
+                close_price = pos.entry_price_sol
+                trade = await _adapter_close(pos, close_price, "time_stop", db_path, adapter)
+                if trade is not None:
+                    peak = peak_prices.pop(pos.mint_address, None)
+                    await manager.close_position(pos.mint_address, close_price, mode="paper", peak_price_sol=peak)
+                    log.info(
+                        "CLOSE [time_stop/no_price]: mint=%s entry=%.8f close=%.8f",
+                        pos.mint_address[:16], pos.entry_price_sol, close_price,
+                    )
+                else:
+                    log.error("CLOSE FAILED [time_stop/no_price]: mint=%s", pos.mint_address[:16])
+            continue
+
         entry = pos.entry_price_sol if pos.entry_price_sol > 0 else current_price
 
         prev_peak = peak_prices.get(pos.mint_address, entry)
@@ -1462,7 +1491,7 @@ async def scan_loop(
     tracked_wallets: list | None = None,
     test_mode: bool = False,
 ) -> None:
-    global seen_mints, cycle_number
+    global seen_mints, watch_list, cycle_number
     if tracked_wallets is None:
         tracked_wallets = []
     async with httpx.AsyncClient() as http:
@@ -1573,6 +1602,31 @@ async def scan_loop(
                         # volume stays bounded at the fast cadence; a passing
                         # mint always persists because its candidate row is
                         # required for entry marking.
+                        # Watch phase: tokens younger than MIN_EVAL_AGE_S go
+                        # into watch_list instead of being screened. Each poll
+                        # updates their activity data. When they hit the age
+                        # threshold (or Jupiter drops them), the sweep below
+                        # screens them with accumulated data.
+                        created_ms = coin.get("created_timestamp")
+                        if isinstance(created_ms, (int, float)) and created_ms > 0:
+                            token_age_s = now_ts - created_ms / 1000
+                            if token_age_s < MIN_EVAL_AGE_S:
+                                if mint not in watch_list:
+                                    watch_list[mint] = {
+                                        "coin": coin, "ticker": ticker,
+                                        "created_ms": created_ms,
+                                        "first_seen": now_ts,
+                                        "last_updated": now_ts,
+                                    }
+                                    log.info(
+                                        "WATCH_ADD %s (%s): age=%.0fs — deferring until %ds",
+                                        mint[:8], ticker, token_age_s, MIN_EVAL_AGE_S,
+                                    )
+                                else:
+                                    watch_list[mint]["coin"] = coin
+                                    watch_list[mint]["last_updated"] = now_ts
+                                continue
+
                         passed, reason, gates = await screen_coin(coin, http, _rugcheck)
                         # MT-584: mark evaluated (pass or fail) so the dedup
                         # check above skips it on subsequent cycles.
@@ -1732,6 +1786,54 @@ async def scan_loop(
                         slots_used = len(await manager.get_all_open(mode="paper"))
                         if slots_used >= MAX_OPEN:
                             break
+
+                # --- Watch list sweep: evaluate tokens that hit MIN_EVAL_AGE_S
+                # or went stale (Jupiter dropped them). Uses their latest
+                # cached activity data for screening.
+                for _w_mint in list(watch_list.keys()):
+                    _w = watch_list[_w_mint]
+                    _w_age = now_ts - _w["created_ms"] / 1000
+                    _w_stale = now_ts - _w["last_updated"]
+                    if _w_age < MIN_EVAL_AGE_S and _w_stale < WATCH_STALE_S:
+                        continue  # still watching
+                    # Ready to evaluate
+                    del watch_list[_w_mint]
+                    seen_mints[_w_mint] = now_ts
+                    _w_coin = _w["coin"]
+                    _w_ticker = _w["ticker"]
+                    if _w_stale >= WATCH_STALE_S and _w_age < MIN_EVAL_AGE_S:
+                        log.info("WATCH_STALE %s (%s): gone %.0fs, age=%.0fs — screening last data",
+                                 _w_mint[:8], _w_ticker, _w_stale, _w_age)
+                    else:
+                        log.info("WATCH_READY %s (%s): age=%.0fs, data_age=%.0fs",
+                                 _w_mint[:8], _w_ticker, _w_age, _w_stale)
+                    _w_passed, _w_reason, _w_gates = await screen_coin(_w_coin, http, _rugcheck)
+                    log.info("SCREEN %s (%s): %s [watch]", _w_ticker, _w_mint[:8], _w_reason)
+                    _w_cid = await log_candidate(db_path, _w_coin, _w_gates, _w_reason)
+                    for _gk in ("age_pass", "mcap_pass", "liquidity_pass", "score_pass",
+                                "txn_pass", "volume_pass", "vol_mcap_pass",
+                                "buy_sell_pass", "rugcheck_pass", "holder_pass"):
+                        if _w_gates.get(_gk):
+                            detailed[_gk] += 1
+                    if _w_gates.get("low_fees_pass") or _w_gates.get("low_fees_warn"):
+                        detailed["low_fees_warn_or_pass"] += 1
+                    if not _w_passed:
+                        continue
+                    detailed["full_screen_pass"] += 1
+                    if len(await manager.get_all_open(mode="paper")) >= MAX_OPEN:
+                        log.info("SKIP %s — capacity [watch]", _w_ticker)
+                        continue
+                    log.info("MENTIONS SKIPPED (on-chain only) — entry check for %s [watch]", _w_ticker)
+                    _w_timing = {"t_detect": first_seen_mono.get(_w_mint, time.monotonic()), "t_gate_pass": time.monotonic()}
+                    detailed["entry_attempts"] += 1
+                    _w_pos = await try_enter(
+                        _w_mint, _w_ticker, mark_provider, adapter, manager, db_path, 1.0,
+                        pair=_w_coin.get("pair"), timing=_w_timing, pool_sol=_w_coin.get("pool_sol"),
+                    )
+                    if _w_pos:
+                        await mark_strategy_candidate_entered(db_path, _w_cid, _w_pos)
+                        detailed["entered"] += 1
+                        log.info("ENTRY mint=%s ticker=%s [watch]", _w_mint[:16], _w_ticker)
 
                 main_blocker = max(main_blocker_count, key=main_blocker_count.get) if main_blocker_count else "none"
                 # MT-560: the per-cycle Gates line would flood the

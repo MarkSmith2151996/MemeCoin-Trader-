@@ -19,7 +19,7 @@ from src.strategy.exits import build_partial_exits
 # conditions, tuned via these module-level constants.
 PRIORITY_FEE_PER_LEG = 0.0002  # SOL priority fee per leg
 DEX_FEE_PCT = 0.01             # 1% bonding-curve fee per leg
-SLIPPAGE_PCT = 0.002           # 0.2% slippage per leg (MT-594 measured 0.187% median on 233 trades)
+SLIPPAGE_PCT = 0.00187         # 0.187% measured median per leg (MT-594, 233 matched trades Aug 6-8)
 
 
 def _estimated_round_trip_cost_sol(position: Position) -> float:
