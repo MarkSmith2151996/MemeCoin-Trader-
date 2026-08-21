@@ -5,9 +5,11 @@ Uses Jupiter Tokens V2 to scan fresh Solana tokens under 22 minutes old.
 SCAN (every 1s by default, STRATEGY_B_SCAN_INTERVAL in .env):
   1. Jupiter Tokens V2 discovers fresh, organic, and trending tokens
      (/toporganicscore/5m, /recent, /toptrending/5m — MT-588)
-  2. Screen through age/mcap/txns/vol/ratio/pool-depth/RugCheck/score gates
-  3. Grok mention check via 0-5min temporal bucket
-  4. Paper enter if mentions >= MIN_MENTIONS and slots available
+  2. Every candidate joins the watch list (MT-610); each poll refreshes its
+     activity data
+  3. The watch sweep re-screens every token aged 2-22 minutes through
+     age/mcap/txns/vol/ratio/pool-depth/RugCheck/score gates on every cycle
+  4. Paper enter if gates pass and slots available
 
 MONITOR (every 30s):
   5. Re-mark open positions and close on take-profit / hard-stop / time-stop
@@ -34,6 +36,15 @@ iterations; missing data passes), mcap floor re-enforced at $5,100 (2 of 3
 iterations), Wednesday re-blocked (paper: -0.72 SOL / 23.7% WR), and the
 bonding-curve strength threshold lowered 55 -> 40 (score gate useful in 1 of
 3 iterations; 937 FAIL:score was over-filtering).
+
+MT-610: continuous watch-list re-evaluation. Every Jupiter candidate joins the
+watch list and is re-screened on every poll cycle between 2 and 22 minutes of
+age — the backtest evaluates every bar in that window, so a token that fails
+the gates early (e.g. mcap under $5,100 at minute 2) can still enter once its
+activity data crosses the thresholds. Tokens are dropped when they age past
+22 minutes (MAX_AGE_SECONDS) or are permanently loss-banned; mints in open
+positions are skipped while the position is open. No extra Jupiter calls —
+watch data comes from the existing polls.
 
 MT-560: scan cadence reduced from 60s to 2s. The old 60s interval was legacy
 from the Chrome/DexScreener era, where every cycle needed an 8-second
@@ -107,14 +118,13 @@ from src.core.database import (
     record_strategy_candidate,
     record_trade,
 )
-from src.core.models import Side, Trade
+from src.core.models import PositionStatus, Side, Trade
 from src.execution.base import ExecutionAdapter
 from src.execution.paper import PaperExecutionAdapter
 from src.execution.price_provider import JupiterPriceProvider
 from src.monitoring.alerts import send_imessage
 from src.monitoring.position_snapshots import snapshot_loop
 from src.risk.rugcheck import RugCheckClient, RugCheckResult
-from src.signals.grok_xsearch import count_influencer_mentions, get_mentions_with_timestamps
 from src.strategy.gate_tuner import GateThresholds, GateTuner
 from src.strategy.position_manager import PositionManager
 
@@ -281,12 +291,18 @@ except ImportError:
     load_tracked_wallets = None
     log.warning("whale_tracker sizing unavailable — whale conviction sizing disabled")
 
-# MT-584: in-memory dedup of evaluated mints. A mint is marked once it has
-# been screened (passed or failed) and skipped on subsequent cycles until
-# the TTL expires. Expired entries are cleaned every cycle in scan_loop.
+# MT-584: in-memory dedup of mints dropped from the watch list. A mint is
+# marked once it ages past the 22-minute evaluation window or is permanently
+# loss-banned, and is skipped on subsequent cycles until the TTL expires.
+# Expired entries are cleaned every cycle in scan_loop.
 seen_mints: dict[str, float] = {}
 watch_list: dict[str, dict] = {}  # mint -> {coin, ticker, created_ms, first_seen, last_updated}
-WATCH_STALE_S = 90  # If Jupiter stops returning a token for this long, screen with last data
+# MT-610: tokens stay on the watch list from MIN_EVAL_AGE_S until
+# MAX_AGE_SECONDS, re-evaluated on every poll cycle — matching the backtest's
+# per-bar 0-22 minute evaluation window. Tokens are dropped when they age past
+# the cap (or earlier when permanently loss-banned). Watch data comes from the
+# existing polls, never extra Jupiter calls.
+MAX_AGE_SECONDS = 1320  # 22 minutes
 SEEN_MINTS_TTL = 3600  # 1 hour in seconds
 # MT-584: dedup-skip log lines are INFO once per mint (so the behavior is
 # verifiable in the log) and DEBUG afterwards (so the fast cadence does not
@@ -1586,11 +1602,9 @@ async def scan_loop(
                         ticker = coin["ticker"]
                         mint = coin["mint"]
 
-                        # MT-584: dedup — a mint evaluated this hour (passed
-                        # or failed screening) is skipped on subsequent cycles
-                        # until the TTL expires. INFO once per mint so the
-                        # dedup is verifiable, DEBUG thereafter to avoid
-                        # flooding the log at the fast cadence.
+                        # MT-584: dedup — mints dropped from the watch list
+                        # (aged past 22 minutes or loss-banned) are skipped for
+                        # the TTL instead of being re-admitted every cycle.
                         if mint in seen_mints:
                             if mint not in _dedup_skip_logged:
                                 _dedup_skip_logged.add(mint)
@@ -1599,223 +1613,145 @@ async def scan_loop(
                                 log.debug("skipping %s (%s), already evaluated", mint[:8], ticker)
                             continue
 
-                        # MT-566: no screening cooldown — RugCheck is cached per
-                        # token, so gate re-evaluation runs every cycle (~0ms)
-                        # and a token enters on the cycle where it becomes
-                        # eligible (fixes the ~46s `gates` latency from the
-                        # MT-560 cooldown). candidate_log inserts and the
-                        # SCREEN log line stay throttled per mint so DB/log
-                        # volume stays bounded at the fast cadence; a passing
-                        # mint always persists because its candidate row is
-                        # required for entry marking.
-                        # Watch phase: tokens younger than MIN_EVAL_AGE_S go
-                        # into watch_list instead of being screened. Each poll
-                        # updates their activity data. When they hit the age
-                        # threshold (or Jupiter drops them), the sweep below
-                        # screens them with accumulated data.
                         created_ms = coin.get("created_timestamp")
-                        if isinstance(created_ms, (int, float)) and created_ms > 0:
-                            token_age_s = now_ts - created_ms / 1000
-                            if token_age_s < MIN_EVAL_AGE_S:
-                                if mint not in watch_list:
-                                    watch_list[mint] = {
-                                        "coin": coin, "ticker": ticker,
-                                        "created_ms": created_ms,
-                                        "first_seen": now_ts,
-                                        "last_updated": now_ts,
-                                    }
-                                    log.info(
-                                        "WATCH_ADD %s (%s): age=%.0fs — deferring until %ds",
-                                        mint[:8], ticker, token_age_s, MIN_EVAL_AGE_S,
-                                    )
-                                else:
-                                    watch_list[mint]["coin"] = coin
-                                    watch_list[mint]["last_updated"] = now_ts
-                                continue
-
-                        passed, reason, gates = await screen_coin(coin, http, _rugcheck)
-                        # MT-584: mark evaluated (pass or fail) so the dedup
-                        # check above skips it on subsequent cycles.
-                        seen_mints[mint] = now_ts
-                        last_persisted = _last_candidate_log.get(mint, 0.0)
-                        if now_ts - last_persisted >= SCREEN_LOG_COOLDOWN_S or passed:
-                            _last_candidate_log[mint] = now_ts
-                            log.info("SCREEN %s (%s): %s", ticker, mint[:8], reason)
-                            candidate_id = await log_candidate(db_path, coin, gates, reason)
-                        else:
-                            candidate_id = None
-                            log.debug(
-                                "SCREEN %s (%s): %s (persist throttled)",
-                                ticker, mint[:8], reason,
-                            )
-
-                        # MT-563: discovery-lag telemetry — how old is this token
-                        # (per its firstPool.createdAt) when we first saw it in a
-                        # Jupiter API response? Recorded once per mint per process
-                        # for every screened candidate, passed or rejected, with
-                        # the first failing gate as the "why" on rejection.
-                        if mint not in _lag_logged:
-                            _lag_logged.add(mint)
-                            created_ms = coin.get("created_timestamp")
-                            detected_epoch = first_seen_epoch.get(mint, now_ts)
-                            if isinstance(created_ms, (int, float)) and created_ms > 0:
-                                lag_s = max(0.0, detected_epoch - created_ms / 1000)
-                                source = coin.get("token_source", "unknown")
-                                _lag_window.append(lag_s)
-                                _lag_by_source.setdefault(source, deque(maxlen=100)).append(lag_s)
-                                try:
-                                    await record_discovery_lag(
-                                        db_path,
-                                        mint_address=mint,
-                                        token_source=source,
-                                        created_at=datetime.fromtimestamp(
-                                            created_ms / 1000, tz=UTC,
-                                        ).isoformat(),
-                                        detected_at=datetime.fromtimestamp(
-                                            detected_epoch, tz=UTC,
-                                        ).isoformat(),
-                                        lag_seconds=lag_s,
-                                        passed_gates=passed,
-                                    )
-                                except Exception as exc:
-                                    log.warning("discovery_lag persist failed mint=%s: %s", mint[:8], exc)
-                                log.info(
-                                    "DISCOVERY_LAG mint=%s source=%s created=%d detected=%d lag=%.0fs gates=%s",
-                                    mint, source, int(created_ms / 1000), int(detected_epoch), lag_s,
-                                    "PASS" if passed else f"FAIL:{_first_failed_gate(gates)}",
-                                )
-                                if len(_lag_window) % _lag_summary_every == 0:
-                                    _log_lag_report()
-
-                        # Aggregate per-gate diagnostics
-                        for gk in ("age_pass", "mcap_pass", "liquidity_pass", "score_pass",
-                                   "txn_pass", "volume_pass", "vol_mcap_pass",
-                                   "buy_sell_pass", "rugcheck_pass", "holder_pass"):
-                            if gates.get(gk):
-                                detailed[gk] += 1
-                        if gates.get("low_fees_pass") or gates.get("low_fees_warn"):
-                            detailed["low_fees_warn_or_pass"] += 1
-
-                        if not passed:
-                            # Identify the main blocker from the reason string
-                            blockers = ["liquidity_pass", "score_pass",
-                                         "txn_pass", "volume_pass", "vol_mcap_pass",
-                                         "low_fees_pass", "buy_sell_pass", "rugcheck_pass",
-                                         "holder_pass", "creator_pass", "time_pass"]
-                            for bk in blockers:
-                                if not gates.get(bk, True):
-                                    main_blocker_count[bk] = main_blocker_count.get(bk, 0) + 1
-                                    break
+                        if not isinstance(created_ms, (int, float)) or created_ms <= 0:
+                            continue
+                        token_age_s = now_ts - created_ms / 1000
+                        if token_age_s >= MAX_AGE_SECONDS:
                             continue
 
-                        detailed["full_screen_pass"] += 1
-
-                        # MT-560: per-trade pipeline timing baseline. t_detect is
-                        # the first API sighting; t_gate_pass now. try_enter stamps
-                        # quote/send/confirm and logs the LATENCY line on entry.
-                        timing = {
-                            "t_detect": first_seen_mono.get(mint, time.monotonic()),
-                            "t_gate_pass": time.monotonic(),
-                        }
-
-                        if len(await manager.get_all_open(mode="paper")) >= MAX_OPEN:
-                            log.info("SKIP %s — strategy capacity reached", ticker)
-                            continue
-
-                        if REQUIRE_MENTIONS:
-                            launched_at = datetime.fromtimestamp(
-                                coin["created_timestamp"] / 1000, tz=UTC,
-                            )
-                            if USE_INFLUENCER_MENTIONS:
-                                infl_data = await count_influencer_mentions(
-                                    ticker, mint, launched_at, window_minutes=15,
-                                )
-                                pipe_stats["grok_reached"] += 1
-                                infl_count = infl_data["total"]
-                                if infl_count < 1:
-                                    log.info(
-                                        "SKIP %s \u2014 %d influencer mentions (need >= 1)",
-                                        ticker, infl_count,
-                                    )
-                                    continue
-                                log.info(
-                                    "PASS %s \u2014 %d influencer mentions (accounts: %s)",
-                                    ticker, infl_count, infl_data["accounts_mentioned"],
-                                )
-                            else:
-                                mention_data = await get_mentions_with_timestamps(
-                                    ticker, mint, launched_at, hours=1,
-                                )
-                                pipe_stats["grok_reached"] += 1
-                                early_mentions = mention_data.get("mentions_0_5min", 0)
-                                if early_mentions < MIN_MENTIONS:
-                                    log.info(
-                                        "SKIP %s \u2014 %d early mentions (need %d)",
-                                        ticker, early_mentions, MIN_MENTIONS,
-                                    )
-                                    continue
-                                log.info(
-                                    "PASS %s \u2014 %d early mentions", ticker, early_mentions,
-                                )
+                        # MT-610: every Jupiter candidate goes into the watch
+                        # list; each poll refreshes its accumulated activity
+                        # data. The sweep below re-evaluates watch tokens on
+                        # every cycle from MIN_EVAL_AGE_S until
+                        # MAX_AGE_SECONDS — no one-shot screen here. A token
+                        # that fails the gates now can pass later once its
+                        # mcap/volume/score cross the thresholds.
+                        if mint in watch_list:
+                            watch_list[mint]["coin"] = coin
+                            watch_list[mint]["last_updated"] = now_ts
                         else:
+                            watch_list[mint] = {
+                                "coin": coin, "ticker": ticker,
+                                "created_ms": created_ms,
+                                "first_seen": now_ts,
+                                "last_updated": now_ts,
+                            }
                             log.info(
-                                "MENTIONS SKIPPED (on-chain only mode) \u2014 proceeding to entry check for %s",
-                                ticker,
+                                "WATCH_ADD %s (%s): age=%.0fs — re-evaluating "
+                                "every cycle until %.0fs cap",
+                                mint[:8], ticker, token_age_s, MAX_AGE_SECONDS,
                             )
 
-                        size_multiplier = 1.0
-                        # MT-524: whale conviction sizing disabled project-wide — the
-                        # signal proved useless for trade decisions while burning Helius
-                        # credits. Code kept intact for re-enable when Helius integration
-                        # is built into the entry pipeline (WHALE_SIZE_MULTIPLIERS in
-                        # src/signals/whale_tracker.py:319).
-                        # if get_whale_signal is not None:
-                        #     try:
-                        #         whale_data = await get_whale_signal(mint, tracked_wallets, http)
-                        #         whale_count = whale_data.get("whale_count", 0)
-                        #         size_multiplier = whale_data.get("size_multiplier", 1.0)
-                        #         if whale_count > 0:
-                        #             log.info("🐋 WHALE SIGNAL: %d whale(s) in %s — size multiplier: %.1fx", whale_count, ticker, size_multiplier)
-                        #     except Exception as e:
-                        #         log.debug("Whale check failed (non-fatal): %s", e)
-
-                        detailed["entry_attempts"] += 1
-                        position_id = await try_enter(
-                            mint, ticker, mark_provider, adapter, manager, db_path, size_multiplier,
-                            pair=coin.get("pair"), timing=timing,
-                            pool_sol=coin.get("pool_sol"),
+                # --- Watch list sweep (MT-610): re-evaluate every watch token
+                # whose age is between MIN_EVAL_AGE_S and MAX_AGE_SECONDS on
+                # every poll cycle, matching the backtest's per-bar 0-22 minute
+                # evaluation window. Tokens stay on the watch list until they
+                # pass (entry attempted), age past the cap, or are permanently
+                # loss-banned. Failed tokens are re-evaluated next cycle with
+                # the freshest polled data — no extra Jupiter calls.
+                try:
+                    open_positions = await manager.get_all_open(mode="paper")
+                except Exception as exc:
+                    log.error("watch sweep: open-position read failed: %s", exc, exc_info=True)
+                    open_positions = []
+                open_mints = {p.mint_address for p in open_positions}
+                open_count = len(open_positions)
+                _loss_banned: set[str] = set()
+                try:
+                    async with aiosqlite.connect(db_path) as _db:
+                        _cursor = await _db.execute(
+                            "SELECT DISTINCT mint_address FROM positions"
+                            " WHERE status = ? AND realized_pnl_sol < 0",
+                            (PositionStatus.CLOSED.value,),
                         )
-                        if position_id:
-                            await mark_strategy_candidate_entered(db_path, candidate_id, position_id)
-                            detailed["entered"] += 1
-                            log.info("ENTRY mint=%s ticker=%s", mint[:16], ticker)
-                        slots_used = len(await manager.get_all_open(mode="paper"))
-                        if slots_used >= MAX_OPEN:
-                            break
+                        _rows = await _cursor.fetchall()
+                        await _cursor.close()
+                    _loss_banned = {r[0] for r in _rows}
+                except Exception as exc:
+                    log.error("watch sweep: loss-ban lookup failed: %s", exc, exc_info=True)
+                if _loss_banned:
+                    log.debug("watch sweep: %d loss-banned mints", len(_loss_banned))
 
-                # --- Watch list sweep: evaluate tokens that hit MIN_EVAL_AGE_S
-                # or went stale (Jupiter dropped them). Uses their latest
-                # cached activity data for screening.
                 for _w_mint in list(watch_list.keys()):
                     _w = watch_list[_w_mint]
                     _w_age = now_ts - _w["created_ms"] / 1000
-                    _w_stale = now_ts - _w["last_updated"]
-                    if _w_age < MIN_EVAL_AGE_S and _w_stale < WATCH_STALE_S:
-                        continue  # still watching
-                    # Ready to evaluate
-                    del watch_list[_w_mint]
-                    seen_mints[_w_mint] = now_ts
+                    if _w_age < MIN_EVAL_AGE_S:
+                        continue  # still accumulating activity data
+                    if _w_age > MAX_AGE_SECONDS:
+                        del watch_list[_w_mint]
+                        seen_mints[_w_mint] = now_ts
+                        log.info(
+                            "WATCH_EXPIRE %s (%s): age=%.0fs > %.0fs cap — dropped",
+                            _w_mint[:8], _w["ticker"], _w_age, MAX_AGE_SECONDS,
+                        )
+                        continue
+                    if _w_mint in open_mints:
+                        continue  # already entered — skip while the position is open
+                    if _w_mint in _loss_banned:
+                        del watch_list[_w_mint]
+                        seen_mints[_w_mint] = now_ts
+                        log.info(
+                            "WATCH_BAN %s (%s): prior losing close — dropped",
+                            _w_mint[:8], _w["ticker"],
+                        )
+                        continue
                     _w_coin = _w["coin"]
                     _w_ticker = _w["ticker"]
-                    if _w_stale >= WATCH_STALE_S and _w_age < MIN_EVAL_AGE_S:
-                        log.info("WATCH_STALE %s (%s): gone %.0fs, age=%.0fs — screening last data",
-                                 _w_mint[:8], _w_ticker, _w_stale, _w_age)
-                    else:
-                        log.info("WATCH_READY %s (%s): age=%.0fs, data_age=%.0fs",
-                                 _w_mint[:8], _w_ticker, _w_age, _w_stale)
                     _w_passed, _w_reason, _w_gates = await screen_coin(_w_coin, http, _rugcheck)
-                    log.info("SCREEN %s (%s): %s [watch]", _w_ticker, _w_mint[:8], _w_reason)
-                    _w_cid = await log_candidate(db_path, _w_coin, _w_gates, _w_reason)
+                    # SCREEN logging + candidate_log persistence stay throttled
+                    # per mint (MT-566); a passing mint always persists because
+                    # its candidate row is required for entry marking.
+                    _w_last = _last_candidate_log.get(_w_mint, 0.0)
+                    if now_ts - _w_last >= SCREEN_LOG_COOLDOWN_S or _w_passed:
+                        _last_candidate_log[_w_mint] = now_ts
+                        log.info("SCREEN %s (%s): %s [watch]", _w_ticker, _w_mint[:8], _w_reason)
+                        _w_cid = await log_candidate(db_path, _w_coin, _w_gates, _w_reason)
+                    else:
+                        _w_cid = None
+                        log.debug(
+                            "SCREEN %s (%s): %s [watch] (persist throttled)",
+                            _w_ticker, _w_mint[:8], _w_reason,
+                        )
+
+                    # MT-563: discovery-lag telemetry — recorded once per mint
+                    # per process on its first watch evaluation, with the first
+                    # failing gate as the "why" on rejection.
+                    if _w_mint not in _lag_logged:
+                        _lag_logged.add(_w_mint)
+                        created_ms = _w_coin.get("created_timestamp")
+                        detected_epoch = first_seen_epoch.get(_w_mint, now_ts)
+                        if isinstance(created_ms, (int, float)) and created_ms > 0:
+                            lag_s = max(0.0, detected_epoch - created_ms / 1000)
+                            source = _w_coin.get("token_source", "unknown")
+                            _lag_window.append(lag_s)
+                            _lag_by_source.setdefault(source, deque(maxlen=100)).append(lag_s)
+                            try:
+                                await record_discovery_lag(
+                                    db_path,
+                                    mint_address=_w_mint,
+                                    token_source=source,
+                                    created_at=datetime.fromtimestamp(
+                                        created_ms / 1000, tz=UTC,
+                                    ).isoformat(),
+                                    detected_at=datetime.fromtimestamp(
+                                        detected_epoch, tz=UTC,
+                                    ).isoformat(),
+                                    lag_seconds=lag_s,
+                                    passed_gates=_w_passed,
+                                )
+                            except Exception as exc:
+                                log.warning("discovery_lag persist failed mint=%s: %s", _w_mint[:8], exc)
+                            log.info(
+                                "DISCOVERY_LAG mint=%s source=%s created=%d detected=%d lag=%.0fs gates=%s",
+                                _w_mint, source, int(created_ms / 1000), int(detected_epoch), lag_s,
+                                "PASS" if _w_passed else f"FAIL:{_first_failed_gate(_w_gates)}",
+                            )
+                            if len(_lag_window) % _lag_summary_every == 0:
+                                _log_lag_report()
+
+                    # Aggregate per-gate diagnostics (counts evaluations — a
+                    # watch token that passes repeatedly is counted each cycle).
                     for _gk in ("age_pass", "mcap_pass", "liquidity_pass", "score_pass",
                                 "txn_pass", "volume_pass", "vol_mcap_pass",
                                 "buy_sell_pass", "rugcheck_pass", "holder_pass"):
@@ -1823,10 +1759,21 @@ async def scan_loop(
                             detailed[_gk] += 1
                     if _w_gates.get("low_fees_pass") or _w_gates.get("low_fees_warn"):
                         detailed["low_fees_warn_or_pass"] += 1
+
                     if not _w_passed:
-                        continue
+                        # Identify the main blocker from the reason string
+                        blockers = ["liquidity_pass", "score_pass",
+                                     "txn_pass", "volume_pass", "vol_mcap_pass",
+                                     "low_fees_pass", "buy_sell_pass", "rugcheck_pass",
+                                     "holder_pass", "creator_pass", "time_pass"]
+                        for bk in blockers:
+                            if not _w_gates.get(bk, True):
+                                main_blocker_count[bk] = main_blocker_count.get(bk, 0) + 1
+                                break
+                        continue  # stays on the watch list — re-evaluated next cycle
+
                     detailed["full_screen_pass"] += 1
-                    if len(await manager.get_all_open(mode="paper")) >= MAX_OPEN:
+                    if open_count >= MAX_OPEN:
                         log.info("SKIP %s — capacity [watch]", _w_ticker)
                         continue
                     log.info("MENTIONS SKIPPED (on-chain only) — entry check for %s [watch]", _w_ticker)
@@ -1839,8 +1786,9 @@ async def scan_loop(
                     if _w_pos:
                         await mark_strategy_candidate_entered(db_path, _w_cid, _w_pos)
                         detailed["entered"] += 1
+                        open_count += 1
+                        open_mints.add(_w_mint)
                         log.info("ENTRY mint=%s ticker=%s [watch]", _w_mint[:16], _w_ticker)
-
                 main_blocker = max(main_blocker_count, key=main_blocker_count.get) if main_blocker_count else "none"
                 # MT-560: the per-cycle Gates line would flood the
                 # log 30x/min — full line every GATES_LOG_EVERY cycles, DEBUG
