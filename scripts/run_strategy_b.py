@@ -1596,6 +1596,11 @@ async def scan_loop(
                 # Candidate telemetry is collected even at capacity; only entries are capped.
                 candidates = await fetch_candidates_jupiter(http)
                 detailed["total"] = len(candidates)
+                # MT-612: mints that appeared in this poll. The watch sweep only
+                # re-evaluates tokens with fresh Jupiter data — no new data, no
+                # screen_coin call. This matches the backtest, which only
+                # evaluates a bar when a new bar exists.
+                _polled_mints = {c["mint"] for c in candidates}
                 if candidates:
 
                     for coin in candidates:
@@ -1643,13 +1648,15 @@ async def scan_loop(
                                 mint[:8], ticker, token_age_s, MAX_AGE_SECONDS,
                             )
 
-                # --- Watch list sweep (MT-610): re-evaluate every watch token
+                # --- Watch list sweep (MT-610): re-evaluate watch tokens
                 # whose age is between MIN_EVAL_AGE_S and MAX_AGE_SECONDS on
                 # every poll cycle, matching the backtest's per-bar 0-22 minute
                 # evaluation window. Tokens stay on the watch list until they
                 # pass (entry attempted), age past the cap, or are permanently
-                # loss-banned. Failed tokens are re-evaluated next cycle with
-                # the freshest polled data — no extra Jupiter calls.
+                # loss-banned. MT-612: only tokens that appeared in the latest
+                # Jupiter poll are re-screened — a token missing from the poll
+                # stays on the list (it may reappear with fresh data next poll)
+                # but is not re-evaluated with unchanged data.
                 try:
                     open_positions = await manager.get_all_open(mode="paper")
                 except Exception as exc:
@@ -1694,6 +1701,19 @@ async def scan_loop(
                         log.info(
                             "WATCH_BAN %s (%s): prior losing close — dropped",
                             _w_mint[:8], _w["ticker"],
+                        )
+                        continue
+                    # MT-612: no fresh Jupiter data for this token this poll —
+                    # keep it on the watch list (it may reappear with updated
+                    # activity next poll) but skip re-evaluation. Re-screening
+                    # with unchanged data was re-screening SUPERCYCLE 19 times
+                    # over 14 minutes with identical results, choking the loop
+                    # (cycle time 1s -> 45s).
+                    if _w_mint not in _polled_mints:
+                        log.debug(
+                            "WATCH_HOLD %s (%s): not in latest Jupiter poll — "
+                            "skipping evaluation",
+                            _w_ticker, _w_mint[:8],
                         )
                         continue
                     _w_coin = _w["coin"]
