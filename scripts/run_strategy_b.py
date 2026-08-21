@@ -42,7 +42,9 @@ watch list and is re-screened on every poll cycle between 2 and 22 minutes of
 age — the backtest evaluates every bar in that window, so a token that fails
 the gates early (e.g. mcap under $5,100 at minute 2) can still enter once its
 activity data crosses the thresholds. Tokens are dropped when they age past
-22 minutes (MAX_AGE_SECONDS) or are permanently loss-banned; mints in open
+22 minutes (MAX_AGE_SECONDS), hit the per-token evaluation cap of 240
+(MAX_WATCH_EVALS — the backtest's natural ceiling of one evaluation per 5s
+bar over 20 minutes), or are permanently loss-banned; mints in open
 positions are skipped while the position is open. No extra Jupiter calls —
 watch data comes from the existing polls.
 
@@ -303,6 +305,13 @@ watch_list: dict[str, dict] = {}  # mint -> {coin, ticker, created_ms, first_see
 # the cap (or earlier when permanently loss-banned). Watch data comes from the
 # existing polls, never extra Jupiter calls.
 MAX_AGE_SECONDS = 1320  # 22 minutes
+# MT-614: per-token evaluation cap matching the backtest's natural ceiling.
+# The backtest evaluates a token at most once per 5-second bar over its
+# 20-minute eligible window = 240 evaluations max. Live, a popular token is
+# polled (and thus re-evaluated) every cycle; without this cap PIXELCAT was
+# evaluated 12,263 times. A token is dropped after 240 actual screen_coin
+# evaluations even if it is still under the age cap.
+MAX_WATCH_EVALS = 240
 SEEN_MINTS_TTL = 3600  # 1 hour in seconds
 # MT-584: dedup-skip log lines are INFO once per mint (so the behavior is
 # verifiable in the log) and DEBUG afterwards (so the fast cadence does not
@@ -1641,6 +1650,7 @@ async def scan_loop(
                                 "created_ms": created_ms,
                                 "first_seen": now_ts,
                                 "last_updated": now_ts,
+                                "evals": 0,
                             }
                             log.info(
                                 "WATCH_ADD %s (%s): age=%.0fs — re-evaluating "
@@ -1693,6 +1703,21 @@ async def scan_loop(
                             _w_mint[:8], _w["ticker"], _w_age, MAX_AGE_SECONDS,
                         )
                         continue
+                    # MT-614: per-token evaluation cap. The backtest evaluates
+                    # a token at most 240 times (once per 5s bar over its
+                    # eligible window); live, a token polled every cycle would
+                    # be re-evaluated thousands of times (PIXELCAT: 12,263).
+                    # Drop once the counter hits the cap — the 240th
+                    # evaluation already ran last cycle.
+                    if _w.get("evals", 0) >= MAX_WATCH_EVALS:
+                        del watch_list[_w_mint]
+                        seen_mints[_w_mint] = now_ts
+                        log.info(
+                            "WATCH_EVAL_CAP %s (%s): %d evals >= %d cap — dropped",
+                            _w_mint[:8], _w["ticker"], _w.get("evals", 0),
+                            MAX_WATCH_EVALS,
+                        )
+                        continue
                     if _w_mint in open_mints:
                         continue  # already entered — skip while the position is open
                     if _w_mint in _loss_banned:
@@ -1713,12 +1738,15 @@ async def scan_loop(
                         log.debug(
                             "WATCH_HOLD %s (%s): not in latest Jupiter poll — "
                             "skipping evaluation",
-                            _w_ticker, _w_mint[:8],
+                            _w["ticker"], _w_mint[:8],
                         )
                         continue
                     _w_coin = _w["coin"]
                     _w_ticker = _w["ticker"]
                     _w_passed, _w_reason, _w_gates = await screen_coin(_w_coin, http, _rugcheck)
+                    # MT-614: count actual screen_coin evaluations per token
+                    # (the cap drop check above uses this counter).
+                    watch_list[_w_mint]["evals"] = _w.get("evals", 0) + 1
                     # SCREEN logging + candidate_log persistence stay throttled
                     # per mint (MT-566); a passing mint always persists because
                     # its candidate row is required for entry marking.
