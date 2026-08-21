@@ -171,7 +171,7 @@ def test_strategy_b_hard_stop_closes_at_trigger_price(db: Path) -> None:
     manager = FakeManager([make_position(entry=1.0)])
     strategy_b.peak_prices.clear()
     danger = asyncio.run(strategy_b.monitor_positions(manager, FakePrice(0.65), db))
-    trigger = 1.0 - strategy_b.HARD_STOP_PCT / 100
+    trigger = strategy_b.HARD_STOP_MULTIPLIER
     assert manager.closed_with == [("Mint1", trigger, 1.0)]
     assert sell_trades(db) == [(trigger, "hard_stop")]
     assert danger is False
@@ -214,13 +214,13 @@ def test_trailing_stop_arms_above_entry_plus_2pct(db: Path) -> None:
     assert sell_trades(db) == [(0.98, "trailing_stop")]
 
 
-def test_strategy_b_trailing_stop_uses_tuned_threshold(db: Path) -> None:
+def test_strategy_b_trailing_stop_matches_backtest_stop_price(db: Path) -> None:
     manager = FakeManager([make_position(entry=1.0, opened_minutes_ago=0.5)])
     strategy_b.peak_prices.clear()
-    strategy_b.peak_prices["Mint1"] = 1.05
-    danger = asyncio.run(strategy_b.monitor_positions(manager, FakePrice(0.99), db))
-    assert manager.closed_with == [("Mint1", 0.99, 1.05)]
-    assert sell_trades(db) == [(0.99, "trailing_stop")]
+    strategy_b.peak_prices["Mint1"] = 1.02
+    danger = asyncio.run(strategy_b.monitor_positions(manager, FakePrice(0.999), db))
+    assert manager.closed_with == [("Mint1", 0.9996, 1.02)]
+    assert sell_trades(db) == [(0.9996, "trailing_stop")]
     assert danger is False
 
 
@@ -254,19 +254,19 @@ def test_no_early_exit_when_position_went_green(db: Path) -> None:
     assert danger is False
 
 
-def test_strategy_b_early_exit_when_never_green_within_90s(db: Path) -> None:
+def test_strategy_b_does_not_early_exit_before_backtest_time_stop(db: Path) -> None:
     manager = FakeManager([make_position(entry=1.0, opened_minutes_ago=2.0)])
     strategy_b.peak_prices.clear()
     danger = asyncio.run(strategy_b.monitor_positions(manager, FakePrice(0.99), db))
-    assert manager.closed_with == [("Mint1", 0.99, 1.0)]
-    assert sell_trades(db) == [(0.99, "early_exit_no_green")]
+    assert manager.closed_with == []
+    assert sell_trades(db) == []
     assert danger is False
 
 
-def test_strategy_b_take_profit_uses_tuned_threshold(db: Path) -> None:
+def test_strategy_b_take_profit_matches_backtest_multiplier(db: Path) -> None:
     manager = FakeManager([make_position(entry=1.0)])
     strategy_b.peak_prices.clear()
-    trigger = 1.0 + strategy_b.TAKE_PROFIT_PCT / 100
+    trigger = strategy_b.TAKE_PROFIT_MULTIPLIER
     danger = asyncio.run(strategy_b.monitor_positions(manager, FakePrice(trigger + 0.01), db))
     assert manager.closed_with == [("Mint1", trigger, trigger + 0.01)]
     assert sell_trades(db) == [(trigger, "take_profit")]

@@ -194,12 +194,12 @@ SCREEN_LOG_COOLDOWN_S = 45
 # log 30x/min. Logged at INFO every GATES_LOG_EVERY cycles (~60s), DEBUG in
 # between; the console print follows the same throttle.
 GATES_LOG_EVERY = 30
-# MT-553: optimized exit params from the MT-552 sweep (2% trail / 150% TP / 8%
-# hard stop) — +8.75 SOL vs +6.18 SOL baseline, PF 4.17 -> 7.63.
-TRAILING_STOP_PCT = 2.0
-TRAILING_ARM_PCT = 2.0
-TAKE_PROFIT_PCT = 150.0
-HARD_STOP_PCT = 8.0
+# MT-607: match capacity_sweep_bt.py exactly: 2.5x TP, 0.92x hard stop,
+# 1.02x trailing arm with a 0.98x-from-peak stop, and a 10-minute time stop.
+TRAILING_STOP_MULTIPLIER = 0.98
+TRAILING_ARM_MULTIPLIER = 1.02
+TAKE_PROFIT_MULTIPLIER = 2.5
+HARD_STOP_MULTIPLIER = 0.92
 TIME_STOP_MINUTES = 10
 
 # Watch phase: don't evaluate tokens younger than this. The characterization
@@ -208,8 +208,6 @@ TIME_STOP_MINUTES = 10
 # that dump immediately. By deferring, Jupiter returns the same token on
 # subsequent polls with updated activity, and the screen runs on real data.
 MIN_EVAL_AGE_S = 120
-ENTRY_CONFIRM_WINDOW_S = 90
-EARLY_EXIT_GREEN_PCT = 0.01
 # MT-537: UTC 21 added to the MT-516 blocked list (20:00-21:59 dead zone).
 BLOCKED_UTC_HOURS = frozenset({0, 19, 20, 21})
 # MT-593: Wednesday (weekday 2) re-blocked. MT-590 lifted it, but paper data
@@ -572,9 +570,10 @@ def _candidate_strength_score(coin: dict, age_min: float) -> float:
     """
     pair = coin.get("pair") or {}
     h1 = (pair.get("txns") or {}).get("h1") or {}
-    buys = int(h1.get("buys") or 0)
-    sells = int(h1.get("sells") or 0)
-    txns = buys + sells
+    txns = int(h1.get("buys") or 0) + int(h1.get("sells") or 0)
+    raw_stats = ((coin.get("token") or {}).get("stats1h") or {})
+    buys = float(raw_stats.get("buyVolume", h1.get("buys")) or 0)
+    sells = float(raw_stats.get("sellVolume", h1.get("sells")) or 0)
     vol = float((pair.get("volume") or {}).get("h1") or 0)
     mcap = float(coin.get("usd_market_cap") or 0)
     bs_ratio = buys / max(sells, 1)
@@ -711,7 +710,9 @@ async def fetch_candidates_jupiter(http: httpx.AsyncClient) -> list[dict]:
             "created_timestamp": created_timestamp,
             "volume": (stats_1h.get("buyVolume", 0) or 0) + (stats_1h.get("sellVolume", 0) or 0),
             "txns": buys + sells,
-            "buy_sell_ratio": buys / max(sells, 1),
+            "buy_sell_ratio": (stats_1h.get("buyVolume", buys) or 0) / max(
+                stats_1h.get("sellVolume", sells) or 0, 1
+            ),
             "liquidity": float(token.get("liquidity", 0) or 0),
             "source_age_minutes": age_minutes,
             "pair": _synthesize_pair_dict(token),
@@ -790,6 +791,7 @@ async def screen_coin(
         "rugcheck_pass": False,
         "holder_pass": False,
         "creator_pass": True,
+        "time_pass": False,
         # MT-588: pool-depth floor (replaces the $5K mcap floor) and the
         # graduated-token strength-score gate.
         "liquidity_pass": False,
@@ -800,7 +802,7 @@ async def screen_coin(
     if not isinstance(created_ts, (int, float)) or created_ts <= 0:
         return False, "no created_timestamp", gates
     age_min = (now.timestamp() - created_ts / 1000) / 60
-    if age_min > GATES.max_age_minutes:
+    if not 0 <= age_min <= GATES.max_age_minutes:
         return False, f"age={age_min:.1f}m > {GATES.max_age_minutes:.0f}m", gates
     gates["age_pass"] = True
 
@@ -853,7 +855,10 @@ async def screen_coin(
             sells = int(h1.get("sells", 0))
             txns = buys + sells
             vol = float((pair.get("volume") or {}).get("h1", 0))
-            bs_ratio = buys / max(sells, 1)
+            raw_stats = ((coin.get("token") or {}).get("stats1h") or {})
+            buy_volume = float(raw_stats.get("buyVolume", buys) or 0)
+            sell_volume = float(raw_stats.get("sellVolume", sells) or 0)
+            bs_ratio = buy_volume / max(sell_volume, 1.0)
 
             min_txns = _age_adjusted_min_txns(age_min)
             if txns >= min_txns:
@@ -938,6 +943,11 @@ async def screen_coin(
     else:
         log.warning("RugCheck: no report for %s", mint[:8])
     coin["rugcheck_report"] = report
+
+    # The backtest performs the time gate after all candidate gates. Keep the
+    # top-of-loop block intact, but retain this check for direct callers and
+    # the entry-path defense-in-depth gate.
+    gates["time_pass"] = now.hour not in BLOCKED_UTC_HOURS and now.weekday() not in BLOCKED_WEEKDAYS
     # Build reason string
     fail_reasons = []
     if not gates["txn_pass"] and txns is not None:
@@ -964,6 +974,8 @@ async def screen_coin(
         fail_reasons.append(f"top10={report.top_holder_pct:.1f}%>={hard_holder}%")
     if not gates["creator_pass"]:
         fail_reasons.append("creator_holdings>0")
+    if not gates["time_pass"]:
+        fail_reasons.append("blocked_time")
     if not gates["rugcheck_pass"] and report.found:
         if report.mint_authority_revoked is False:
             fail_reasons.append("mint_authority")
@@ -983,6 +995,7 @@ async def screen_coin(
         and gates["rugcheck_pass"]
         and gates["holder_pass"]
         and gates["creator_pass"]
+        and gates["time_pass"]
     )
 
     txn_str = f"txns={txns}" if txns is not None else "txns=N/A"
@@ -1039,7 +1052,7 @@ async def log_candidate(db_path: Path, coin: dict, gates: dict[str, bool], reaso
         ("txn_pass", "txns"), ("volume_pass", "volume"),
         ("vol_mcap_pass", "volume"),
         ("buy_sell_pass", "buy_sell"), ("rugcheck_pass", "rugcheck"),
-        ("holder_pass", "holder"), ("creator_pass", "creator"),
+        ("holder_pass", "holder"), ("creator_pass", "creator"), ("time_pass", "age"),
     )
     failed_gate, value_name = next(
         ((gate, value) for gate, value in sequence if not gates.get(gate, False)), (None, None),
@@ -1329,25 +1342,18 @@ async def monitor_positions(
         close_price = current_price
 
         if entry:
-            if current_price >= entry * (1 + TAKE_PROFIT_PCT / 100):
+            if current_price >= entry * TAKE_PROFIT_MULTIPLIER:
                 close_reason = "take_profit"
-                close_price = entry * (1 + TAKE_PROFIT_PCT / 100)
-            elif current_price <= entry * (1 - HARD_STOP_PCT / 100):
+                close_price = entry * TAKE_PROFIT_MULTIPLIER
+            elif current_price <= entry * HARD_STOP_MULTIPLIER:
                 close_reason = "hard_stop"
-                close_price = entry * (1 - HARD_STOP_PCT / 100)
+                close_price = entry * HARD_STOP_MULTIPLIER
             elif (
-                peak > entry * (1 + TRAILING_ARM_PCT / 100)
-                and (peak - current_price) / peak >= TRAILING_STOP_PCT / 100
+                peak >= entry * TRAILING_ARM_MULTIPLIER
+                and current_price <= peak * TRAILING_STOP_MULTIPLIER
             ):
                 close_reason = "trailing_stop"
-                close_price = current_price
-
-        if (
-            close_reason is None
-            and age_min * 60 >= ENTRY_CONFIRM_WINDOW_S
-            and peak <= entry * (1.0 + EARLY_EXIT_GREEN_PCT / 100)
-        ):
-            close_reason = "early_exit_no_green"
+                close_price = peak * TRAILING_STOP_MULTIPLIER
 
         if age_min >= TIME_STOP_MINUTES and close_reason is None:
             close_reason = "time_stop"
@@ -1442,7 +1448,7 @@ def _first_failed_gate(gates: dict[str, bool]) -> str:
     for gate in (
         "age_pass", "mcap_pass", "liquidity_pass", "score_pass",
         "txn_pass", "volume_pass", "vol_mcap_pass",
-        "buy_sell_pass", "rugcheck_pass", "holder_pass", "creator_pass",
+        "buy_sell_pass", "rugcheck_pass", "holder_pass", "creator_pass", "time_pass",
     ):
         if not gates.get(gate, True):
             return gate.removesuffix("_pass")
@@ -1693,9 +1699,9 @@ async def scan_loop(
                         if not passed:
                             # Identify the main blocker from the reason string
                             blockers = ["liquidity_pass", "score_pass",
-                                        "txn_pass", "volume_pass", "vol_mcap_pass",
-                                        "low_fees_pass", "buy_sell_pass", "rugcheck_pass",
-                                        "holder_pass", "creator_pass"]
+                                         "txn_pass", "volume_pass", "vol_mcap_pass",
+                                         "low_fees_pass", "buy_sell_pass", "rugcheck_pass",
+                                         "holder_pass", "creator_pass", "time_pass"]
                             for bk in blockers:
                                 if not gates.get(bk, True):
                                     main_blocker_count[bk] = main_blocker_count.get(bk, 0) + 1
