@@ -293,11 +293,10 @@ except ImportError:
     load_tracked_wallets = None
     log.warning("whale_tracker sizing unavailable — whale conviction sizing disabled")
 
-# MT-584: in-memory dedup of mints dropped from the watch list. A mint is
-# marked once it ages past the 22-minute evaluation window or is permanently
-# loss-banned, and is skipped on subsequent cycles until the TTL expires.
-# Expired entries are cleaned every cycle in scan_loop.
-seen_mints: dict[str, float] = {}
+# MT-615: no dedup set — dropped watch tokens (aged past the cap or
+# eval-capped) may re-enter the watch list while still young, matching the
+# backtest which has no such restriction. Loss-mint bans and the eval cap
+# still apply.
 watch_list: dict[str, dict] = {}  # mint -> {coin, ticker, created_ms, first_seen, last_updated}
 # MT-610: tokens stay on the watch list from MIN_EVAL_AGE_S until
 # MAX_AGE_SECONDS, re-evaluated on every poll cycle — matching the backtest's
@@ -312,11 +311,7 @@ MAX_AGE_SECONDS = 1320  # 22 minutes
 # evaluated 12,263 times. A token is dropped after 240 actual screen_coin
 # evaluations even if it is still under the age cap.
 MAX_WATCH_EVALS = 240
-SEEN_MINTS_TTL = 3600  # 1 hour in seconds
-# MT-584: dedup-skip log lines are INFO once per mint (so the behavior is
-# verifiable in the log) and DEBUG afterwards (so the fast cadence does not
-# flood the log with up to ~130 skip lines per cycle).
-_dedup_skip_logged: set[str] = set()
+CANDIDATE_LOG_TTL_S = 3600  # 1 hour in seconds
 _rugcheck = RugCheckClient(timeout_s=5.0)
 # MT-566: per-token RugCheck cache. First sight of a mint fetches the report
 # (~400ms); every re-evaluation within the TTL uses the cached copy, skipping
@@ -1522,7 +1517,7 @@ async def scan_loop(
     tracked_wallets: list | None = None,
     test_mode: bool = False,
 ) -> None:
-    global seen_mints, watch_list, cycle_number
+    global watch_list, cycle_number
     if tracked_wallets is None:
         tracked_wallets = []
     async with httpx.AsyncClient() as http:
@@ -1565,16 +1560,11 @@ async def scan_loop(
                 await asyncio.sleep(BLOCKED_CHECK_INTERVAL_S)
                 continue
 
-            expired = [m for m, t in seen_mints.items() if now_ts - t > SEEN_MINTS_TTL]
-            for m in expired:
-                del seen_mints[m]
-            # MT-566: prune stale per-mint persistence-throttle entries (1h TTL
-            # matches seen_mints; candidates are only eligible while < 22m old).
+            # MT-566: prune stale per-mint persistence-throttle entries (1h TTL;
+            # candidates are only eligible while < 22m old).
             for m, t in list(_last_candidate_log.items()):
-                if now_ts - t > SEEN_MINTS_TTL:
+                if now_ts - t > CANDIDATE_LOG_TTL_S:
                     del _last_candidate_log[m]
-            if expired:
-                log.info("Expired %d stale seen_mints entries", len(expired))
             try:
                 cycle_start = time.monotonic()
                 cycle_number += 1
@@ -1615,17 +1605,6 @@ async def scan_loop(
                     for coin in candidates:
                         ticker = coin["ticker"]
                         mint = coin["mint"]
-
-                        # MT-584: dedup — mints dropped from the watch list
-                        # (aged past 22 minutes or loss-banned) are skipped for
-                        # the TTL instead of being re-admitted every cycle.
-                        if mint in seen_mints:
-                            if mint not in _dedup_skip_logged:
-                                _dedup_skip_logged.add(mint)
-                                log.info("skipping %s (%s), already evaluated", mint[:8], ticker)
-                            else:
-                                log.debug("skipping %s (%s), already evaluated", mint[:8], ticker)
-                            continue
 
                         created_ms = coin.get("created_timestamp")
                         if not isinstance(created_ms, (int, float)) or created_ms <= 0:
@@ -1697,7 +1676,6 @@ async def scan_loop(
                         continue  # still accumulating activity data
                     if _w_age > MAX_AGE_SECONDS:
                         del watch_list[_w_mint]
-                        seen_mints[_w_mint] = now_ts
                         log.info(
                             "WATCH_EXPIRE %s (%s): age=%.0fs > %.0fs cap — dropped",
                             _w_mint[:8], _w["ticker"], _w_age, MAX_AGE_SECONDS,
@@ -1711,7 +1689,6 @@ async def scan_loop(
                     # evaluation already ran last cycle.
                     if _w.get("evals", 0) >= MAX_WATCH_EVALS:
                         del watch_list[_w_mint]
-                        seen_mints[_w_mint] = now_ts
                         log.info(
                             "WATCH_EVAL_CAP %s (%s): %d evals >= %d cap — dropped",
                             _w_mint[:8], _w["ticker"], _w.get("evals", 0),
@@ -1722,7 +1699,6 @@ async def scan_loop(
                         continue  # already entered — skip while the position is open
                     if _w_mint in _loss_banned:
                         del watch_list[_w_mint]
-                        seen_mints[_w_mint] = now_ts
                         log.info(
                             "WATCH_BAN %s (%s): prior losing close — dropped",
                             _w_mint[:8], _w["ticker"],
