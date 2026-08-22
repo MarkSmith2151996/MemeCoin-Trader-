@@ -238,7 +238,7 @@ TIME_STOP_MINUTES = 10
 # Evaluating tokens at 10 seconds old (6 txns) produces false positives
 # that dump immediately. By deferring, Jupiter returns the same token on
 # subsequent polls with updated activity, and the screen runs on real data.
-MIN_EVAL_AGE_S = 120
+MIN_EVAL_AGE_S = 0
 # MT-537: UTC 21 added to the MT-516 blocked list (20:00-21:59 dead zone).
 BLOCKED_UTC_HOURS = frozenset({0, 19, 20, 21})
 # MT-593: Wednesday (weekday 2) re-blocked. MT-590 lifted it, but paper data
