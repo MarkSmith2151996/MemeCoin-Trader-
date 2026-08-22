@@ -1,0 +1,27 @@
+# Min eval age sweep — 2026-07-22 to 2026-08-21 (31 days), MAX_OPEN=5
+
+Variant: MIN_EVAL_AGE_S injected as a floor on `passes_gates` (rejects tokens
+younger than the floor before the original gate logic runs).
+
+## Summary table
+
+| min_age | entries | win_rate | raw_pnl | fric_pnl | daily_avg |
+|---------|---------|----------|---------|----------|-----------|
+| 0s      | 88146   | 53.7%    | +638.29 | +344.86  | +11.125   |
+| 30s     | 82021   | 57.3%    | +604.56 | +328.53  | +10.598   |
+| 60s     | 77689   | 58.9%    | +567.94 | +309.83  | +9.994    |
+| 120s    | 70785   | 60.5%    | +490.21 | +253.83  | +8.188    |
+
+Raw PnL is the engine's uncorrected PnL; friction PnL applies the MT-569 model
+(3% slippage + pool-impact). Daily average = friction PnL / 31 days.
+
+## Notes
+
+- Ran via `scripts/min_age_sweep.py` against `/mnt/d/pumpapi-replay/derived/enriched` parquet.
+- The replay path (`capacity_sweep.replay_all` -> `candidates_for_day`) calls
+  `capacity_sweep.passes_gates`, so the age floor is patched onto
+  `base.passes_gates` (not `capacity_sweep_bt.passes_gates`, which is unused in
+  this flow).
+- Trade-off is monotonic: longer waits raise win rate (53.7% -> 60.5%) but cut
+  entries (88k -> 71k) and lower both raw and friction PnL. Peak friction PnL is
+  at 0s.
