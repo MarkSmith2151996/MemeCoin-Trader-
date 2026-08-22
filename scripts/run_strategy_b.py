@@ -167,7 +167,7 @@ SOL_PRICE_CACHE_TTL_S = 60.0
 # MT-616 measured Jupiter's snapshot vs the enriched on-chain parquet the
 # backtest gates on. Jupiter's reported mcap/txns/age diverge, so the gate
 # inputs are corrected BEFORE the (unchanged) thresholds are applied:
-#   - Pool-based mcap: pool_mcap = sol_in_pool * sol_price * 2. Jupiter's
+#   - Pool-based mcap: pool_mcap = sol_in_pool * sol_price * 4.4. Jupiter's
 #     reported mcap is used only when it is within 50% of pool_mcap; when it
 #     exceeds pool_mcap by more than POOL_MCAP_OVERRUN_RATIO it is replaced
 #     by pool_mcap. sol_in_pool comes from the candidate's Jupiter pool data
@@ -868,7 +868,7 @@ async def screen_coin(
     # MT-617: pool-based mcap validation. Jupiter's reported mcap is inflated
     # for dead tokens (MT-616: 212 sub-$5.1K tokens passed the floor on
     # Jupiter). Derive pool_mcap from the pool SOL depth like the backtest's
-    # enriched parquets: pool_mcap = sol_in_pool * sol_price * 2. When
+    # enriched parquets: pool_mcap = sol_in_pool * sol_price * 4.4. When
     # Jupiter's reported mcap exceeds pool_mcap by more than
     # POOL_MCAP_OVERRUN_RATIO, use pool_mcap instead. sol_in_pool comes from
     # the candidate's Jupiter pool data (USD liquidity / cached SOL price).
@@ -880,7 +880,7 @@ async def screen_coin(
     if not isinstance(mcap, (int, float)) or mcap <= 0:
         return False, f"age={age_min:.1f}m no usd_market_cap", gates
     mcap_jupiter = mcap
-    pool_mcap = pool_sol * sol_price_usd * 2.0 if pool_sol is not None else None
+    pool_mcap = pool_sol * sol_price_usd * 4.4 if pool_sol is not None else None
     if pool_mcap is not None and mcap > POOL_MCAP_OVERRUN_RATIO * pool_mcap:
         log.info(
             "MCAP_OVERRIDE mint=%s jupiter_mcap=$%.0f pool_mcap=$%.0f "
