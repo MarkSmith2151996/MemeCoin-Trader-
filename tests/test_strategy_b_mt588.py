@@ -46,9 +46,10 @@ def _make_coin(
     buys: int = 40,
     sells: int = 10,
     vol: float = 5_000.0,
+    age_minutes: float = 5.0,
 ) -> dict:
     now_ms = int(time.time() * 1000)
-    created_ms = now_ms - 5 * 60_000
+    created_ms = now_ms - int(age_minutes * 60_000)
     return {
         "mint": mint,
         "ticker": "TST",
@@ -60,7 +61,7 @@ def _make_coin(
         "txns": buys + sells,
         "buy_sell_ratio": buys / max(sells, 1),
         "liquidity": liquidity_usd,
-        "source_age_minutes": 5.0,
+        "source_age_minutes": age_minutes,
         "pair": {
             "chainId": "solana",
             "pairCreatedAt": created_ms,
@@ -259,7 +260,9 @@ def test_screen_coin_accepts_graduated_token_with_enough_depth() -> None:
 
 
 def test_screen_coin_rejects_graduated_token_below_5_sol() -> None:
-    # Raydium pool with 4 SOL depth -> below the MT-593 5 SOL graduated floor.
+    # Raydium pool with 4 SOL depth. The MT-617 pool-mcap override fires
+    # first: pool_mcap = 4 SOL * $75 * 2 = $600, so the $10K Jupiter mcap is
+    # replaced and rejected below the $5,100 floor.
     coin = _make_coin(
         mint="abc123pump",
         pool_id="raydiumPoolId123",
@@ -268,24 +271,31 @@ def test_screen_coin_rejects_graduated_token_below_5_sol() -> None:
     )
     passed, reason, gates = asyncio.run(_screen(coin))
     assert not passed
-    assert not gates["liquidity_pass"]
-    assert "pool_depth=4.0SOL below minimum 5SOL" in reason
+    assert not gates["mcap_pass"]
+    assert "$600 < $5100 floor" in reason
+    assert "jupiter_mcap=$10000" in reason
 
 
-def test_screen_coin_accepts_bonding_curve_token_at_5_sol() -> None:
-    # Bonding-curve pool at exactly 5 SOL -> passes the MT-593 5 SOL floor.
+def test_screen_coin_accepts_bonding_curve_token_with_enough_depth() -> None:
+    # Pool-consistent mcap: pool_mcap = 40 SOL * $75 * 2 = $6000, Jupiter mcap
+    # $6000 is within 1.5x of pool_mcap so no override fires, the floor is met,
+    # and the pool-depth floor passes. (Sub-5-SOL pools are now caught by the
+    # MT-617 pool-mcap override before the pool-depth gate.)
     coin = _make_coin(
         mint="abc123pump",
         pool_id="abc123pump",
-        liquidity_usd=5.0 * SOL_PRICE,
-        buys=40, sells=5, vol=10_000.0, mcap=10_000.0,
+        liquidity_usd=40.0 * SOL_PRICE,
+        buys=40, sells=5, vol=10_000.0, mcap=6_000.0,
     )
     passed, _, gates = asyncio.run(_screen(coin))
     assert passed
     assert gates["liquidity_pass"]
+    assert gates["mcap_pass"]
 
 
 def test_screen_coin_rejects_bonding_curve_token_below_5_sol() -> None:
+    # Bonding-curve pool at 4 SOL with an inflated Jupiter mcap: the MT-617
+    # pool-mcap override caps mcap at $600, rejecting it at the mcap gate.
     coin = _make_coin(
         mint="abc123pump",
         pool_id="abc123pump",
@@ -294,8 +304,8 @@ def test_screen_coin_rejects_bonding_curve_token_below_5_sol() -> None:
     )
     passed, reason, gates = asyncio.run(_screen(coin))
     assert not passed
-    assert not gates["liquidity_pass"]
-    assert "pool_depth=4.0SOL below minimum 5SOL" in reason
+    assert not gates["mcap_pass"]
+    assert "$600 < $5100 floor" in reason
 
 
 def test_screen_coin_skips_token_without_liquidity_data() -> None:
@@ -317,13 +327,16 @@ def test_screen_coin_skips_token_when_sol_price_unavailable() -> None:
 
 
 def test_screen_coin_bonding_curve_weak_signal_fails_score_gate() -> None:
-    # On-curve token with a weak signal (score ~31 < 40 after MT-593 lowered
+    # On-curve token with a weak signal (score ~34 < 40 after MT-593 lowered
     # the bonding threshold): passes liquidity but not the score threshold.
+    # Pool is deep enough (100 SOL -> pool_mcap $15000) that the $20K Jupiter
+    # mcap stays within 1.5x and the MT-617 override does not distort the
+    # vol/mcap component.
     coin = _make_coin(
         mint="abc123pump",
         pool_id="abc123pump",
-        liquidity_usd=40.0 * SOL_PRICE,
-        buys=5, sells=5, vol=300.0, mcap=25_000.0,
+        liquidity_usd=100.0 * SOL_PRICE,
+        buys=5, sells=5, vol=300.0, mcap=20_000.0,
     )
     passed, reason, gates = asyncio.run(_screen(coin))
     assert not passed
@@ -448,3 +461,100 @@ def test_screen_coin_rejects_below_backtest_mcap_floor() -> None:
     assert not passed
     assert not gates["mcap_pass"]
     assert "$5000 < $5100 floor" in reason
+
+
+# ── MT-617: corrected gate inputs (pool mcap / txn / age) ────────────
+
+
+def test_mt617_pool_mcap_override_fires_on_inflated_mcap() -> None:
+    # Jupiter reports a $10K mcap but the pool only holds 4 SOL: pool_mcap =
+    # 4 * 75 * 2 = $600, so the reported mcap is >1.5x pool_mcap and the
+    # override caps it at $600 -> rejected below the $5,100 floor.
+    coin = _make_coin(
+        mint="abc123pump",
+        pool_id="raydiumPoolId123",
+        liquidity_usd=4.0 * SOL_PRICE,
+        buys=40, sells=5, vol=10_000.0, mcap=10_000.0,
+    )
+    passed, reason, gates = asyncio.run(_screen(coin))
+    assert not passed
+    assert not gates["mcap_pass"]
+    assert "jupiter_mcap=$10000" in reason
+
+
+def test_mt617_pool_mcap_override_not_fired_within_ratio() -> None:
+    # 40 SOL pool -> pool_mcap = $6000; a $6000 Jupiter mcap is within 1.5x
+    # so no override: the reported mcap passes the gate unchanged.
+    coin = _make_coin(
+        mint="abc123pump",
+        pool_id="raydiumPoolId123",
+        liquidity_usd=40.0 * SOL_PRICE,
+        buys=40, sells=5, vol=10_000.0, mcap=6_000.0,
+    )
+    passed, _, gates = asyncio.run(_screen(coin))
+    assert passed
+    assert gates["mcap_pass"]
+
+
+def test_mt617_age_offset_applied_to_adjusted_txn_threshold() -> None:
+    # A token at 3.5 Jupiter-minutes is corrected to 4.15 min: both land in
+    # the same adjusted-txn bucket (8), so the txn threshold is unchanged.
+    # 10 Jupiter txns * 1.24 = 12.4 still clears the 8-minimum.
+    coin = _make_coin(
+        mint="abc123pump",
+        pool_id="raydiumPoolId123",
+        liquidity_usd=40.0 * SOL_PRICE,
+        buys=5, sells=5, vol=10_000.0, mcap=6_000.0,
+        age_minutes=3.5,
+    )
+    passed, _, gates = asyncio.run(_screen(coin))
+    assert passed
+    assert gates["txn_pass"]
+
+
+def test_mt617_age_offset_shifts_adjusted_txn_threshold() -> None:
+    # 9 Jupiter txns * 1.24 = 11.16. At raw age 4.6 min the adjusted minimum
+    # is 8 (pass); the +0.65 offset makes it 5.25 min -> minimum 12 (fail).
+    coin = _make_coin(
+        mint="abc123pump",
+        pool_id="raydiumPoolId123",
+        liquidity_usd=40.0 * SOL_PRICE,
+        buys=5, sells=4, vol=10_000.0, mcap=6_000.0,
+        age_minutes=4.6,
+    )
+    passed, reason, gates = asyncio.run(_screen(coin))
+    assert not passed
+    assert not gates["txn_pass"]
+    assert "txns=11.16<12" in reason
+
+
+def test_mt617_txn_count_adjustment_applied() -> None:
+    # 10 Jupiter txns * 1.24 = 12.4: at corrected age 5.65 min the adjusted
+    # minimum is 12, so the corrected count passes the txn gate.
+    coin = _make_coin(
+        mint="abc123pump",
+        pool_id="raydiumPoolId123",
+        liquidity_usd=40.0 * SOL_PRICE,
+        buys=5, sells=5, vol=10_000.0, mcap=6_000.0,
+        age_minutes=5.0,
+    )
+    passed, _, gates = asyncio.run(_screen(coin))
+    assert passed
+    assert gates["txn_pass"]
+
+
+def test_mt617_candidate_coin_gets_corrected_inputs() -> None:
+    # screen_coin records the corrected mcap (when overridden) and the raw
+    # Jupiter mcap alongside, WITHOUT mutating the raw field (the watch list
+    # reuses the same coin dict across cycles).
+    coin = _make_coin(
+        mint="abc123pump",
+        pool_id="raydiumPoolId123",
+        liquidity_usd=4.0 * SOL_PRICE,
+        buys=40, sells=5, vol=10_000.0, mcap=10_000.0,
+    )
+    passed, _, _ = asyncio.run(_screen(coin))
+    assert not passed
+    assert coin["mcap_corrected"] == 600.0  # pool_mcap override stored
+    assert coin["mcap_jupiter"] == 10_000.0
+    assert coin["usd_market_cap"] == 10_000.0  # raw field untouched

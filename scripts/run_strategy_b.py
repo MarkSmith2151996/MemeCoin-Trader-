@@ -163,6 +163,26 @@ POOL_MIN_SOL_GRADUATED = 5.0
 # SOL/USD price lookup cache for converting Jupiter's USD liquidity to SOL
 # depth. One extra Jupiter call every SOL_PRICE_CACHE_TTL_S, never per cycle.
 SOL_PRICE_CACHE_TTL_S = 60.0
+
+# ── MT-617: corrected gate inputs from pool/on-chain data ────────────
+# MT-616 measured Jupiter's snapshot vs the enriched on-chain parquet the
+# backtest gates on. Jupiter's reported mcap/txns/age diverge, so the gate
+# inputs are corrected BEFORE the (unchanged) thresholds are applied:
+#   - Pool-based mcap: pool_mcap = sol_in_pool * sol_price * 2. Jupiter's
+#     reported mcap is used only when it is within 50% of pool_mcap; when it
+#     exceeds pool_mcap by more than POOL_MCAP_OVERRUN_RATIO it is replaced
+#     by pool_mcap. sol_in_pool comes from the candidate's Jupiter pool data
+#     (USD liquidity converted via the cached SOL price).
+#   - Txn counts: Jupiter under-reports txns vs the parquet (median ratio
+#     0.76 -> ~24% low). Jupiter's reported txn count is multiplied by
+#     TXN_COUNT_ADJUSTMENT before the txn gate comparison.
+#   - Age: Jupiter's created_timestamp runs ~0.65 min behind on-chain birth.
+#     AGE_OFFSET_MINUTES is added to Jupiter's reported age before the
+#     age-dependent gate calculations (age-adjusted txn threshold, holder
+#     tiers, strength score).
+POOL_MCAP_OVERRUN_RATIO = 1.5
+TXN_COUNT_ADJUSTMENT = 1.24
+AGE_OFFSET_MINUTES = 0.65
 # Graduated tokens (PumpSwap/Raydium) trade at 0.25% DEX fees vs 1.25% on the
 # bonding curve — still-on-curve tokens must clear a higher strength score to
 # enter (the stronger signal justifies the higher fee).
@@ -579,7 +599,11 @@ def _token_graduation(token: dict | None) -> str:
     return "bonding"
 
 
-def _candidate_strength_score(coin: dict, age_min: float) -> float:
+def _candidate_strength_score(
+    coin: dict,
+    age_min: float,
+    mcap_override: float | None = None,
+) -> float:
     """0-100 composite signal strength used by the graduated gate (MT-588).
 
     Components (all capped):
@@ -587,15 +611,23 @@ def _candidate_strength_score(coin: dict, age_min: float) -> float:
       - 1h vol/mcap ratio vs 0.05                    -> 0-30 pts
       - 1h txns vs 4x the age-adjusted minimum       -> 0-15 pts
       - 1h volume vs 10x the minimum volume gate     -> 0-15 pts
+
+    mcap_override (MT-617): when the pool-based mcap override fired in
+    screen_coin, the score must use the corrected mcap for its vol/mcap
+    component — the backtest's score_from also uses the on-chain mcap.
     """
     pair = coin.get("pair") or {}
     h1 = (pair.get("txns") or {}).get("h1") or {}
-    txns = int(h1.get("buys") or 0) + int(h1.get("sells") or 0)
+    # MT-617: Jupiter under-reports txn counts ~24% vs the on-chain parquet
+    # (median ratio 0.76). Correct the score's txn component input too so the
+    # strength score matches the backtest's score_from (which uses on-chain
+    # trade counts).
+    txns = int((int(h1.get("buys") or 0) + int(h1.get("sells") or 0)) * TXN_COUNT_ADJUSTMENT)
     raw_stats = ((coin.get("token") or {}).get("stats1h") or {})
     buys = float(raw_stats.get("buyVolume", h1.get("buys")) or 0)
     sells = float(raw_stats.get("sellVolume", h1.get("sells")) or 0)
     vol = float((pair.get("volume") or {}).get("h1") or 0)
-    mcap = float(coin.get("usd_market_cap") or 0)
+    mcap = mcap_override if mcap_override is not None else float(coin.get("usd_market_cap") or 0)
     bs_ratio = buys / max(sells, 1)
     vol_ratio = vol / mcap if mcap > 0 else 0.0
     min_txns = max(_age_adjusted_min_txns(age_min), 1)
@@ -822,19 +854,68 @@ async def screen_coin(
     if not isinstance(created_ts, (int, float)) or created_ts <= 0:
         return False, "no created_timestamp", gates
     age_min = (now.timestamp() - created_ts / 1000) / 60
+    # MT-617: Jupiter's created_timestamp runs ~0.65 min behind on-chain birth
+    # (MT-616 measured median), so Jupiter under-reports age. Add the offset
+    # before age-dependent gate calculations (age window, adjusted txn
+    # threshold, holder tiers, strength score) to match the backtest.
+    age_min_jupiter = age_min
+    age_min = age_min + AGE_OFFSET_MINUTES
     if not 0 <= age_min <= GATES.max_age_minutes:
-        return False, f"age={age_min:.1f}m > {GATES.max_age_minutes:.0f}m", gates
+        return False, (
+            f"age={age_min:.1f}m > {GATES.max_age_minutes:.0f}m "
+            f"(jupiter_age={age_min_jupiter:.2f}m)"
+        ), gates
     gates["age_pass"] = True
 
+    # MT-617: pool-based mcap validation. Jupiter's reported mcap is inflated
+    # for dead tokens (MT-616: 212 sub-$5.1K tokens passed the floor on
+    # Jupiter). Derive pool_mcap from the pool SOL depth like the backtest's
+    # enriched parquets: pool_mcap = sol_in_pool * sol_price * 2. When
+    # Jupiter's reported mcap exceeds pool_mcap by more than
+    # POOL_MCAP_OVERRUN_RATIO, use pool_mcap instead. sol_in_pool comes from
+    # the candidate's Jupiter pool data (USD liquidity / cached SOL price).
+    sol_price_usd = await _get_sol_price_usd(http)
+    liquidity_usd = float(coin.get("liquidity") or 0)
+    pool_sol = liquidity_usd / sol_price_usd if liquidity_usd > 0 and sol_price_usd else None
+    coin["pool_sol"] = pool_sol
     mcap = coin.get("usd_market_cap")
     if not isinstance(mcap, (int, float)) or mcap <= 0:
         return False, f"age={age_min:.1f}m no usd_market_cap", gates
+    mcap_jupiter = mcap
+    pool_mcap = pool_sol * sol_price_usd * 2.0 if pool_sol is not None else None
+    if pool_mcap is not None and mcap > POOL_MCAP_OVERRUN_RATIO * pool_mcap:
+        log.info(
+            "MCAP_OVERRIDE mint=%s jupiter_mcap=$%.0f pool_mcap=$%.0f "
+            "(pool=%.1f SOL sol_price=$%.2f) -> using pool_mcap",
+            mint[:16], mcap, pool_mcap, pool_sol, sol_price_usd,
+        )
+        mcap = pool_mcap
+        # Record both values for log_candidate / downstream persistence
+        # WITHOUT mutating the raw Jupiter field (the watch list reuses the
+        # same coin dict across cycles).
+        coin["mcap_corrected"] = mcap
+        coin["mcap_jupiter"] = mcap_jupiter
+    # MT-617: log both Jupiter-reported and corrected gate inputs for every
+    # screening (keep for at least the first hour of the corrected loop, then
+    # removable). Fires before the mcap gate so rejected tokens are covered.
+    _txns_jup_log = coin.get("txns")
+    log.info(
+        "GATE_INPUTS mint=%s age_jupiter=%.2fm age_corrected=%.2fm "
+        "mcap_jupiter=$%.0f mcap_corrected=$%.0f txns_jupiter=%s txns_corrected=%s "
+        "pool_sol=%s",
+        mint[:16], age_min_jupiter, age_min,
+        mcap_jupiter, mcap,
+        _txns_jup_log if isinstance(_txns_jup_log, (int, float)) else "N/A",
+        (_txns_jup_log * TXN_COUNT_ADJUSTMENT) if isinstance(_txns_jup_log, (int, float)) else "N/A",
+        f"{pool_sol:.1f}" if pool_sol is not None else "N/A",
+    )
     # MT-593: walk-forward validated mcap floor re-enforced at $5,100 (2 of 3
     # iterations found mcap >= ~$5.1K). Restored after MT-603 accidentally
     # removed it during DexScreener cleanup.
     if mcap < MIN_MCAP_USD:
         return False, (
             f"age={age_min:.1f}m mcap=${mcap:.0f} < ${MIN_MCAP_USD:.0f} floor"
+            f" (jupiter_mcap=${mcap_jupiter:.0f})"
         ), gates
     if mcap > MAX_MCAP_USD:
         return False, f"age={age_min:.1f}m mcap=${mcap:.0f} > ${MAX_MCAP_USD:.0f}", gates
@@ -846,10 +927,6 @@ async def screen_coin(
     graduation = _token_graduation(coin.get("token"))
     on_bonding_curve = graduation == "bonding"
     pool_min_sol = POOL_MIN_SOL_BONDING if on_bonding_curve else POOL_MIN_SOL_GRADUATED
-    liquidity_usd = float(coin.get("liquidity") or 0)
-    sol_price_usd = await _get_sol_price_usd(http)
-    pool_sol = liquidity_usd / sol_price_usd if liquidity_usd > 0 and sol_price_usd else None
-    coin["pool_sol"] = pool_sol
     if pool_sol is None:
         return False, (
             f"age={age_min:.1f}m mcap=${mcap:.0f} \u2192 FAIL no_pool_liquidity"
@@ -865,6 +942,7 @@ async def screen_coin(
     gates["liquidity_pass"] = True
 
     txns = None
+    txns_jupiter = None
     vol = None
     bs_ratio = None
     try:
@@ -879,6 +957,13 @@ async def screen_coin(
             buy_volume = float(raw_stats.get("buyVolume", buys) or 0)
             sell_volume = float(raw_stats.get("sellVolume", sells) or 0)
             bs_ratio = buy_volume / max(sell_volume, 1.0)
+
+            # MT-617: Jupiter under-reports txn counts ~24% vs the enriched
+            # parquet the backtest gates on (MT-616 median ratio 0.76). Scale
+            # the reported count before the txn gate comparison so the
+            # effective threshold matches what the backtest sees.
+            txns_jupiter = txns
+            txns = txns * TXN_COUNT_ADJUSTMENT
 
             min_txns = _age_adjusted_min_txns(age_min)
             if txns >= min_txns:
@@ -909,7 +994,7 @@ async def screen_coin(
     # DEX fees vs 0.25% on PumpSwap/Raydium, so a still-on-curve token must be
     # a stronger signal (higher composite score) to justify the higher fee.
     # Graduated tokens use the normal (lower) threshold.
-    strength_score = _candidate_strength_score(coin, age_min)
+    strength_score = _candidate_strength_score(coin, age_min, mcap_override=mcap)
     coin["strength_score"] = strength_score
     score_threshold = MIN_SCORE_BONDING_CURVE if on_bonding_curve else MIN_SCORE_GRADUATED
     if strength_score >= score_threshold:
@@ -972,7 +1057,7 @@ async def screen_coin(
     fail_reasons = []
     if not gates["txn_pass"] and txns is not None:
         min_txns = _age_adjusted_min_txns(age_min)
-        fail_reasons.append(f"txns={txns}<{min_txns}")
+        fail_reasons.append(f"txns={txns}<{min_txns} (jupiter_txns={txns_jupiter})")
     if not gates["volume_pass"] and vol is not None:
         fail_reasons.append(f"vol=${vol:.0f}<${GATES.min_volume_usd:.0f}")
     if not gates["vol_mcap_pass"] and vol is not None and mcap > 0 and vol > 0:
@@ -1656,6 +1741,9 @@ async def scan_loop(
                 _loss_banned: set[str] = set()
                 try:
                     async with aiosqlite.connect(db_path) as _db:
+                        # Loss ban disabled — the ban list grows over time
+                        # (2,245 mints) creating structural decay the backtest
+                        # doesn't model (backtest starts fresh each run).
                         _cursor = await _db.execute(
                             "SELECT DISTINCT mint_address FROM positions"
                             " WHERE status = ? AND realized_pnl_sol < 0",
