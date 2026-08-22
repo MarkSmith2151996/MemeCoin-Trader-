@@ -78,7 +78,6 @@ Run:
 # ── Position sizing (MT-522/MT-524) ─────────────────────────────────
 # Entry size = PAPER_SIZE_SOL (0.05 SOL) * size_multiplier.
 # size_multiplier is always 1.0 in practice:
-#   - Saturday halving: * 0.5 when utc_now.weekday() == 5 (-> 0.025 SOL).
 #   - Whale conviction sizing: DISABLED since MT-524 — the get_whale_signal
 #     call block and load_tracked_wallets loading block are commented out,
 #     so the multiplier passed to try_enter() never changes from 1.0.
@@ -251,7 +250,6 @@ BLOCKED_WEEKDAYS = frozenset({2})
 # + monitors open positions at this slow cadence, so trading resumes within a
 # minute of a block lifting without burning Jupiter API calls meanwhile.
 BLOCKED_CHECK_INTERVAL_S = 60
-SATURDAY_SIZE_MULTIPLIER = 0.5
 
 # Mode flags
 REQUIRE_MENTIONS = False      # Set False to skip Grok entirely (on-chain only)
@@ -1256,9 +1254,6 @@ async def try_enter(
         log.debug("DEBUG ENTRY_EVAL mint=%s result=rejected reason=repeat_loser", mint[:16])
         return None
 
-    if utc_now.weekday() == 5:
-        log.info("Saturday — halving position size for %s (%s)", mint[:16], ticker)
-        size_multiplier *= SATURDAY_SIZE_MULTIPLIER
 
     existing = await manager.get_position(mint, mode="paper")
     if existing is not None:
