@@ -205,6 +205,7 @@ PAPER_SIZE_SOL = 0.05
 MIN_MENTIONS = 3
 MENTION_WINDOW_MINUTES = 5
 MAX_OPEN = 5
+EXECUTION_MODE = "paper"  # set at startup from .env
 # MT-560: 60s was legacy from the Chrome/DexScreener era (8s browser-pc
 # capture per cycle). MT-588: with the Jupiter Developer tier (10 RPS) active
 # and three discovery endpoints per cycle, the default cadence drops to 1s
@@ -1200,7 +1201,7 @@ async def try_enter(
     t0 = timing.setdefault("t_detect", time.monotonic())
     t_gate = timing.setdefault("t_gate_pass", time.monotonic())
 
-    if len(await manager.get_all_open(mode="paper")) >= MAX_OPEN:
+    if len(await manager.get_all_open(mode=EXECUTION_MODE)) >= MAX_OPEN:
         log.warning("SKIP %s ticker=%s — strategy capacity reached", mint[:16], ticker)
         log.debug("DEBUG ENTRY_EVAL mint=%s result=rejected reason=capacity", mint[:16])
         return None
@@ -1255,7 +1256,7 @@ async def try_enter(
         return None
 
 
-    existing = await manager.get_position(mint, mode="paper")
+    existing = await manager.get_position(mint, mode=EXECUTION_MODE)
     if existing is not None:
         log.debug("DEBUG ENTRY_EVAL mint=%s result=rejected reason=already_open", mint[:16])
         return None
@@ -1394,7 +1395,7 @@ async def monitor_positions(
     """Re-mark open positions and close on stops; True if any position is in
     the danger zone (below 95% of entry) so the caller polls at 5s."""
     danger = False
-    positions = await manager.get_all_open(mode="paper")
+    positions = await manager.get_all_open(mode=EXECUTION_MODE)
     for pos in positions:
         # MT-593: zombie positions — a 0-token fill can never produce a
         # positive sol_out, so _adapter_close refuses to close it and the
@@ -1405,7 +1406,7 @@ async def monitor_positions(
                 "ZOMBIE CLOSE mint=%s entry_trade=%s token_amount=%s \u2014 closing 0-token position to free slot",
                 pos.mint_address[:16], pos.entry_trade_id[:8], pos.token_amount,
             )
-            await manager.close_position(pos.mint_address, mode="paper")
+            await manager.close_position(pos.mint_address, mode=EXECUTION_MODE)
             continue
         current_price = await mark_provider.get_current_price(pos.mint_address)
 
@@ -1423,7 +1424,7 @@ async def monitor_positions(
                 trade = await _adapter_close(pos, close_price, "time_stop", db_path, adapter)
                 if trade is not None:
                     peak = peak_prices.pop(pos.mint_address, None)
-                    await manager.close_position(pos.mint_address, close_price, mode="paper", peak_price_sol=peak)
+                    await manager.close_position(pos.mint_address, close_price, mode=EXECUTION_MODE, peak_price_sol=peak)
                     log.info(
                         "CLOSE [time_stop/no_price]: mint=%s entry=%.8f close=%.8f",
                         pos.mint_address[:16], pos.entry_price_sol, close_price,
@@ -1468,7 +1469,7 @@ async def monitor_positions(
                     close_reason, pos.mint_address[:16],
                 )
                 continue
-            closed = await manager.close_position(pos.mint_address, close_price, mode="paper", peak_price_sol=peak)
+            closed = await manager.close_position(pos.mint_address, close_price, mode=EXECUTION_MODE, peak_price_sol=peak)
             # AUTO-TUNER PAUSED — oscillating, not converging. See MT-537.
             # if gate_tuner is not None and await gate_tuner.maybe_tune():
             #     log.info("Auto-tuned Strategy B gates: %s", json.dumps(gate_tuner.thresholds.as_dict()))
@@ -1536,7 +1537,7 @@ async def _adapter_close(
         token_amount=token_remaining,
         price_sol=close_price,
         slippage_bps=300,
-        mode="paper",
+        mode=EXECUTION_MODE,
         status="simulated",
         metadata={"close_reason": reason},
     )
@@ -1620,7 +1621,7 @@ async def scan_loop(
                 # error in the blocked branch can never kill the loop — and a
                 # failed position-count read still lets exit management run.
                 try:
-                    open_positions = await manager.get_all_open(mode="paper")
+                    open_positions = await manager.get_all_open(mode=EXECUTION_MODE)
                     open_count = len(open_positions)
                 except Exception as exc:
                     log.error("BLOCKED window: position count failed: %s", exc, exc_info=True)
@@ -1654,7 +1655,7 @@ async def scan_loop(
                 cycle_number += 1
                 log.debug("--- Strategy B Scan (cycle %d) ---", cycle_number)
                 log.debug("whale tracker disabled — re-enable when Helius integration is built into entry pipeline.")
-                open_positions = await manager.get_all_open(mode="paper")
+                open_positions = await manager.get_all_open(mode=EXECUTION_MODE)
                 log.debug("Open positions: %d / %d", len(open_positions), MAX_OPEN)
 
                 detailed = {
@@ -1731,7 +1732,7 @@ async def scan_loop(
                 # stays on the list (it may reappear with fresh data next poll)
                 # but is not re-evaluated with unchanged data.
                 try:
-                    open_positions = await manager.get_all_open(mode="paper")
+                    open_positions = await manager.get_all_open(mode=EXECUTION_MODE)
                 except Exception as exc:
                     log.error("watch sweep: open-position read failed: %s", exc, exc_info=True)
                     open_positions = []
@@ -2037,6 +2038,8 @@ async def main() -> None:
     # behavior (default), shadow = paper + Jupiter quotes (MT-538), live =
     # real Jupiter swaps via src/execution/live.py.
     execution_mode = os.environ.get("EXECUTION_MODE", "paper").strip().lower()
+    global EXECUTION_MODE
+    EXECUTION_MODE = execution_mode
     if execution_mode == "live":
         from src.chain.jupiter_swap import JupiterSwapClient
         from src.execution.live import LiveExecutionAdapter
