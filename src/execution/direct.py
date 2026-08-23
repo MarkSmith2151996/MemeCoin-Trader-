@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import logging
 import os
 import random
 import time
@@ -17,6 +18,7 @@ from datetime import UTC, datetime, timedelta
 
 import httpx
 from dotenv import load_dotenv
+from solders.compute_budget import set_compute_unit_limit, set_compute_unit_price
 from solders.hash import Hash
 from solders.keypair import Keypair
 from solders.pubkey import Pubkey
@@ -40,6 +42,8 @@ from src.execution.base import ExecutionAdapter
 
 load_dotenv()
 
+log = logging.getLogger("direct_executor")
+
 DEFAULT_RPC_URL = "https://api.mainnet-beta.solana.com"
 DEFAULT_JITO_TIP_LAMPORTS = 1_000_000
 
@@ -61,6 +65,7 @@ class DirectExecutor(ExecutionAdapter):
         jito_tip_lamports: int = DEFAULT_JITO_TIP_LAMPORTS,
         use_jito: bool = True,
         confirm_timeout_s: float = 30.0,
+        jito_grace_s: float = 6.0,
         poll_interval_s: float = 1.0,
     ) -> None:
         if not 0 <= slippage_bps < 10_000:
@@ -77,6 +82,7 @@ class DirectExecutor(ExecutionAdapter):
         self._jito_tip_lamports = jito_tip_lamports
         self._use_jito = use_jito
         self._confirm_timeout_s = confirm_timeout_s
+        self._jito_grace_s = jito_grace_s
         self._poll_interval_s = poll_interval_s
         self._closed = False
 
@@ -271,6 +277,10 @@ class DirectExecutor(ExecutionAdapter):
 
     async def _submit_and_confirm(self, instructions) -> tuple[str, str, int | None, bool]:
         blockhash = await self._latest_blockhash()
+        # Prepend compute budget for priority fee landing
+        cu_limit = set_compute_unit_limit(250_000)
+        cu_price = set_compute_unit_price(200_000)  # microlamports per CU
+        instructions = [cu_limit, cu_price] + list(instructions)
         transaction = Transaction.new_signed_with_payer(
             instructions,
             self.wallet_pubkey,
@@ -280,8 +290,17 @@ class DirectExecutor(ExecutionAdapter):
         serialized = bytes(transaction)
         signature = str(Signature.from_bytes(serialized[:64]))
         used_jito = await self._submit_jito(transaction, serialized)
-        if not used_jito:
+        if used_jito:
+            status, _ = await self._confirm(signature, timeout_s=self._jito_grace_s)
+            if status != "confirmed":
+                log.warning(
+                    "direct jito bundle not confirmed within %ss; falling back to RPC",
+                    self._jito_grace_s,
+                )
+                signature = await self._send_rpc(serialized)
+        else:
             signature = await self._send_rpc(serialized)
+        log.info("direct submit used_jito=%s signature=%s", used_jito, signature)
         status, slot = await self._confirm(signature)
         if status != "confirmed":
             raise RuntimeError(f"Pump direct transaction {signature} {status}")
@@ -289,6 +308,7 @@ class DirectExecutor(ExecutionAdapter):
 
     async def _submit_jito(self, transaction: Transaction, serialized: bytes) -> bool:
         if not self._use_jito:
+            log.info("direct jito submission skipped (use_jito=False)")
             return False
         try:
             tip = Transaction.new_signed_with_payer(
@@ -309,9 +329,18 @@ class DirectExecutor(ExecutionAdapter):
                 [serialized, bytes(tip)],
                 tip_lamports=self._jito_tip_lamports,
             )
-        except Exception:
+        except Exception as exc:
+            log.warning("direct jito bundle submission raised %s", type(exc).__name__)
             return False
-        return result.ok
+        if result.ok:
+            log.info("direct jito bundle accepted bundle_id=%s", result.bundle_id)
+            return True
+        log.warning(
+            "direct jito bundle rejected: %s (endpoint=%s)",
+            result.error,
+            result.used_endpoint,
+        )
+        return False
 
     async def _latest_blockhash(self) -> Hash:
         payload = {"jsonrpc": "2.0", "id": 1, "method": "getLatestBlockhash", "params": []}
@@ -334,13 +363,27 @@ class DirectExecutor(ExecutionAdapter):
         }
         response = await self._client.post(self._rpc_url, json=payload)
         response.raise_for_status()
-        result = response.json().get("result")
-        if not isinstance(result, str):
-            raise RuntimeError("RPC sendTransaction returned no signature")
-        return result
+        body = response.json()
+        result = body.get("result")
+        if isinstance(result, str):
+            return result
+        error = body.get("error")
+        log.warning("direct RPC sendTransaction rejected: %s", error)
+        err_code = (error or {}).get("data", {}).get("err") if isinstance(error, dict) else None
+        if err_code == "AlreadyProcessed" or "already been processed" in str(error).lower():
+            # The identical signed transaction already landed (e.g. via a Jito
+            # bundle that confirmed just after the grace window); reuse its
+            # signature rather than failing the whole submit.
+            log.warning("direct RPC sendTransaction: transaction already processed")
+            return str(Signature.from_bytes(serialized[:64]))
+        raise RuntimeError(f"RPC sendTransaction returned no signature: {error}")
 
-    async def _confirm(self, signature: str) -> tuple[str, int | None]:
-        deadline = time.monotonic() + self._confirm_timeout_s
+    async def _confirm(
+        self, signature: str, timeout_s: float | None = None
+    ) -> tuple[str, int | None]:
+        deadline = time.monotonic() + (
+            timeout_s if timeout_s is not None else self._confirm_timeout_s
+        )
         while time.monotonic() < deadline:
             payload = {
                 "jsonrpc": "2.0",
