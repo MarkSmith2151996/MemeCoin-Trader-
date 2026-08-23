@@ -1508,7 +1508,11 @@ async def _adapter_close(
     # returns None so the position stays open for retry.
     if adapter is not None and adapter.mode == "live":
         try:
-            live_trade = await adapter.sell(pos.mint_address, pos.token_amount)
+            live_trade = await adapter.sell(
+                pos.mint_address,
+                pos.token_amount,
+                slippage_bps=300,
+            )
         except Exception as exc:
             log.error("LIVE SELL mint=%s reason=%s failed: %s", pos.mint_address[:16], reason, exc)
             return None

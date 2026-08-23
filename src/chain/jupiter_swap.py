@@ -66,7 +66,7 @@ _PRIORITY_MAX_LAMPORTS = 1_000_000
 # signed swap is wrapped in a bundle with a tip to one of the canonical Jito
 # tip accounts below; on bundle failure the client falls back to the plain
 # RPC sendTransaction path with a warning log.
-USE_JITO_BUNDLES = True
+USE_JITO_BUNDLES = False
 JITO_BLOCK_ENGINE_URL = "https://mainnet.block-engine.jito.wtf/api/v1/bundles"
 # Canonical Jito tip accounts (pick one at random per bundle).
 JITO_TIP_ACCOUNTS = (
