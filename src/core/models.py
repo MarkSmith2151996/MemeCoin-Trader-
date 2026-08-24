@@ -138,7 +138,7 @@ class Trade(BaseModel):
     id: str = Field(default_factory=lambda: str(uuid4()))
     mint_address: str
     side: Side
-    amount_sol: float = Field(gt=0)
+    amount_sol: float = Field(ge=0)
     token_amount: float | None = Field(default=None, ge=0)
     price_sol: float | None = Field(default=None, ge=0)
     slippage_bps: int = Field(default=300, ge=0)

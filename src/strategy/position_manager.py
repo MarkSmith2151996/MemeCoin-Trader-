@@ -177,9 +177,9 @@ class PositionManager:
 
         realized_pnl = 0.0
         close_price = exit_price_sol
-        if exit_price_sol is not None and not _is_valid_price(exit_price_sol):
+        if exit_price_sol is not None and (not math.isfinite(exit_price_sol) or exit_price_sol < 0):
             raise ValueError(f"Invalid exit price for position: {exit_price_sol}")
-        if _is_valid_price(exit_price_sol):
+        if exit_price_sol is not None:
             remaining_fraction = position.remaining_sell_pct
             realized_pnl = round(
                 position.remaining_token_amount * exit_price_sol

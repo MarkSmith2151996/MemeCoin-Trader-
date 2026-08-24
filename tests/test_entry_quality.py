@@ -64,6 +64,14 @@ class FailingLiveAdapter:
         raise RuntimeError("confirmed sell left tokens in wallet")
 
 
+class EmptyBalanceLiveAdapter(FailingLiveAdapter):
+    def __init__(self, balance: float | None) -> None:
+        self.balance = balance
+
+    async def get_token_balance(self, mint: str) -> float | None:
+        return self.balance
+
+
 class FakeManager:
     def __init__(self, open_positions: list[Position] | None = None) -> None:
         self._open = list(open_positions or [])
@@ -295,6 +303,30 @@ def test_strategy_b_keeps_live_position_open_when_sell_verification_fails(db: Pa
 
     assert manager.closed_with == []
     assert sell_trades(db) == []
+
+
+@pytest.mark.parametrize("wallet_balance", [0.0, None])
+def test_strategy_b_abandons_live_position_without_wallet_tokens(
+    db: Path, wallet_balance: float | None,
+) -> None:
+    manager = FakeManager([make_position(entry=1.0)])
+    strategy_b.peak_prices.clear()
+
+    asyncio.run(
+        strategy_b.monitor_positions(
+            manager,
+            FakePrice(strategy_b.TAKE_PROFIT_MULTIPLIER + 0.01),
+            db,
+            adapter=EmptyBalanceLiveAdapter(wallet_balance),
+        ),
+    )
+
+    assert manager.closed_with == [("Mint1", 0, strategy_b.TAKE_PROFIT_MULTIPLIER + 0.01)]
+    with sqlite3.connect(db) as db_conn:
+        row = db_conn.execute(
+            "SELECT amount_sol, price_sol, status FROM trades WHERE side = 'SELL'",
+        ).fetchone()
+    assert row == (0.0, 0.0, "abandoned")
 
 
 # ── 3. Time-of-day gates ─────────────────────────────────────────────

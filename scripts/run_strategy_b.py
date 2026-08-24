@@ -1427,6 +1427,8 @@ async def monitor_positions(
                 close_price = pos.entry_price_sol
                 trade = await _adapter_close(pos, close_price, "time_stop", db_path, adapter)
                 if trade is not None:
+                    if trade.status == "abandoned":
+                        close_price = 0
                     peak = peak_prices.pop(pos.mint_address, None)
                     await manager.close_position(pos.mint_address, close_price, mode=EXECUTION_MODE, peak_price_sol=peak)
                     log.info(
@@ -1473,6 +1475,8 @@ async def monitor_positions(
                     close_reason, pos.mint_address[:16],
                 )
                 continue
+            if trade.status == "abandoned":
+                close_price = 0
             closed = await manager.close_position(pos.mint_address, close_price, mode=EXECUTION_MODE, peak_price_sol=peak)
             # AUTO-TUNER PAUSED — oscillating, not converging. See MT-537.
             # if gate_tuner is not None and await gate_tuner.maybe_tune():
@@ -1516,7 +1520,7 @@ async def _adapter_close(
     )
     # MT-544: in live mode the close is a real Jupiter sell; paper/shadow mode
     # keeps the existing simulated record path unchanged. A failed live sell
-    # returns None so the position stays open for retry.
+    # normally returns None so the position stays open for retry.
     if adapter is not None and adapter.mode == "live":
         try:
             live_trade = await adapter.sell(
@@ -1526,6 +1530,40 @@ async def _adapter_close(
             )
         except Exception as exc:
             log.error("LIVE SELL mint=%s reason=%s failed: %s", pos.mint_address[:16], reason, exc)
+            get_token_balance = getattr(adapter, "get_token_balance", None)
+            if get_token_balance is None:
+                return None
+            try:
+                wallet_balance = await get_token_balance(pos.mint_address)
+            except Exception as balance_exc:
+                log.warning(
+                    "LIVE SELL balance lookup mint=%s failed after sell error: %s",
+                    pos.mint_address[:16], balance_exc,
+                )
+                return None
+            if wallet_balance is None or wallet_balance <= 0:
+                log.warning(
+                    "LIVE SELL ABANDON mint=%s reason=%s wallet_balance=%s; "
+                    "closing position at zero",
+                    pos.mint_address[:16], reason, wallet_balance,
+                )
+                abandoned_trade = Trade(
+                    mint_address=pos.mint_address,
+                    side=Side.SELL,
+                    amount_sol=0,
+                    token_amount=0,
+                    price_sol=0,
+                    slippage_bps=300,
+                    mode=EXECUTION_MODE,
+                    status="abandoned",
+                    metadata={
+                        "close_reason": reason,
+                        "abandoned_no_wallet_balance": True,
+                        "wallet_token_balance": wallet_balance,
+                    },
+                )
+                await record_trade(db_path, abandoned_trade)
+                return abandoned_trade
             return None
         if live_trade.metadata is None:
             live_trade.metadata = {}

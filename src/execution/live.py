@@ -191,6 +191,11 @@ class LiveExecutionAdapter(ExecutionAdapter):
             },
         )
 
+    async def get_token_balance(self, mint_address: str) -> float | None:
+        """Return the wallet balance for a mint without attempting a swap."""
+        self._ensure_open()
+        return await self._client.get_token_balance(mint_address)
+
     async def execute_swap(
         self,
         mint_address: str,

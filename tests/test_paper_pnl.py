@@ -613,6 +613,20 @@ def test_paper_close_records_exit_and_pnl(tmp_path: Path) -> None:
     assert closed.realized_pnl_sol == 2.0
 
 
+def test_zero_price_close_records_full_loss(tmp_path: Path) -> None:
+    db = tmp_path / "zero_price_close.db"
+    asyncio.run(init_db(db))
+    manager = PositionManager(db, load_settings())
+    mint = "AbandonedMint111111111111111111111111111111111"
+    _paper_position(manager, mint, amount_sol=1.0, price_sol=0.00001)
+
+    closed = asyncio.run(manager.close_position(mint, exit_price_sol=0))
+
+    assert closed is not None
+    assert closed.close_price_sol == 0
+    assert closed.realized_pnl_sol == -1.0
+
+
 # Requirement 5: close-all requires explicit confirmation
 def test_paper_close_all_requires_confirm(tmp_path: Path) -> None:
     db = tmp_path / "close_all_confirm.db"
