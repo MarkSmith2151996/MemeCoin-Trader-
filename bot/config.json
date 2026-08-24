@@ -4,5 +4,6 @@
   "db_path": "/home/dev/projects/memecoin-trader/data/trades.db",
   "daily_summary_hour": 0,
   "daily_summary_minute": 0,
-  "health_check_interval_seconds": 60
+  "health_check_interval_seconds": 60,
+  "execution_mode": "paper"
 }
