@@ -20,7 +20,7 @@ from solders.signature import Signature
 from solders.transaction import VersionedTransaction
 
 from src.chain.jupiter import SOL_MINT
-from src.chain.jupiter_swap import MIN_JITO_TIP_LAMPORTS, JupiterSwapClient
+from src.chain.jupiter_swap import MAX_JITO_TIP_LAMPORTS, MIN_JITO_TIP_LAMPORTS, JupiterSwapClient
 
 TOKEN_MINT = "tok12345678901234567890123456789012"
 WSOL_MINT = SOL_MINT
@@ -77,6 +77,7 @@ def _make_client(handler, keypair: Keypair | None = None) -> JupiterSwapClient:
         confirm_timeout_s=0.5,
         poll_interval_s=0.01,
         max_retries=2,
+        use_jito_bundles=False,
     )
 
 
@@ -173,6 +174,37 @@ def test_quote_price_sol_buy_direction() -> None:
     assert quote.price_sol == pytest.approx(0.05)
 
 
+def test_quote_falls_back_from_quicknode_metis_to_public_jupiter(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    keypair = _make_keypair()
+    monkeypatch.setenv("QUICKNODE_RPC_URL", "https://quicknode.example")
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.host == "quicknode.example":
+            assert request.url.path == "/quote"
+            return httpx.Response(503, json={"error": "unavailable"})
+        if request.url.host == "public.jupiterapi.com":
+            assert request.url.path == "/quote"
+            return httpx.Response(200, json=_quote_response())
+        payload = json.loads(request.content)
+        assert payload["method"] == "getTokenSupply"
+        return httpx.Response(200, json=RPC_DECIMALS_BODY)
+
+    client = JupiterSwapClient(
+        solana_rpc_url=RPC,
+        http_client=httpx.AsyncClient(transport=httpx.MockTransport(handler)),
+        keypair=keypair,
+        api_key="test-key",
+        use_jito_bundles=False,
+    )
+    quote = asyncio.run(client.get_quote(WSOL_MINT, TOKEN_MINT, 50_000_000))
+    asyncio.run(client.close())
+
+    assert quote is not None
+    assert quote.swap_api_base_url == "https://public.jupiterapi.com"
+
+
 def test_quote_sell_direction_price() -> None:
     def handler(request: httpx.Request) -> httpx.Response:
         if request.method == "POST":
@@ -208,7 +240,7 @@ def test_quote_failures_return_none() -> None:
 
     client = _make_client(handler)
     assert asyncio.run(client.get_quote(WSOL_MINT, TOKEN_MINT, 50_000_000)) is None
-    assert calls["n"] == 1
+    assert calls["n"] == 2
 
 
 def test_quote_non_positive_amount_returns_none() -> None:
@@ -575,6 +607,11 @@ def test_execute_swap_submits_jito_bundle_when_enabled() -> None:
             )
         payload = json.loads(request.content)
         method = payload["method"]
+        if method == "getTipFloor":
+            return httpx.Response(
+                200,
+                json={"result": [{"ema_landed_tips_50th_percentile": 0.00001}]},
+            )
         if method == "getTokenSupply":
             return httpx.Response(200, json=RPC_DECIMALS_BODY)
         if method == "getSignatureStatuses":
@@ -634,6 +671,11 @@ def test_execute_swap_falls_back_to_rpc_when_jito_fails() -> None:
             return httpx.Response(503, json={"error": "busy"})
         payload = json.loads(request.content)
         method = payload["method"]
+        if method == "getTipFloor":
+            return httpx.Response(
+                200,
+                json={"result": [{"ema_landed_tips_50th_percentile": 0.00001}]},
+            )
         if method == "getTokenSupply":
             return httpx.Response(200, json=RPC_DECIMALS_BODY)
         if method == "sendTransaction":
@@ -677,31 +719,34 @@ def test_execute_swap_falls_back_to_rpc_when_jito_fails() -> None:
     assert result.signature == "sig-rpc-fallback"
 
 
-def test_jito_tip_uses_dynamic_fee_with_minimum_floor() -> None:
+def test_jito_tip_uses_tip_floor_and_caps_at_half_milli_sol() -> None:
     async def run() -> tuple[int, int]:
-        async def callback_high() -> int | None:
-            return 5_000_000
+        def high_handler(request: httpx.Request) -> httpx.Response:
+            assert json.loads(request.content)["method"] == "getTipFloor"
+            return httpx.Response(
+                200,
+                json={"result": [{"ema_landed_tips_50th_percentile": 0.001}]},
+            )
 
-        async def callback_none() -> int | None:
-            return None
+        def empty_handler(request: httpx.Request) -> httpx.Response:
+            assert json.loads(request.content)["method"] == "getTipFloor"
+            return httpx.Response(200, json={"result": []})
 
         high_client = JupiterSwapClient(
             solana_rpc_url=RPC,
             http_client=httpx.AsyncClient(
-                transport=httpx.MockTransport(lambda request: httpx.Response(200)),
+                transport=httpx.MockTransport(high_handler),
             ),
             keypair=_make_keypair(),
             api_key="test-key",
-            priority_fee_callback=callback_high,
         )
         none_client = JupiterSwapClient(
             solana_rpc_url=RPC,
             http_client=httpx.AsyncClient(
-                transport=httpx.MockTransport(lambda request: httpx.Response(200)),
+                transport=httpx.MockTransport(empty_handler),
             ),
             keypair=_make_keypair(),
             api_key="test-key",
-            priority_fee_callback=callback_none,
         )
         try:
             high = await high_client._jito_tip_lamports()
@@ -712,5 +757,5 @@ def test_jito_tip_uses_dynamic_fee_with_minimum_floor() -> None:
         return high, low
 
     high, low = asyncio.run(run())
-    assert high == 5_000_000
+    assert high == MAX_JITO_TIP_LAMPORTS
     assert low == MIN_JITO_TIP_LAMPORTS

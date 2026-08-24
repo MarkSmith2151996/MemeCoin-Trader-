@@ -18,12 +18,9 @@ Flow per swap:
 3. Reconcile — always read the wallet token/SOL balance after the swap to
    verify the fill actually landed.
 
-MT-589: Jito bundle routing. Every swap is wrapped as a bundle
-``[tip_transfer, swap]`` submitted to the Jito block engine; the tip is
-``max(dynamic_priority_fee, 0.001 SOL)`` paid to a randomly chosen canonical
-tip account. A failed Jito submission logs a warning and falls back to the
-plain RPC send — a bundle failure never blocks a trade. Flip
-``USE_JITO_BUNDLES`` to False to disable.
+MT-636: swaps use the QuickNode Metis add-on when ``QUICKNODE_RPC_URL`` is
+configured and fall back to public Jupiter. Jito bundles use the QuickNode
+Lil' JIT ``getTipFloor`` API's EMA median, clamped to 0.0005 SOL.
 """
 
 from __future__ import annotations
@@ -55,33 +52,35 @@ load_dotenv()
 
 log = logging.getLogger("jupiter_swap")
 
-_DEFAULT_BASE_URL = "https://api.jup.ag"
+_PUBLIC_JUPITER_BASE_URL = "https://public.jupiterapi.com"
 _DEFAULT_SOLANA_RPC = "https://api.mainnet-beta.solana.com"
 _FALLBACK_DECIMALS = 9
 _PRIORITY_LEVEL = "veryHigh"
 _PRIORITY_MAX_LAMPORTS = 1_000_000
 
-# ── MT-589: Jito bundle routing ────────────────────────────────────────
+# ── MT-636: Jito bundle routing ────────────────────────────────────────
 # Master switch for Jito bundle submission of every swap. When True, each
 # signed swap is wrapped in a bundle with a tip to one of the canonical Jito
 # tip accounts below; on bundle failure the client falls back to the plain
 # RPC sendTransaction path with a warning log.
-USE_JITO_BUNDLES = False
+USE_JITO_BUNDLES = True
 JITO_BLOCK_ENGINE_URL = "https://mainnet.block-engine.jito.wtf/api/v1/bundles"
 # Canonical Jito tip accounts (pick one at random per bundle).
 JITO_TIP_ACCOUNTS = (
     "96gYZGLnJYVFmbjzopPSU6QiEV5fGqZNyN9nmNhvrZU5",
-    "HFqU5x63VTqvQss8hp11i4bVqkfRtQo3EZLFNi1Aqtg",
+    "HFqU5x63VTqvQss8hp11i4wVV8bD44PvwucfZ2bU7gRe",
     "Cw8CFyM9FkoMi7K7Crf6HNQqf4uEMzpKw6QNghXLvLkY",
+    "ADaUMid9yfUytqMBgopwjb2DTLSokTSzL1zt6iGPaS49",
     "DfXygSm4jCyNCybVYYK6DwvWqjKee8pbDmJGcLWNDXjh",
     "ADuUkR4vqLUMWXxW9gh6D6L8pMSawimctcNZ5pGwDcEt",
     "DttWaMuVvTiduZRnguLF7jNxTgiMBZ1hyAumKUiL2KRL",
     "3AVi9Tg9Uo68tJfuvoKvqKNWKkC5wPdSSdeBnizKZ6jT",
 )
-# Minimum Jito tip: 0.001 SOL. The dynamic priority fee (75th percentile of
-# getRecentPrioritizationFees, microlamports) is the base; the tip is
-# max(dynamic_fee, MIN_JITO_TIP_LAMPORTS).
-MIN_JITO_TIP_LAMPORTS = int(0.001 * LAMPORTS_PER_SOL)
+# Jito requires a minimum 1,000-lamport bundle tip. The smart tip is drawn
+# from getTipFloor and capped so a busy auction cannot consume trade PnL.
+MIN_JITO_TIP_LAMPORTS = 1_000
+MAX_JITO_TIP_LAMPORTS = int(0.0005 * LAMPORTS_PER_SOL)
+_JITO_TIP_CACHE_SECONDS = 30.0
 
 
 @dataclass(frozen=True, slots=True)
@@ -97,6 +96,8 @@ class JupiterSwapQuote:
     token_decimals: int
     price_sol: float | None
     raw: dict[str, object]
+    swap_api_base_url: str = ""
+    swap_api_legacy_paths: bool = False
     quoted_at: str = field(default_factory=lambda: datetime.now(UTC).isoformat())
 
 
@@ -135,7 +136,7 @@ class JupiterSwapClient:
 
     def __init__(
         self,
-        base_url: str = _DEFAULT_BASE_URL,
+        base_url: str | None = None,
         solana_rpc_url: str | None = None,
         backup_solana_rpc_url: str | None = None,
         http_client: httpx.AsyncClient | None = None,
@@ -149,7 +150,15 @@ class JupiterSwapClient:
         use_jito_bundles: bool | None = None,
         jito_client: JitoBlockEngineClient | None = None,
     ) -> None:
-        self._base_url = base_url.rstrip("/")
+        # Explicit base_url preserves the old Jupiter /swap/v1 test and
+        # operator override surface. Normal runtime uses QuickNode Metis.
+        self._metis_base_url = (
+            base_url.rstrip("/")
+            if base_url
+            else os.environ.get("QUICKNODE_RPC_URL", "").rstrip("/")
+        )
+        self._metis_legacy_paths = base_url is not None
+        self._public_jupiter_base_url = _PUBLIC_JUPITER_BASE_URL
         self._solana_rpc_url = (
             solana_rpc_url
             or os.environ.get("QUICKNODE_RPC_URL")
@@ -172,6 +181,8 @@ class JupiterSwapClient:
         self._max_retries = max_retries
         self._decimals_cache: dict[str, int] = {}
         self._priority_fee_callback = priority_fee_callback
+        self._jito_tip_lamports_cache: int | None = None
+        self._jito_tip_fetched_at = 0.0
         # MT-589: Jito bundle routing. `use_jito_bundles` defaults to the
         # module-level USE_JITO_BUNDLES flag; the Jito client shares this
         # client's HTTP transport so tests never touch the real network.
@@ -249,24 +260,19 @@ class JupiterSwapClient:
             "dynamicSlippage": "true",
         }
         try:
-            response = await self._client.get(
-                f"{self._base_url}/swap/v1/quote",
-                params=params,
-                headers=self._headers(),
+            response, swap_api_base_url, swap_api_legacy_paths = await self._get_swap_response(
+                "quote", params=params,
             )
         except httpx.HTTPError as exc:
             log.warning("LIVE quote request failed %s→%s: %s",
                         input_mint[:16], output_mint[:16], exc)
             return None
 
-        if response.status_code == 429:
-            log.warning("LIVE quote rate limited (429) %s→%s",
-                        input_mint[:16], output_mint[:16])
-            return None
-        if response.status_code != 200:
-            log.warning("LIVE quote failed HTTP %d %s→%s: %s",
-                        response.status_code, input_mint[:16], output_mint[:16],
-                        response.text[:200])
+        if response is None or response.status_code != 200:
+            status = response.status_code if response is not None else "unavailable"
+            log.warning("LIVE quote failed HTTP %s %s→%s: %s",
+                        status, input_mint[:16], output_mint[:16],
+                        response.text[:200] if response is not None else "no provider response")
             return None
 
         try:
@@ -294,6 +300,8 @@ class JupiterSwapClient:
             token_decimals=decimals,
             price_sol=price_sol,
             raw=data,
+            swap_api_base_url=swap_api_base_url,
+            swap_api_legacy_paths=swap_api_legacy_paths,
         )
 
     # ── Swap execution ───────────────────────────────────────────────
@@ -436,10 +444,11 @@ class JupiterSwapClient:
         }
         body["prioritizationFeeLamports"] = await self._prioritization_fee_body()
         try:
-            response = await self._client.post(
-                f"{self._base_url}/swap/v1/swap",
-                json=body,
-                headers=self._headers(),
+            response = await self._post_swap_response(
+                "swap",
+                body,
+                quote.swap_api_base_url,
+                quote.swap_api_legacy_paths,
             )
         except httpx.HTTPError as exc:
             raise RuntimeError(f"swap request failed: {exc}") from exc
@@ -535,6 +544,8 @@ class JupiterSwapClient:
             tip_tx_b64 = self._build_tip_transaction(tip_lamports, tip_account, blockhash)
             result = await self._jito_client._submit_bundle_for_guarded_adapter(
                 [tip_tx_b64, signed_b64],
+                tip_lamports=tip_lamports,
+                validator_tip_account=tip_account,
             )
         except Exception as exc:  # noqa: BLE001 — a bundle failure never blocks a trade
             log.warning("JITO bundle submission failed: %s — falling back to RPC send", exc)
@@ -552,16 +563,34 @@ class JupiterSwapClient:
         return swap_signature
 
     async def _jito_tip_lamports(self) -> int:
-        """MT-589: Jito tip = max(dynamic priority fee, 0.001 SOL)."""
-        dynamic = 0
-        if self._priority_fee_callback is not None:
-            try:
-                fee = await self._priority_fee_callback()
-                if fee is not None and fee > 0:
-                    dynamic = fee
-            except Exception as exc:  # noqa: BLE001 — degrade to the minimum tip
-                log.warning("JITO tip dynamic fee lookup failed: %s", exc)
-        return max(dynamic, MIN_JITO_TIP_LAMPORTS)
+        """Return a cached, capped Jito tip from QuickNode's getTipFloor API."""
+        if (
+            self._jito_tip_lamports_cache is not None
+            and time.monotonic() - self._jito_tip_fetched_at < _JITO_TIP_CACHE_SECONDS
+        ):
+            return self._jito_tip_lamports_cache
+
+        payload = {"jsonrpc": "2.0", "id": 1, "method": "getTipFloor", "params": []}
+        try:
+            response = await self._rpc_post(payload)
+            response.raise_for_status()
+            floors = response.json()["result"]
+            floor = floors[0]
+            tip_sol = float(
+                floor.get("ema_landed_tips_50th_percentile")
+                or floor["landed_tips_50th_percentile"],
+            )
+            tip_lamports = int(tip_sol * LAMPORTS_PER_SOL)
+            self._jito_tip_lamports_cache = max(
+                MIN_JITO_TIP_LAMPORTS,
+                min(tip_lamports, MAX_JITO_TIP_LAMPORTS),
+            )
+            self._jito_tip_fetched_at = time.monotonic()
+            log.info("JITO smart tip lamports=%d", self._jito_tip_lamports_cache)
+        except (httpx.HTTPError, KeyError, TypeError, ValueError, IndexError) as exc:
+            log.warning("JITO smart tip lookup failed; using minimum: %s", exc)
+            return MIN_JITO_TIP_LAMPORTS
+        return self._jito_tip_lamports_cache
 
     def _build_tip_transaction(self, tip_lamports: int, tip_account: str, blockhash: Hash) -> str:
         """Build a signed legacy SOL transfer to a Jito tip account (base64).
@@ -842,12 +871,76 @@ class JupiterSwapClient:
             except httpx.HTTPError as exc:
                 last_error = exc
                 if index + 1 < len(urls):
-                    log.warning("LIVE RPC primary failed for %s; trying configured backup", payload["method"])
+                    log.warning(
+                        "LIVE RPC primary failed for %s; trying configured backup",
+                        payload["method"],
+                    )
         assert last_error is not None
         raise last_error
 
+    async def _get_swap_response(
+        self,
+        endpoint: str,
+        *,
+        params: dict[str, str],
+    ) -> tuple[httpx.Response | None, str, bool]:
+        """Try QuickNode Metis first, then compatible public Jupiter."""
+        providers: list[tuple[str, bool]] = []
+        if self._metis_base_url:
+            providers.append((self._metis_base_url, self._metis_legacy_paths))
+        providers.append((self._public_jupiter_base_url, False))
+        last_response: httpx.Response | None = None
+        for base_url, legacy_paths in providers:
+            try:
+                response = await self._client.get(
+                    self._swap_endpoint(base_url, endpoint, legacy_paths),
+                    params=params,
+                    headers=self._headers(),
+                )
+            except httpx.HTTPError:
+                continue
+            if response.status_code == 200:
+                return response, base_url, legacy_paths
+            last_response = response
+        return last_response, self._public_jupiter_base_url, False
+
+    async def _post_swap_response(
+        self,
+        endpoint: str,
+        body: dict[str, object],
+        quoted_base_url: str,
+        quoted_legacy_paths: bool,
+    ) -> httpx.Response:
+        """Build through the quote's provider, retrying public Jupiter once."""
+        base_url = quoted_base_url or self._metis_base_url or self._public_jupiter_base_url
+        legacy_paths = quoted_legacy_paths if quoted_base_url else self._metis_legacy_paths
+        providers = [(base_url, legacy_paths)]
+        if base_url != self._public_jupiter_base_url:
+            providers.append((self._public_jupiter_base_url, False))
+        last_response: httpx.Response | None = None
+        for provider_url, provider_legacy_paths in providers:
+            try:
+                response = await self._client.post(
+                    self._swap_endpoint(provider_url, endpoint, provider_legacy_paths),
+                    json=body,
+                    headers=self._headers(),
+                )
+            except httpx.HTTPError:
+                continue
+            if response.status_code == 200:
+                return response
+            last_response = response
+        if last_response is None:
+            raise httpx.RequestError("all swap API providers failed")
+        return last_response
+
+    @staticmethod
+    def _swap_endpoint(base_url: str, endpoint: str, legacy_paths: bool) -> str:
+        path_prefix = "/swap/v1" if legacy_paths else ""
+        return f"{base_url}{path_prefix}/{endpoint}"
+
     def _headers(self) -> dict[str, str]:
-        return {"x-api-key": self._api_key}
+        return {"x-api-key": self._api_key} if self._api_key else {}
 
     @staticmethod
     def _parse_fees(fees: object) -> int | None:

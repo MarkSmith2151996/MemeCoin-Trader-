@@ -261,7 +261,7 @@ def test_screen_coin_accepts_graduated_token_with_enough_depth() -> None:
 
 def test_screen_coin_rejects_graduated_token_below_5_sol() -> None:
     # Raydium pool with 4 SOL depth. The MT-617 pool-mcap override fires
-    # first: pool_mcap = 4 SOL * $75 * 2 = $600, so the $10K Jupiter mcap is
+    # first: pool_mcap = 4 SOL * current SOL price * 4.4, so the $10K Jupiter mcap is
     # replaced and rejected below the $5,100 floor.
     coin = _make_coin(
         mint="abc123pump",
@@ -272,7 +272,7 @@ def test_screen_coin_rejects_graduated_token_below_5_sol() -> None:
     passed, reason, gates = asyncio.run(_screen(coin))
     assert not passed
     assert not gates["mcap_pass"]
-    assert "$600 < $5100 floor" in reason
+    assert f"${4.0 * SOL_PRICE * 4.4:.0f} < $5100 floor" in reason
     assert "jupiter_mcap=$10000" in reason
 
 
@@ -295,7 +295,7 @@ def test_screen_coin_accepts_bonding_curve_token_with_enough_depth() -> None:
 
 def test_screen_coin_rejects_bonding_curve_token_below_5_sol() -> None:
     # Bonding-curve pool at 4 SOL with an inflated Jupiter mcap: the MT-617
-    # pool-mcap override caps mcap at $600, rejecting it at the mcap gate.
+    # pool-mcap override caps mcap, rejecting it at the mcap gate.
     coin = _make_coin(
         mint="abc123pump",
         pool_id="abc123pump",
@@ -305,7 +305,7 @@ def test_screen_coin_rejects_bonding_curve_token_below_5_sol() -> None:
     passed, reason, gates = asyncio.run(_screen(coin))
     assert not passed
     assert not gates["mcap_pass"]
-    assert "$600 < $5100 floor" in reason
+    assert f"${4.0 * SOL_PRICE * 4.4:.0f} < $5100 floor" in reason
 
 
 def test_screen_coin_skips_token_without_liquidity_data() -> None:
@@ -555,6 +555,6 @@ def test_mt617_candidate_coin_gets_corrected_inputs() -> None:
     )
     passed, _, _ = asyncio.run(_screen(coin))
     assert not passed
-    assert coin["mcap_corrected"] == 600.0  # pool_mcap override stored
+    assert coin["mcap_corrected"] == 4.0 * SOL_PRICE * 4.4  # pool_mcap override stored
     assert coin["mcap_jupiter"] == 10_000.0
     assert coin["usd_market_cap"] == 10_000.0  # raw field untouched

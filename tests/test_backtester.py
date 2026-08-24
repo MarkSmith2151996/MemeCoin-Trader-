@@ -61,14 +61,22 @@ def test_backtester_loads_only_closed_positions_with_linked_snapshots(tmp_path: 
     opened = datetime(2026, 1, 1, tzinfo=UTC)
     with sqlite3.connect(db_path) as db:
         db.execute(
-            """INSERT INTO positions VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            """INSERT INTO positions (
+                id, mint_address, entry_trade_id, amount_sol, token_amount,
+                entry_price_sol, status, opened_at, closed_at, realized_pnl_sol,
+                partial_exits_json, close_price_sol, peak_price_sol, strategy
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (
                 "with-path", "Mint1", "trade-1", 0.1, 1.0, 100.0, "CLOSED", opened.isoformat(),
                 (opened + timedelta(minutes=1)).isoformat(), 0.02, "[]", 120.0, 120.0, "A",
             ),
         )
         db.execute(
-            """INSERT INTO positions VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            """INSERT INTO positions (
+                id, mint_address, entry_trade_id, amount_sol, token_amount,
+                entry_price_sol, status, opened_at, closed_at, realized_pnl_sol,
+                partial_exits_json, close_price_sol, peak_price_sol, strategy
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (
                 "without-path", "Mint2", "trade-2", 0.1, 1.0, 100.0, "CLOSED", opened.isoformat(),
                 (opened + timedelta(minutes=1)).isoformat(), -0.01, "[]", 90.0, 100.0, "A",

@@ -1,13 +1,12 @@
 import asyncio
 from pathlib import Path
 
-import httpx
-
-from src.core.models import SignalSource as SignalSourceEnum, SignalType
+from src.core.models import SignalSource as SignalSourceEnum
+from src.core.models import SignalType
 from src.signals.whale_tracker import WhaleWalletTracker
 
 
-def test_whale_tracker_loads_api_key_from_dotenv(tmp_path: Path) -> None:
+def test_whale_tracker_loads_api_key_from_dotenv(tmp_path: Path, monkeypatch) -> None:
     config_path = tmp_path / "wallets.yaml"
     dotenv_path = tmp_path / ".env"
     config_path.write_text(
@@ -20,8 +19,12 @@ wallets:
 """.strip(),
         encoding="utf-8",
     )
-    dotenv_path.write_text("HELIUS_API_KEY=test-helius-key\nEXECUTION_MODE=paper\n", encoding="utf-8")
+    dotenv_path.write_text(
+        "HELIUS_API_KEY=test-helius-key\nEXECUTION_MODE=paper\n",
+        encoding="utf-8",
+    )
 
+    monkeypatch.delenv("HELIUS_API_KEY", raising=False)
     tracker = WhaleWalletTracker(wallets_config_path=config_path, dotenv_path=dotenv_path)
 
     assert tracker._api_key == "test-helius-key"
