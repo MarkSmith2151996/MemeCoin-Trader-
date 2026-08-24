@@ -208,7 +208,7 @@ MID_POOL_MIN_SOL = 5.0
 PAPER_SIZE_SOL = 0.01
 MIN_MENTIONS = 3
 MENTION_WINDOW_MINUTES = 5
-MAX_OPEN = 1
+MAX_OPEN = 5
 EXECUTION_MODE = "paper"  # set at startup from .env
 # MT-560: 60s was legacy from the Chrome/DexScreener era (8s browser-pc
 # capture per cycle). MT-588: with the Jupiter Developer tier (10 RPS) active

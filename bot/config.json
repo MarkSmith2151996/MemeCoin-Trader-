@@ -1,6 +1,6 @@
 {
-  "telegram_token": "",
-  "telegram_chat_id": "",
+  "telegram_token": "8883618054:AAFuCq3nnWvzZ9LH0o85JuWF1AynIyDOMZo",
+  "telegram_chat_id": "7698267890",
   "db_path": "/home/dev/projects/memecoin-trader/data/trades.db",
   "daily_summary_hour": 0,
   "daily_summary_minute": 0,
