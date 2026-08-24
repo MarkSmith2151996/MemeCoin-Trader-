@@ -38,7 +38,7 @@ TAKE_PROFIT_PCT = 80.0
 HARD_STOP_PCT = 10.0
 EARLY_EXIT_SECONDS = 90.0
 EARLY_EXIT_GREEN_PCT = 0.01
-PAPER_SIZE_SOL = 0.05
+POSITION_SIZE_SOL = 0.05
 
 
 @dataclass(frozen=True)
@@ -230,7 +230,7 @@ def replay_exit(mint: str, swaps: Iterable[Swap]) -> dict[str, object] | None:
         "peak_price": peak,
         "exit_reason": reason,
         "pnl_pct": pnl_pct,
-        "pnl_sol_at_0_05_size": PAPER_SIZE_SOL * pnl_pct / 100,
+        "pnl_sol_at_0_05_size": POSITION_SIZE_SOL * pnl_pct / 100,
         "closed_within_two_hours": reason != "open_at_end",
     }
 
@@ -346,7 +346,7 @@ def run(graduations_path: Path, swaps_path: Path, output_dir: Path, paper_db: Pa
             "hard_stop_pct": HARD_STOP_PCT,
             "early_exit_seconds": EARLY_EXIT_SECONDS,
             "early_exit_green_pct": EARLY_EXIT_GREEN_PCT,
-            "paper_size_sol": PAPER_SIZE_SOL,
+            "paper_size_sol": POSITION_SIZE_SOL,
         },
         "dune_backtest": {
             "gate_passed": len(passed_rows),

@@ -8,6 +8,7 @@ const DAY_MS = 24 * 3600 * 1000;
 const TUNER_START_CLOSES = 50;
 
 const SCRIPT_DIR = path.join(__dirname, "..", "scripts");
+const ENV_PATH = path.join(__dirname, "..", ".env");
 
 function tickerOrShort(mint) {
   const t = db.tickerForMint(mint);
@@ -301,6 +302,7 @@ function last5Report() {
 function gatesReport() {
   const lines = ["*Gate Thresholds*", ""];
   const bConsts = lib.parseScriptConstants(path.join(SCRIPT_DIR, "run_strategy_b.py"));
+  const env = lib.parseEnvFile(ENV_PATH);
   lines.push("*Strategy B (run_strategy_b.py)*");
   const cfg = db.latestGateConfig("B");
   if (cfg) {
@@ -320,11 +322,13 @@ function gatesReport() {
   const bMaxMcap = lib.pyNum(bConsts.MAX_MCAP_USD);
   const bDev = lib.pyNum(bConsts.MAX_DEV_HOLDINGS_PCT);
   const bHolder = lib.pyNum(bConsts.MAX_TOP10_HOLDER_PCT);
-  const bTp = lib.pyNum(bConsts.TAKE_PROFIT_PCT);
-  const bHardStop = lib.pyNum(bConsts.HARD_STOP_PCT);
+  const bTpMultiplier = lib.pyNum(bConsts.TAKE_PROFIT_MULTIPLIER);
+  const bHardStopMultiplier = lib.pyNum(bConsts.HARD_STOP_MULTIPLIER);
+  const bTp = bTpMultiplier == null ? null : (bTpMultiplier - 1) * 100;
+  const bHardStop = bHardStopMultiplier == null ? null : (1 - bHardStopMultiplier) * 100;
   const bTime = lib.pyNum(bConsts.TIME_STOP_MINUTES);
-  const bSize = lib.pyNum(bConsts.PAPER_SIZE_SOL);
-  const bMaxOpen = lib.pyNum(bConsts.MAX_OPEN);
+  const bSize = lib.pyNum(env.POSITION_SIZE_SOL);
+  const bMaxOpen = lib.pyNum(env.MAX_OPEN);
   const bMentions = lib.pyNum(bConsts.MIN_MENTIONS);
   if (bMaxMcap != null) lines.push(`Max mcap: ${lib.fmtUsd(bMaxMcap)}`);
   if (bDev != null) lines.push(`Max dev holdings: ${bDev}%`);

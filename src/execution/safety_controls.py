@@ -19,7 +19,7 @@ import json
 import logging
 import os
 import tempfile
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -27,6 +27,7 @@ log = logging.getLogger("safety_controls")
 
 KILL_SWITCH_SLIPPAGE_BPS = 500
 DEFAULT_BREAKER_PATH = Path("data/circuit_breaker.json")
+DEFAULT_BREAKER_COOLDOWN_SECONDS = 30 * 60
 
 
 @dataclass(frozen=True, slots=True)
@@ -39,6 +40,7 @@ class BreakerState:
     signature_attempt: str | None = None
     error: str | None = None
     tripped_at: str | None = None
+    last_error_at: str | None = None
 
 
 def _atomic_write(path: Path, content: str) -> None:
@@ -67,10 +69,26 @@ class CircuitBreaker:
     gates to run).
     """
 
-    def __init__(self, *, flag_path: str | Path = DEFAULT_BREAKER_PATH) -> None:
+    def __init__(
+        self,
+        *,
+        flag_path: str | Path = DEFAULT_BREAKER_PATH,
+        cooldown_seconds: int | None = None,
+    ) -> None:
         self._path = Path(flag_path)
+        if cooldown_seconds is None:
+            try:
+                cooldown_seconds = int(
+                    os.getenv(
+                        "CIRCUIT_BREAKER_COOLDOWN_SECONDS",
+                        str(DEFAULT_BREAKER_COOLDOWN_SECONDS),
+                    ),
+                )
+            except ValueError:
+                cooldown_seconds = DEFAULT_BREAKER_COOLDOWN_SECONDS
+        self._cooldown_seconds = max(0, cooldown_seconds)
 
-    def status(self) -> BreakerState:
+    def _read_state(self) -> BreakerState:
         try:
             raw = self._path.read_text(encoding="utf-8")
         except FileNotFoundError:
@@ -89,7 +107,57 @@ class CircuitBreaker:
             signature_attempt=data.get("signature_attempt"),
             error=data.get("error"),
             tripped_at=data.get("tripped_at"),
+            last_error_at=data.get("last_error_at"),
         )
+
+    @staticmethod
+    def _payload(state: BreakerState) -> dict[str, object | None]:
+        return {
+            "tripped": state.tripped,
+            "reason": state.reason,
+            "mint": state.mint,
+            "signature_attempt": state.signature_attempt,
+            "error": state.error,
+            "tripped_at": state.tripped_at,
+            "last_error_at": state.last_error_at,
+        }
+
+    def _auto_reset_if_due(self, state: BreakerState) -> bool:
+        if not state.tripped or self._cooldown_seconds <= 0:
+            return False
+        timestamp = state.last_error_at or state.tripped_at
+        if not timestamp:
+            return False
+        try:
+            last_error_at = datetime.fromisoformat(timestamp.replace("Z", "+00:00"))
+        except ValueError:
+            return False
+        if last_error_at.tzinfo is None:
+            last_error_at = last_error_at.replace(tzinfo=UTC)
+        elapsed = (datetime.now(UTC) - last_error_at).total_seconds()
+        if elapsed < self._cooldown_seconds:
+            return False
+        try:
+            self._path.unlink()
+        except FileNotFoundError:
+            pass
+        except OSError as exc:
+            log.error("CIRCUIT BREAKER auto-reset failed: %s", exc)
+            return False
+        log.warning(
+            "CIRCUIT BREAKER AUTO-RESET after %ds without a new error "
+            "(reason=%s mint=%s)",
+            self._cooldown_seconds,
+            state.reason or "?",
+            state.mint or "-",
+        )
+        return True
+
+    def status(self) -> BreakerState:
+        state = self._read_state()
+        if self._auto_reset_if_due(state):
+            return BreakerState(tripped=False)
+        return state
 
     def is_tripped(self) -> bool:
         return self.status().tripped
@@ -105,28 +173,25 @@ class CircuitBreaker:
         """Set the trip flag, preserving an existing trip if already set."""
         existing = self.status()
         if existing.tripped:
+            updated = replace(existing, last_error_at=datetime.now(UTC).isoformat())
+            _atomic_write(self._path, json.dumps(self._payload(updated), indent=2) + "\n")
             log.warning(
-                "CIRCUIT BREAKER already tripped (reason=%s) — keeping original state",
+                "CIRCUIT BREAKER already tripped (reason=%s) — "
+                "keeping original state and refreshing cooldown",
                 existing.reason or "?",
             )
-            return existing
+            return updated
+        now = datetime.now(UTC).isoformat()
         state = BreakerState(
             tripped=True,
             reason=reason,
             mint=mint,
             signature_attempt=signature_attempt,
             error=error,
-            tripped_at=datetime.now(UTC).isoformat(),
+            tripped_at=now,
+            last_error_at=now,
         )
-        payload = {
-            "tripped": state.tripped,
-            "reason": state.reason,
-            "mint": state.mint,
-            "signature_attempt": state.signature_attempt,
-            "error": state.error,
-            "tripped_at": state.tripped_at,
-        }
-        _atomic_write(self._path, json.dumps(payload, indent=2) + "\n")
+        _atomic_write(self._path, json.dumps(self._payload(state), indent=2) + "\n")
         log.critical(
             "CIRCUIT BREAKER TRIPPED reason=%s mint=%s signature_attempt=%s error=%s",
             reason, mint or "-", signature_attempt or "-", error,

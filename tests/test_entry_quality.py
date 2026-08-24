@@ -560,7 +560,25 @@ def test_strategy_b_time_gate_blocks_and_logs(db: Path, monkeypatch: pytest.Monk
     assert candidate_log_rows(db, "B", "time_gate")
 
 
-# ── 5. No re-entry on losing mints ───────────────────────────────────
+def test_strategy_b_monitor_uses_cached_price_without_provider_lookup(db: Path) -> None:
+    class UnexpectedProviderLookup:
+        async def get_current_price(self, mint: str) -> float:
+            raise AssertionError(f"provider lookup should not run for cached {mint}")
+
+    manager = FakeManager([make_position(entry=1.0)])
+    danger = asyncio.run(
+        strategy_b.monitor_positions(
+            manager,
+            UnexpectedProviderLookup(),
+            db,
+            price_overrides={"Mint1": 0.94},
+            allow_provider_lookup=False,
+        ),
+    )
+    assert danger is True
+
+
+# ── 5. Loss-ban expiry ───────────────────────────────────────────────
 
 def test_has_losing_close_helpers(db: Path) -> None:
     assert asyncio.run(has_losing_close(db, "UnknownMint")) is False
@@ -639,23 +657,42 @@ def test_strategy_a_repeat_loser_allowed_after_cooldown(
     )
     assert ok is True
     assert candidate_log_rows(db, "A", "repeat_loser") == []
-    expected_size = paper_loop.PAPER_SIZE_SOL
+    expected_size = paper_loop.POSITION_SIZE_SOL
     if datetime.now(UTC).weekday() == 5:
         expected_size *= paper_loop.SATURDAY_SIZE_MULTIPLIER
     assert adapter.sizes == [expected_size]
 
 
-def test_strategy_b_repeat_loser_blocked(db: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_strategy_b_repeat_loser_blocked_within_ttl(
+    db: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     # MT-593: Wednesday is blocked again — freeze the weekday gate open so the
     # repeat_loser gate (the gate under test) is the one that rejects.
     monkeypatch.setattr(strategy_b, "BLOCKED_WEEKDAYS", frozenset())
-    seed_closed_position(db, "Loser", pnl=-0.002)
+    seed_closed_position(db, "Loser", pnl=-0.002, closed_at=datetime.now(UTC).isoformat())
     manager = FakeManager()
     result = asyncio.run(
         strategy_b.try_enter("Loser", "TST", FakePrice(1.0), FakeAdapter(), manager, db),
     )
     assert result is None
     assert candidate_log_rows(db, "B", "repeat_loser")
+
+
+def test_strategy_b_loss_ban_expires_after_ttl(db: Path) -> None:
+    seed_closed_position(
+        db,
+        "OldLoser",
+        pnl=-0.002,
+        closed_at=(datetime.now(UTC) - timedelta(hours=25)).isoformat(),
+    )
+    assert asyncio.run(
+        has_recent_losing_close(
+            db,
+            "OldLoser",
+            cooldown_minutes=strategy_b.LOSS_BAN_TTL_HOURS * 60,
+        ),
+    ) is False
 
 
 # ── 6. Position caps ─────────────────────────────────────────────────
@@ -730,7 +767,7 @@ def test_strategy_a_saturday_halves_position_size(
         paper_loop.try_enter("SatMint", FakePrice(1.0), adapter, manager, db, ticker="TST"),
     )
     assert ok is True
-    assert adapter.sizes == [paper_loop.PAPER_SIZE_SOL * paper_loop.SATURDAY_SIZE_MULTIPLIER]
+    assert adapter.sizes == [paper_loop.POSITION_SIZE_SOL * paper_loop.SATURDAY_SIZE_MULTIPLIER]
 
 
 def test_strategy_b_uses_flat_position_size_on_saturday(
@@ -747,7 +784,7 @@ def test_strategy_b_uses_flat_position_size_on_saturday(
         ),
     )
     assert result == "pos-1"
-    assert adapter.sizes == [strategy_b.PAPER_SIZE_SOL]
+    assert adapter.sizes == [strategy_b.POSITION_SIZE_SOL]
     # MT-588/MT-590: thick pool (>20 SOL) -> 1% (100 bps) tiered slippage.
     assert adapter.slippages == [strategy_b.SLIPPAGE_BPS_THICK_POOL]
 

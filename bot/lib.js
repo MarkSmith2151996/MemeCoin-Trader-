@@ -153,6 +153,23 @@ function parseScriptConstants(filePath) {
   return out;
 }
 
+/** Read simple KEY=VALUE entries from an environment file without exporting them. */
+function parseEnvFile(filePath) {
+  const out = {};
+  let text;
+  try {
+    text = fs.readFileSync(filePath, "utf8");
+  } catch {
+    return out;
+  }
+  for (const line of text.split("\n")) {
+    const m = line.match(/^\s*([A-Z][A-Z0-9_]*)\s*=\s*(.*?)\s*$/);
+    if (!m) continue;
+    out[m[1]] = m[2].replace(/^(["'])(.*)\1$/, "$2");
+  }
+  return out;
+}
+
 /** Parse a Python number literal (int, float, underscores). */
 function pyNum(raw) {
   if (raw == null) return null;
@@ -206,6 +223,7 @@ module.exports = {
   fmtEtTime,
   fmtEtDate,
   parseScriptConstants,
+  parseEnvFile,
   pyNum,
   pyStr,
   parseHolderTiers,

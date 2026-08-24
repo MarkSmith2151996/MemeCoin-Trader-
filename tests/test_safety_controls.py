@@ -202,6 +202,35 @@ def test_breaker_trip_preserves_original_reason(tmp_path, caplog) -> None:
     assert breaker.status().mint == TOKEN_MINT
 
 
+def test_breaker_refreshes_cooldown_when_another_error_occurs(tmp_path) -> None:
+    flag = tmp_path / "cb.json"
+    breaker = CircuitBreaker(flag_path=flag)
+    breaker.trip(mint=TOKEN_MINT, error="first failure")
+    first = json.loads(flag.read_text())
+    breaker.trip(mint=SECOND_MINT, error="second failure")
+    second = json.loads(flag.read_text())
+
+    assert second["mint"] == TOKEN_MINT
+    assert second["error"] == "first failure"
+    assert second["last_error_at"] >= first["last_error_at"]
+
+
+def test_breaker_auto_resets_after_quiet_cooldown(tmp_path, caplog) -> None:
+    flag = tmp_path / "cb.json"
+    breaker = CircuitBreaker(flag_path=flag, cooldown_seconds=60)
+    breaker.trip(mint=TOKEN_MINT, error="boom")
+    payload = json.loads(flag.read_text())
+    payload["tripped_at"] = "2020-01-01T00:00:00+00:00"
+    payload["last_error_at"] = "2020-01-01T00:00:00+00:00"
+    flag.write_text(json.dumps(payload))
+
+    with caplog.at_level(logging.WARNING, logger="safety_controls"):
+        assert breaker.is_tripped() is False
+
+    assert not flag.exists()
+    assert any("CIRCUIT BREAKER AUTO-RESET" in record.message for record in caplog.records)
+
+
 def test_breaker_reset_clears_flag(tmp_path) -> None:
     breaker = CircuitBreaker(flag_path=tmp_path / "cb.json")
     breaker.trip(mint=TOKEN_MINT, error="boom")

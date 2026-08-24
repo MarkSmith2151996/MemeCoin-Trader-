@@ -1,8 +1,7 @@
 """PumpPortal token-trade price stream for live exit monitoring.
 
-The stream is deliberately an additive mark source: the regular Jupiter poll
-continues to run, so a disconnected websocket can never leave an open position
-without a price check.
+The runtime retains stream marks in memory for high-frequency stop checks. A
+stale stream invokes its supplied Jupiter fallback handler once per mint.
 """
 
 from __future__ import annotations
@@ -48,10 +47,10 @@ class PumpPortalPriceFeed:
         self._stale_after_s = stale_after_s
 
     async def run(self) -> None:
-        """Reconnect indefinitely; callers keep Jupiter polling as the fallback."""
+        """Reconnect indefinitely; callers use the stale handler as fallback."""
         log.info(
             "PRICE_FEED: PumpPortal WebSocket starting; "
-            "fallback to Jupiter polling until connected",
+            "stale marks fall back to Jupiter until connected",
         )
         while True:
             try:

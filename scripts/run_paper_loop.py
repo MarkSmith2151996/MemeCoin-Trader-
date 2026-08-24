@@ -13,7 +13,7 @@ Run: python scripts/run_paper_loop.py
 """
 
 # ── Position sizing (MT-522/MT-523) ─────────────────────────────────
-# Entry size = PAPER_SIZE_SOL (0.05 SOL since MT-523; was 0.01 SOL) * size_multiplier.
+# Entry size = POSITION_SIZE_SOL (0.05 SOL since MT-523; was 0.01 SOL) * size_multiplier.
 # size_multiplier is always 1.0 in practice:
 #   - Saturday halving: * 0.5 when utc_now.weekday() == 5 (-> 0.025 SOL).
 #   - Whale conviction sizing (2x/4x/6x in src/signals/whale_tracker.py)
@@ -77,7 +77,7 @@ FAST_MONITOR_INTERVAL_S = 5
 FAST_POLL_DROP_PCT = 0.05
 CONFIRMATION_DELAY_S = 45
 MAX_OPEN_POSITIONS = 4
-PAPER_SIZE_SOL = 0.05
+POSITION_SIZE_SOL = 0.05
 MAX_TOP10_HOLDER_PCT = 80.0
 TRAILING_STOP_PCT = 3.0
 TRAILING_ARM_PCT = 2.0
@@ -335,7 +335,7 @@ async def try_enter(
         log.warning("SKIP %s — no valid DexScreener price", mint)
         return False
 
-    size_sol = PAPER_SIZE_SOL * size_multiplier
+    size_sol = POSITION_SIZE_SOL * size_multiplier
     try:
         trade = await adapter.execute_swap(mint, Side.BUY, size_sol)
     except Exception as exc:

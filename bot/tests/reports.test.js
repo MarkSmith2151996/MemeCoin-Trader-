@@ -13,7 +13,7 @@ const reports = require("../reports");
 /* ---------------- lib ---------------- */
 
 test("etDayStartUtc returns ET midnight in UTC (EDT summer)", () => {
-  const now = Date.UTC(2026, 7, 5, 20, 30, 0); // Aug 5 2026 20:30 UTC = 16:30 EDT
+  const now = Date.now();
   const start = lib.etDayStartUtc(0);
   const startIso = new Date(start).toISOString();
   assert.ok(start <= now && start > now - 24 * 3600 * 1000, `start ${startIso} must be within the last 24h of ${new Date(now).toISOString()}`);
@@ -251,8 +251,8 @@ test("gatesReport parses the active strategy script", () => {
   assert.match(out, /\*Strategy B \(run_strategy_b\.py\)\*/);
   assert.match(out, /Tuner config id 1/);
   assert.match(out, /min mcap: \$2,000/);
-  assert.match(out, /Take profit: 80%/);
-  assert.match(out, /Hard stop: 10%/);
+  assert.match(out, /Take profit: 150%/);
+  assert.match(out, /Hard stop: 8%/);
   assert.match(out, /Holder tiers/);
   fs.rmSync(path.dirname(p), { recursive: true, force: true });
 });

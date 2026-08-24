@@ -11,7 +11,7 @@ SCAN (every 1s by default, STRATEGY_B_SCAN_INTERVAL in .env):
      age/mcap/txns/vol/ratio/pool-depth/RugCheck/score gates on every cycle
   4. Paper enter if gates pass and slots available
 
-MONITOR (every 30s):
+MONITOR (every 100ms):
   5. Re-mark open positions and close on take-profit / hard-stop / time-stop
 
 MT-588: Jupiter Developer tier (10 RPS) is active. The scan cadence drops to
@@ -75,8 +75,8 @@ Run:
     timeout 120 python3 scripts/run_strategy_b.py --test  # 2-minute test
 """
 
-# ── Position sizing (MT-522/MT-524) ─────────────────────────────────
-# Entry size = PAPER_SIZE_SOL (0.01 SOL after the aborted MT-632 validation) * size_multiplier.
+# ── Position sizing (MT-640) ─────────────────────────────────────────
+# Entry size = POSITION_SIZE_SOL from .env * size_multiplier.
 # size_multiplier is always 1.0 in practice:
 #   - Whale conviction sizing: DISABLED since MT-524 — the get_whale_signal
 #     call block and load_tracked_wallets loading block are commented out,
@@ -95,7 +95,7 @@ import statistics
 import sys
 import time
 from collections import deque
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import aiosqlite
@@ -205,10 +205,12 @@ SLIPPAGE_BPS_MID_POOL = 300
 THICK_POOL_MIN_SOL = 20.0
 MID_POOL_MIN_SOL = 5.0
 
-PAPER_SIZE_SOL = 0.02
+# These are runtime settings because both paper and live Strategy B entries use
+# them. .env is loaded above before these values are read.
+POSITION_SIZE_SOL = float(os.getenv("POSITION_SIZE_SOL", "0.02"))
 MIN_MENTIONS = 3
 MENTION_WINDOW_MINUTES = 5
-MAX_OPEN = 5
+MAX_OPEN = int(os.getenv("MAX_OPEN", "5"))
 EXECUTION_MODE = "paper"  # set at startup from .env
 # MT-560: 60s was legacy from the Chrome/DexScreener era (8s browser-pc
 # capture per cycle). MT-588: with the Jupiter Developer tier (10 RPS) active
@@ -218,8 +220,7 @@ EXECUTION_MODE = "paper"  # set at startup from .env
 # rather than queuing up, which is the rate-limit protection. Tune via
 # STRATEGY_B_SCAN_INTERVAL in .env.
 SCAN_INTERVAL = int(os.environ.get("STRATEGY_B_SCAN_INTERVAL", "1"))
-MONITOR_INTERVAL = 30
-FAST_MONITOR_INTERVAL_S = 5
+MONITOR_INTERVAL_S = 0.1
 LIVE_SAFETY_CHECK_INTERVAL_S = 300
 FAST_POLL_DROP_PCT = 0.05
 # MT-566: per-mint throttle for candidate_log inserts and SCREEN log lines
@@ -338,6 +339,9 @@ MAX_AGE_SECONDS = 1320  # 22 minutes
 # evaluations even if it is still under the age cap.
 MAX_WATCH_EVALS = 240
 CANDIDATE_LOG_TTL_S = 3600  # 1 hour in seconds
+# MT-640: a previous losing close blocks re-entry only briefly. Permanent
+# loss bans had grown to thousands of mints and starved the discovery pool.
+LOSS_BAN_TTL_HOURS = 24
 _rugcheck = RugCheckClient(timeout_s=5.0)
 # MT-566: per-token RugCheck cache. First sight of a mint fetches the report
 # (~400ms); every re-evaluation within the TTL uses the cached copy, skipping
@@ -1251,7 +1255,7 @@ async def try_enter(
     pool_sol: float | None = None,
     use_direct_bonding_curve: bool = False,
 ) -> str | None:
-    from src.core.database import has_losing_close, record_entry_skip
+    from src.core.database import has_recent_losing_close, record_entry_skip
 
     if _shutting_down:
         log.info("SKIP %s ticker=%s - shutdown in progress", mint[:16], ticker)
@@ -1302,15 +1306,19 @@ async def try_enter(
         )
         return None
 
-    if await has_losing_close(db_path, mint):
+    if await has_recent_losing_close(
+        db_path,
+        mint,
+        cooldown_minutes=LOSS_BAN_TTL_HOURS * 60,
+    ):
         log.warning(
-            "SKIP %s ticker=%s — repeat_loser: mint previously closed at a loss",
-            mint[:16], ticker,
+            "SKIP %s ticker=%s — repeat_loser: loss within %dh ban TTL",
+            mint[:16], ticker, LOSS_BAN_TTL_HOURS,
         )
         try:
             await record_entry_skip(
                 db_path, strategy="B", mint_address=mint, ticker=ticker,
-                gate="repeat_loser", reason="previous close had negative PnL",
+                gate="repeat_loser", reason=f"loss within {LOSS_BAN_TTL_HOURS}h ban TTL",
             )
         except Exception as exc:
             log.debug("candidate_log write failed (non-fatal): %s", exc)
@@ -1356,7 +1364,7 @@ async def try_enter(
         mint[:16], f"{pool_sol:.1f}" if pool_sol is not None else "N/A", slippage_bps,
     )
 
-    size_sol = PAPER_SIZE_SOL * size_multiplier
+    size_sol = POSITION_SIZE_SOL * size_multiplier
     timing["t_signed"] = time.monotonic()
     timing["t_sent"] = time.monotonic()
     try:
@@ -1473,9 +1481,10 @@ async def monitor_positions(
     *,
     price_overrides: dict[str, float] | None = None,
     only_mints: set[str] | None = None,
+    allow_provider_lookup: bool = True,
 ) -> bool:
     """Re-mark open positions and close on stops; True if any position is in
-    the danger zone (below 95% of entry) so the caller polls at 5s."""
+    the danger zone (below 95% of entry)."""
     danger = False
     positions = await manager.get_all_open(mode=EXECUTION_MODE)
     if only_mints is not None:
@@ -1495,7 +1504,11 @@ async def monitor_positions(
         current_price = (
             price_overrides[pos.mint_address]
             if price_overrides is not None and pos.mint_address in price_overrides
-            else await mark_provider.get_current_price(pos.mint_address)
+            else (
+                await mark_provider.get_current_price(pos.mint_address)
+                if allow_provider_lookup
+                else None
+            )
         )
 
         age_min = (datetime.now(UTC) - pos.opened_at).total_seconds() / 60
@@ -2015,13 +2028,14 @@ async def scan_loop(
                 _loss_banned: set[str] = set()
                 try:
                     async with aiosqlite.connect(db_path) as _db:
-                        # Loss ban disabled — the ban list grows over time
-                        # (2,245 mints) creating structural decay the backtest
-                        # doesn't model (backtest starts fresh each run).
+                        loss_ban_since = (
+                            datetime.now(UTC) - timedelta(hours=LOSS_BAN_TTL_HOURS)
+                        ).isoformat()
                         _cursor = await _db.execute(
                             "SELECT DISTINCT mint_address FROM positions"
-                            " WHERE status = ? AND realized_pnl_sol < 0",
-                            (PositionStatus.CLOSED.value,),
+                            " WHERE status = ? AND realized_pnl_sol < 0"
+                            " AND closed_at IS NOT NULL AND closed_at >= ?",
+                            (PositionStatus.CLOSED.value, loss_ban_since),
                         )
                         _rows = await _cursor.fetchall()
                         await _cursor.close()
@@ -2029,7 +2043,11 @@ async def scan_loop(
                 except Exception as exc:
                     log.error("watch sweep: loss-ban lookup failed: %s", exc, exc_info=True)
                 if _loss_banned:
-                    log.debug("watch sweep: %d loss-banned mints", len(_loss_banned))
+                    log.debug(
+                        "watch sweep: %d loss-banned mints within %dh TTL",
+                        len(_loss_banned),
+                        LOSS_BAN_TTL_HOURS,
+                    )
 
                 for _w_mint in list(watch_list.keys()):
                     _w = watch_list[_w_mint]
@@ -2062,8 +2080,8 @@ async def scan_loop(
                     if _w_mint in _loss_banned:
                         del watch_list[_w_mint]
                         log.info(
-                            "WATCH_BAN %s (%s): prior losing close — dropped",
-                            _w_mint[:8], _w["ticker"],
+                            "WATCH_BAN %s (%s): losing close within %dh TTL — dropped",
+                            _w_mint[:8], _w["ticker"], LOSS_BAN_TTL_HOURS,
                         )
                         continue
                     # MT-612: no fresh Jupiter data for this token this poll —
@@ -2265,13 +2283,21 @@ async def monitor_loop(
     db_path: Path,
     gate_tuner: GateTuner,
     adapter: ExecutionAdapter | None = None,
+    price_cache: dict[str, float] | None = None,
 ) -> None:
     while True:
         cycle_start = time.monotonic()
-        danger = await monitor_positions(manager, mark_provider, db_path, gate_tuner, adapter)
+        await monitor_positions(
+            manager,
+            mark_provider,
+            db_path,
+            gate_tuner,
+            adapter,
+            price_overrides=price_cache,
+            allow_provider_lookup=False,
+        )
         elapsed = time.monotonic() - cycle_start
-        interval = FAST_MONITOR_INTERVAL_S if danger else MONITOR_INTERVAL
-        await asyncio.sleep(max(0.0, interval - elapsed))
+        await asyncio.sleep(max(0.0, MONITOR_INTERVAL_S - elapsed))
 
 
 async def priority_fee_loop(interval_s: float = 30.0) -> None:
@@ -2400,6 +2426,7 @@ async def _run_runtime_until_stopped(
     _shutting_down = False
     stop_event = asyncio.Event()
     single_trade_complete = asyncio.Event() if single_trade else None
+    latest_pumpportal_prices: dict[str, float] = {}
     _install_shutdown_handlers(stop_event)
     tasks = [
         asyncio.create_task(
@@ -2412,7 +2439,16 @@ async def _run_runtime_until_stopped(
                 single_trade_complete=single_trade_complete,
             ),
         ),
-        asyncio.create_task(monitor_loop(manager, mark_provider, db_path, gate_tuner, adapter)),
+        asyncio.create_task(
+            monitor_loop(
+                manager,
+                mark_provider,
+                db_path,
+                gate_tuner,
+                adapter,
+                latest_pumpportal_prices,
+            ),
+        ),
         asyncio.create_task(snapshot_loop(manager, mark_provider, db_path)),
         asyncio.create_task(priority_fee_loop()),
     ]
@@ -2423,12 +2459,16 @@ async def _run_runtime_until_stopped(
             ),
         )
     async def held_position_mints() -> set[str]:
-        return {
+        held = {
             position.mint_address
             for position in await manager.get_all_open(mode=EXECUTION_MODE)
         }
+        for mint in set(latest_pumpportal_prices) - held:
+            latest_pumpportal_prices.pop(mint, None)
+        return held
 
     async def on_pumpportal_price(mint: str, price_sol: float) -> None:
+        latest_pumpportal_prices[mint] = price_sol
         await monitor_positions(
             manager,
             mark_provider,
@@ -2441,13 +2481,19 @@ async def _run_runtime_until_stopped(
 
     async def on_pumpportal_stale(mint: str) -> None:
         """Force a Jupiter mark when a subscribed PumpPortal price goes quiet."""
+        latest_pumpportal_prices.pop(mint, None)
+        current_price = await mark_provider.get_current_price(mint)
+        if current_price is not None and current_price > 0:
+            latest_pumpportal_prices[mint] = current_price
         await monitor_positions(
             manager,
             mark_provider,
             db_path,
             gate_tuner,
             adapter,
+            price_overrides=latest_pumpportal_prices,
             only_mints={mint},
+            allow_provider_lookup=False,
         )
 
     # The stream is a price source, not an execution capability. Keep it on in
@@ -2569,8 +2615,15 @@ async def main() -> None:
         mode_label = f"RAW MENTIONS >= {MIN_MENTIONS} in first {MENTION_WINDOW_MINUTES}min"
 
     log.info(
-        "Strategy B started: mode=%s API-aged candidates<=%.0fmin scan=%ds monitor=%ds.",
-        mode_label, SOURCE_MAX_AGE_MINUTES, SCAN_INTERVAL, MONITOR_INTERVAL,
+        "Strategy B started: mode=%s API-aged candidates<=%.0fmin scan=%ds monitor=%.1fs "
+        "position_size=%.4fSOL max_open=%d loss_ban_ttl=%dh.",
+        mode_label,
+        SOURCE_MAX_AGE_MINUTES,
+        SCAN_INTERVAL,
+        MONITOR_INTERVAL_S,
+        POSITION_SIZE_SOL,
+        MAX_OPEN,
+        LOSS_BAN_TTL_HOURS,
     )
     await _log_rpc_primary()
     try:
