@@ -11,6 +11,7 @@ import asyncio
 import json
 import logging
 import math
+import time
 from collections.abc import Awaitable, Callable
 
 import websockets
@@ -21,6 +22,7 @@ PUMPPORTAL_WS_URL = "wss://pumpportal.fun/api/data"
 
 PriceHandler = Callable[[str, float], Awaitable[None]]
 MintsProvider = Callable[[], Awaitable[set[str]]]
+StaleHandler = Callable[[str], Awaitable[None]]
 
 
 class PumpPortalPriceFeed:
@@ -30,16 +32,20 @@ class PumpPortalPriceFeed:
         self,
         held_mints: MintsProvider,
         on_price: PriceHandler,
+        on_stale: StaleHandler | None = None,
         *,
         url: str = PUMPPORTAL_WS_URL,
         refresh_interval_s: float = 1.0,
         reconnect_delay_s: float = 2.0,
+        stale_after_s: float = 60.0,
     ) -> None:
         self._held_mints = held_mints
         self._on_price = on_price
+        self._on_stale = on_stale
         self._url = url
         self._refresh_interval_s = refresh_interval_s
         self._reconnect_delay_s = reconnect_delay_s
+        self._stale_after_s = stale_after_s
 
     async def run(self) -> None:
         """Reconnect indefinitely; callers keep Jupiter polling as the fallback."""
@@ -67,6 +73,8 @@ class PumpPortalPriceFeed:
 
     async def _run_connection(self, websocket: object) -> None:
         subscribed: set[str] = set()
+        last_price_at: dict[str, float] = {}
+        stale_notified: set[str] = set()
         while True:
             held = await self._held_mints()
             additions = held - subscribed
@@ -76,19 +84,53 @@ class PumpPortalPriceFeed:
                     json.dumps({"method": "subscribeTokenTrade", "keys": sorted(additions)}),
                 )
                 subscribed.update(additions)
+                last_price_at.update({mint: time.monotonic() for mint in additions})
+                stale_notified.difference_update(additions)
             if removals:
                 await websocket.send(
                     json.dumps({"method": "unsubscribeTokenTrade", "keys": sorted(removals)}),
                 )
                 subscribed.difference_update(removals)
+                for mint in removals:
+                    last_price_at.pop(mint, None)
+                    stale_notified.discard(mint)
 
             try:
                 raw = await asyncio.wait_for(websocket.recv(), timeout=self._refresh_interval_s)
             except TimeoutError:
+                await self._notify_stale_mints(subscribed, last_price_at, stale_notified)
                 continue
             price = _parse_price_update(raw)
-            if price is not None:
+            if price is not None and price[0] in subscribed:
+                last_price_at[price[0]] = time.monotonic()
+                stale_notified.discard(price[0])
                 await self._on_price(*price)
+            await self._notify_stale_mints(subscribed, last_price_at, stale_notified)
+
+    async def _notify_stale_mints(
+        self,
+        subscribed: set[str],
+        last_price_at: dict[str, float],
+        stale_notified: set[str],
+    ) -> None:
+        if self._on_stale is None:
+            return
+        now = time.monotonic()
+        for mint in subscribed - stale_notified:
+            elapsed = now - last_price_at.get(mint, now)
+            if elapsed < self._stale_after_s:
+                continue
+            stale_notified.add(mint)
+            log.warning(
+                "PRICE_FEED: stale PumpPortal price mint=%s age=%.1fs; "
+                "falling back to Jupiter polling",
+                mint[:16],
+                elapsed,
+            )
+            try:
+                await self._on_stale(mint)
+            except Exception as exc:  # A fallback failure must not break reconnecting.
+                log.warning("PRICE_FEED: Jupiter stale fallback failed mint=%s: %s", mint[:16], exc)
 
 
 def _parse_price_update(raw: object) -> tuple[str, float] | None:

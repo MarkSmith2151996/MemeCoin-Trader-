@@ -15,8 +15,9 @@ from src.chain.jupiter_swap import JupiterSwapClient
 from src.core.config import load_settings
 from src.core.database import init_db
 from src.core.models import Position, PositionStatus, Trade
+from src.execution import pumpportal_price
 from src.execution.position_reconciliation import reconcile_positions
-from src.execution.pumpportal_price import _parse_price_update
+from src.execution.pumpportal_price import PumpPortalPriceFeed, _parse_price_update
 from src.strategy.position_manager import PositionManager
 
 
@@ -143,6 +144,139 @@ def test_pumpportal_trade_updates_produce_safe_prices() -> None:
     assert _parse_price_update('{"mint":"mint","tokenAmount":0}') is None
 
 
+def test_pumpportal_reconnects_after_disconnect(monkeypatch) -> None:
+    async def run() -> None:
+        connection_attempts = 0
+
+        class DisconnectingSocket:
+            async def send(self, _message: str) -> None:
+                pass
+
+            async def recv(self) -> str:
+                raise ConnectionError("simulated disconnect")
+
+        class Connection:
+            async def __aenter__(self) -> DisconnectingSocket:
+                return DisconnectingSocket()
+
+            async def __aexit__(self, *_args) -> None:
+                pass
+
+        def connect(*_args, **_kwargs) -> Connection:
+            nonlocal connection_attempts
+            connection_attempts += 1
+            return Connection()
+
+        async def held_mints() -> set[str]:
+            return {"mint"}
+
+        async def on_price(_mint: str, _price: float) -> None:
+            pass
+
+        monkeypatch.setattr(pumpportal_price.websockets, "connect", connect)
+        feed = PumpPortalPriceFeed(held_mints, on_price, reconnect_delay_s=0.001)
+        task = asyncio.create_task(feed.run())
+        try:
+            for _ in range(100):
+                if connection_attempts >= 2:
+                    break
+                await asyncio.sleep(0.005)
+        finally:
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+        assert connection_attempts >= 2
+
+    asyncio.run(run())
+
+
+def test_pumpportal_stale_price_activates_one_jupiter_fallback() -> None:
+    async def run() -> None:
+        stale_mints: list[str] = []
+        stale_activated = asyncio.Event()
+
+        class SilentSocket:
+            def __init__(self) -> None:
+                self.messages: list[str] = []
+
+            async def send(self, message: str) -> None:
+                self.messages.append(message)
+
+            async def recv(self) -> str:
+                await asyncio.Event().wait()
+                raise AssertionError("unreachable")
+
+        async def held_mints() -> set[str]:
+            return {"mint"}
+
+        async def on_price(_mint: str, _price: float) -> None:
+            pass
+
+        async def on_stale(mint: str) -> None:
+            stale_mints.append(mint)
+            stale_activated.set()
+
+        socket = SilentSocket()
+        feed = PumpPortalPriceFeed(
+            held_mints,
+            on_price,
+            on_stale,
+            refresh_interval_s=0.001,
+            stale_after_s=0.005,
+        )
+        task = asyncio.create_task(feed._run_connection(socket))
+        try:
+            await asyncio.wait_for(stale_activated.wait(), timeout=0.5)
+            await asyncio.sleep(0.02)
+        finally:
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+        assert stale_mints == ["mint"]
+        assert socket.messages == ['{"method": "subscribeTokenTrade", "keys": ["mint"]}']
+
+    asyncio.run(run())
+
+
+def test_startup_orphan_check_closes_wallet_empty_live_position(tmp_path: Path) -> None:
+    async def run() -> None:
+        db_path = tmp_path / "trades.db"
+        await init_db(db_path)
+        manager = PositionManager(db_path, load_settings(), strategy="B")
+        await manager.open_position(
+            Trade(
+                mint_address="wallet-empty-mint",
+                side="BUY",
+                amount_sol=0.01,
+                token_amount=100.0,
+                price_sol=0.0001,
+                mode="live",
+            ),
+            None,
+        )
+
+        class EmptyWalletAdapter:
+            async def get_token_balance(self, _mint: str) -> float:
+                return 0.0
+
+        assert await run_strategy_b._close_abandoned_live_positions(
+            manager,
+            EmptyWalletAdapter(),
+            db_path,
+        ) == 1
+        assert await manager.get_all_open(mode="live") == []
+        with sqlite3.connect(db_path) as connection:
+            status = connection.execute(
+                "SELECT status FROM trades WHERE mint_address = ? "
+                "ORDER BY executed_at DESC LIMIT 1",
+                ("wallet-empty-mint",),
+            ).fetchone()[0]
+        assert status == "abandoned"
+
+    asyncio.run(run())
+    assert "_close_abandoned_live_positions(manager, adapter, db_path)" in inspect.getsource(
+        run_strategy_b.main,
+    )
+
+
 def test_quicknode_is_selected_before_primary_rpc(monkeypatch) -> None:
     monkeypatch.setenv("QUICKNODE_RPC_URL", "https://quicknode.example")
     monkeypatch.setenv("PRIMARY_RPC_URL", "https://primary.example")
@@ -185,9 +319,10 @@ def test_pumpportal_runtime_starts_in_paper_mode(monkeypatch, tmp_path: Path) ->
     started = asyncio.Event()
 
     class FakeFeed:
-        def __init__(self, held_mints, on_price) -> None:
+        def __init__(self, held_mints, on_price, on_stale) -> None:
             self.held_mints = held_mints
             self.on_price = on_price
+            self.on_stale = on_stale
 
         async def run(self) -> None:
             started.set()

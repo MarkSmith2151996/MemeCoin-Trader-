@@ -62,6 +62,21 @@ def test_buy_quote_happy_path() -> None:
     assert datetime.fromisoformat(quote.quoted_at).tzinfo is not None
 
 
+def test_default_quote_endpoint_uses_public_resolving_host() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.method == "POST":
+            return httpx.Response(200, json=RPC_BODY)
+        assert request.url.host == "public.jupiterapi.com"
+        assert request.url.path == "/quote"
+        return httpx.Response(200, json=_quote_response())
+
+    client = _make_client(handler)
+
+    quote = asyncio.run(client.get_quote("tokenmint", Side.BUY, 50_000_000))
+
+    assert quote is not None
+
+
 def test_sell_quote_happy_path() -> None:
     def handler(request: httpx.Request) -> httpx.Response:
         if request.method == "POST":

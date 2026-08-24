@@ -2420,11 +2420,26 @@ async def _run_runtime_until_stopped(
             only_mints={mint},
         )
 
+    async def on_pumpportal_stale(mint: str) -> None:
+        """Force a Jupiter mark when a subscribed PumpPortal price goes quiet."""
+        await monitor_positions(
+            manager,
+            mark_provider,
+            db_path,
+            gate_tuner,
+            adapter,
+            only_mints={mint},
+        )
+
     # The stream is a price source, not an execution capability. Keep it on in
     # paper mode too, so paper exits receive the same immediate stop checks.
     tasks.append(
         asyncio.create_task(
-            PumpPortalPriceFeed(held_position_mints, on_pumpportal_price).run(),
+            PumpPortalPriceFeed(
+                held_position_mints,
+                on_pumpportal_price,
+                on_pumpportal_stale,
+            ).run(),
         ),
     )
     try:

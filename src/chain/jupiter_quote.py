@@ -1,6 +1,6 @@
-"""Shadow-mode Jupiter V2 quote telemetry client.
+"""Shadow-mode Jupiter quote telemetry client.
 
-Pure read-only quoting against the legacy Jupiter V2 ``/quote`` endpoint.
+Pure read-only quoting against Jupiter's public ``/quote`` endpoint.
 No wallet, no signing, no transaction building. Used to compare what the
 paper runner prices via DexScreener against what Jupiter would actually
 execute, so real slippage can be measured before any live trading.
@@ -51,7 +51,7 @@ class JupiterV2QuoteClient:
 
     def __init__(
         self,
-        base_url: str = "https://quote-api.jup.ag",
+        base_url: str = "https://public.jupiterapi.com",
         solana_rpc_url: str | None = None,
         backup_solana_rpc_url: str | None = None,
         http_client: httpx.AsyncClient | None = None,
@@ -146,7 +146,7 @@ class JupiterV2QuoteClient:
         async with self._semaphore:
             await self._throttle()
             try:
-                response = await self._client.get(f"{self._base_url}/v2/quote", params=params)
+                response = await self._client.get(f"{self._base_url}/quote", params=params)
                 self._last_request_at = time.monotonic()
             except httpx.HTTPError as exc:
                 log.warning(

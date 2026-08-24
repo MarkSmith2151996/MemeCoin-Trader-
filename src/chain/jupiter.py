@@ -17,7 +17,7 @@ _DEFAULT_SOLANA_RPC = "https://api.mainnet-beta.solana.com"
 class JupiterClient:
     def __init__(
         self,
-        base_url: str = "https://quote-api.jup.ag",
+        base_url: str = "https://public.jupiterapi.com",
         solana_rpc_url: str = _DEFAULT_SOLANA_RPC,
         http_client: httpx.AsyncClient | None = None,
         timeout_s: float = 10.0,
@@ -69,7 +69,7 @@ class JupiterClient:
             "slippageBps": str(slippage_bps),
         }
 
-        response = await self._client.get(f"{self.base_url}/v6/quote", params=params)
+        response = await self._client.get(f"{self.base_url}/quote", params=params)
         response.raise_for_status()
         data = response.json()
 

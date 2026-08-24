@@ -10,7 +10,7 @@ from src.core.config import RiskConfig
 from src.core.models import CheckResult, TokenInfo
 
 DEXSCREENER_TOKEN_URL = "https://api.dexscreener.com/latest/dex/tokens/{mint_address}"
-JUPITER_QUOTE_URL = "https://quote-api.jup.ag/v6/quote"
+JUPITER_QUOTE_URL = "https://public.jupiterapi.com/quote"
 SOL_MINT = "So11111111111111111111111111111111111111112"
 
 
