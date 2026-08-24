@@ -1,9 +1,10 @@
-"""MT-633 coverage for exit persistence, mode migration, and price streaming."""
+"""MT-633/MT-635 coverage for exit persistence, RPC selection, and price streaming."""
 
 from __future__ import annotations
 
 import asyncio
 import inspect
+import logging
 import sqlite3
 from pathlib import Path
 
@@ -148,6 +149,79 @@ def test_quicknode_is_selected_before_primary_rpc(monkeypatch) -> None:
     client = JupiterSwapClient(keypair=Keypair(), api_key="test-key")
     assert client._solana_rpc_url == "https://quicknode.example"
     asyncio.run(client.close())
+
+
+def test_startup_logs_quicknode_when_healthy(monkeypatch, caplog) -> None:
+    class Response:
+        def raise_for_status(self) -> None:
+            pass
+
+        def json(self) -> dict[str, object]:
+            return {"result": {"value": {"blockhash": "test"}}}
+
+    class Client:
+        def __init__(self, **_kwargs) -> None:
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args) -> None:
+            pass
+
+        async def post(self, url: str, *, json: dict[str, object]) -> Response:
+            assert url == "https://quicknode.example"
+            assert json["method"] == "getLatestBlockhash"
+            return Response()
+
+    monkeypatch.setenv("QUICKNODE_RPC_URL", "https://quicknode.example")
+    monkeypatch.setattr(run_strategy_b.httpx, "AsyncClient", Client)
+    with caplog.at_level(logging.INFO, logger="strategy_b"):
+        asyncio.run(run_strategy_b._log_rpc_primary())
+    assert "RPC_PRIMARY: QuickNode" in caplog.text
+
+
+def test_pumpportal_runtime_starts_in_paper_mode(monkeypatch, tmp_path: Path) -> None:
+    started = asyncio.Event()
+
+    class FakeFeed:
+        def __init__(self, held_mints, on_price) -> None:
+            self.held_mints = held_mints
+            self.on_price = on_price
+
+        async def run(self) -> None:
+            started.set()
+            await asyncio.Event().wait()
+
+    async def finish_scan(*_args, single_trade_complete=None, **_kwargs) -> None:
+        assert single_trade_complete is not None
+        single_trade_complete.set()
+
+    async def wait_until_cancelled(*_args, **_kwargs) -> None:
+        await asyncio.Event().wait()
+
+    class PaperAdapter:
+        mode = "paper"
+
+    monkeypatch.setattr(run_strategy_b, "PumpPortalPriceFeed", FakeFeed)
+    monkeypatch.setattr(run_strategy_b, "scan_loop", finish_scan)
+    monkeypatch.setattr(run_strategy_b, "monitor_loop", wait_until_cancelled)
+    monkeypatch.setattr(run_strategy_b, "snapshot_loop", wait_until_cancelled)
+    monkeypatch.setattr(run_strategy_b, "priority_fee_loop", wait_until_cancelled)
+
+    asyncio.run(
+        run_strategy_b._run_runtime_until_stopped(
+            object(),
+            object(),
+            PaperAdapter(),
+            tmp_path / "trades.db",
+            object(),
+            [],
+            0.0,
+            single_trade=True,
+        ),
+    )
+    assert started.is_set()
 
 
 def test_kill_script_and_watchdog_share_killswitch_contract() -> None:

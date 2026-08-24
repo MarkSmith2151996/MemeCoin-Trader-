@@ -43,6 +43,10 @@ class PumpPortalPriceFeed:
 
     async def run(self) -> None:
         """Reconnect indefinitely; callers keep Jupiter polling as the fallback."""
+        log.info(
+            "PRICE_FEED: PumpPortal WebSocket starting; "
+            "fallback to Jupiter polling until connected",
+        )
         while True:
             try:
                 async with websockets.connect(
@@ -50,12 +54,15 @@ class PumpPortalPriceFeed:
                     ping_interval=20,
                     ping_timeout=20,
                 ) as websocket:
-                    log.info("PumpPortal price stream connected")
+                    log.info("PRICE_FEED: PumpPortal WebSocket connected")
                     await self._run_connection(websocket)
             except asyncio.CancelledError:
                 raise
             except Exception as exc:  # A stream failure must not stop exit monitoring.
-                log.warning("PumpPortal price stream disconnected: %s", exc)
+                log.warning(
+                    "PRICE_FEED: fallback to Jupiter polling (PumpPortal disconnected: %s)",
+                    exc,
+                )
                 await asyncio.sleep(self._reconnect_delay_s)
 
     async def _run_connection(self, websocket: object) -> None:

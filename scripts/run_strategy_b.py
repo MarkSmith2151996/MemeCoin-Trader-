@@ -2339,6 +2339,32 @@ async def _close_abandoned_live_positions(
     return closed_count
 
 
+async def _log_rpc_primary() -> None:
+    """Probe QuickNode once at startup; swap clients retain Helius failover."""
+    quicknode_url = os.environ.get("QUICKNODE_RPC_URL")
+    if not quicknode_url:
+        log.info("RPC_PRIMARY: Helius (QuickNode unavailable)")
+        return
+
+    payload = {
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "getLatestBlockhash",
+        "params": [{"commitment": "confirmed"}],
+    }
+    try:
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            response = await client.post(quicknode_url, json=payload)
+            response.raise_for_status()
+            if not isinstance(response.json().get("result"), dict):
+                raise ValueError("missing getLatestBlockhash result")
+    except (httpx.HTTPError, ValueError, TypeError):
+        # Do not include exception text: HTTP clients may embed the RPC URL/key.
+        log.warning("RPC_PRIMARY: Helius (QuickNode unavailable)")
+        return
+    log.info("RPC_PRIMARY: QuickNode")
+
+
 async def _run_runtime_until_stopped(
     manager: PositionManager,
     mark_provider: JupiterPriceProvider,
@@ -2377,21 +2403,30 @@ async def _run_runtime_until_stopped(
                 live_safety_loop(manager, adapter, wallet_balance_floor_sol),
             ),
         )
-        async def held_live_mints() -> set[str]:
-            return {position.mint_address for position in await manager.get_all_open(mode="live")}
+    async def held_position_mints() -> set[str]:
+        return {
+            position.mint_address
+            for position in await manager.get_all_open(mode=EXECUTION_MODE)
+        }
 
-        async def on_pumpportal_price(mint: str, price_sol: float) -> None:
-            await monitor_positions(
-                manager,
-                mark_provider,
-                db_path,
-                gate_tuner,
-                adapter,
-                price_overrides={mint: price_sol},
-                only_mints={mint},
-            )
+    async def on_pumpportal_price(mint: str, price_sol: float) -> None:
+        await monitor_positions(
+            manager,
+            mark_provider,
+            db_path,
+            gate_tuner,
+            adapter,
+            price_overrides={mint: price_sol},
+            only_mints={mint},
+        )
 
-        tasks.append(asyncio.create_task(PumpPortalPriceFeed(held_live_mints, on_pumpportal_price).run()))
+    # The stream is a price source, not an execution capability. Keep it on in
+    # paper mode too, so paper exits receive the same immediate stop checks.
+    tasks.append(
+        asyncio.create_task(
+            PumpPortalPriceFeed(held_position_mints, on_pumpportal_price).run(),
+        ),
+    )
     try:
         waiters = [asyncio.create_task(stop_event.wait())]
         if single_trade_complete is not None:
@@ -2500,6 +2535,7 @@ async def main() -> None:
         "Strategy B started: mode=%s API-aged candidates<=%.0fmin scan=%ds monitor=%ds.",
         mode_label, SOURCE_MAX_AGE_MINUTES, SCAN_INTERVAL, MONITOR_INTERVAL,
     )
+    await _log_rpc_primary()
     try:
         if args.test:
             await scan_loop(mark_provider, adapter, manager, db_path, tracked_wallets=tracked_wallets, test_mode=True)
