@@ -1242,13 +1242,14 @@ async def try_enter(
     mint: str,
     ticker: str,
     mark_provider: JupiterPriceProvider,
-    adapter: PaperExecutionAdapter,
+    adapter: ExecutionAdapter,
     manager: PositionManager,
     db_path: Path,
     size_multiplier: float = 1.0,
     pair: dict | None = None,
     timing: dict | None = None,
     pool_sol: float | None = None,
+    use_direct_bonding_curve: bool = False,
 ) -> str | None:
     from src.core.database import has_losing_close, record_entry_skip
 
@@ -1359,7 +1360,14 @@ async def try_enter(
     timing["t_signed"] = time.monotonic()
     timing["t_sent"] = time.monotonic()
     try:
-        trade = await adapter.execute_swap(mint, Side.BUY, size_sol, slippage_bps)
+        if use_direct_bonding_curve and adapter.mode == "live":
+            trade = await adapter.buy_bonding_curve(  # type: ignore[attr-defined]
+                mint,
+                size_sol,
+                slippage_bps,
+            )
+        else:
+            trade = await adapter.execute_swap(mint, Side.BUY, size_sol, slippage_bps)
     except Exception as exc:
         log.warning("SKIP %s ticker=%s \u2014 execute_swap failed: %s", mint[:16], ticker, exc)
         log.debug("DEBUG ENTRY_EVAL mint=%s result=rejected reason=execute_swap_failed", mint[:16])
@@ -2158,8 +2166,19 @@ async def scan_loop(
                     _w_timing = {"t_detect": first_seen_mono.get(_w_mint, time.monotonic()), "t_gate_pass": time.monotonic()}
                     detailed["entry_attempts"] += 1
                     _w_pos = await try_enter(
-                        _w_mint, _w_ticker, mark_provider, adapter, manager, db_path, 1.0,
-                        pair=_w_coin.get("pair"), timing=_w_timing, pool_sol=_w_coin.get("pool_sol"),
+                        _w_mint,
+                        _w_ticker,
+                        mark_provider,
+                        adapter,
+                        manager,
+                        db_path,
+                        1.0,
+                        pair=_w_coin.get("pair"),
+                        timing=_w_timing,
+                        pool_sol=_w_coin.get("pool_sol"),
+                        use_direct_bonding_curve=(
+                            _token_graduation(_w_coin.get("token")) == "bonding"
+                        ),
                     )
                     if _w_pos:
                         await mark_strategy_candidate_entered(db_path, _w_cid, _w_pos)
@@ -2509,7 +2528,9 @@ async def main() -> None:
     EXECUTION_MODE = execution_mode
     if execution_mode == "live":
         from src.chain.jupiter_swap import JupiterSwapClient
+        from src.execution.direct import DirectExecutor
         from src.execution.live import LiveExecutionAdapter
+        from src.execution.pumpfun_router import PumpFunExecutionRouter
 
         # MT-588: the live swap client uses the dynamic RPC priority fee
         # (75th percentile of getRecentPrioritizationFees, 30s cache) instead
@@ -2518,8 +2539,9 @@ async def main() -> None:
         client = JupiterSwapClient(
             priority_fee_callback=_priority_fee_provider.get_fee_lamports,
         )
-        adapter = LiveExecutionAdapter(reference_price_provider=mark_provider, client=client)
-        log.info("Strategy B execution adapter: LIVE (Jupiter swap, dynamic priority fee)")
+        jupiter = LiveExecutionAdapter(reference_price_provider=mark_provider, client=client)
+        adapter = PumpFunExecutionRouter(jupiter, DirectExecutor(use_jito=False))
+        log.info("Strategy B execution adapter: LIVE (Pump direct bonding curve, Jupiter fallback)")
     else:
         adapter = PaperExecutionAdapter(price_provider=mark_provider)
         log.info("Strategy B execution adapter: PAPER (EXECUTION_MODE=%s)", execution_mode)

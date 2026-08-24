@@ -74,10 +74,7 @@ class LiveExecutionAdapter(ExecutionAdapter):
 
     async def buy(self, mint_address: str, amount_sol: float, slippage_bps: int = 100) -> Trade:
         """Buy ``amount_sol`` worth of ``mint_address`` through Jupiter."""
-        self._ensure_open()
-        self._check_circuit_breaker()
-        await self._check_token_allowed(mint_address)
-        await self._check_sol_balance(amount_sol)
+        await self.validate_direct_buy(mint_address, amount_sol)
 
         amount_lamports = int(amount_sol * LAMPORTS_PER_SOL)
         quote = await self._quote_or_raise(SOL_MINT, mint_address, amount_lamports, slippage_bps)
@@ -118,6 +115,14 @@ class LiveExecutionAdapter(ExecutionAdapter):
                 "token_balance_after": result.token_balance_after,
             },
         )
+
+    async def validate_direct_buy(self, mint_address: str, amount_sol: float) -> None:
+        """Run the shared live-buy gates before a non-Jupiter execution path."""
+
+        self._ensure_open()
+        self._check_circuit_breaker()
+        await self._check_token_allowed(mint_address)
+        await self._check_sol_balance(amount_sol)
 
     async def sell(self, mint_address: str, token_amount: float, slippage_bps: int = 100) -> Trade:
         """Sell the wallet's full balance of ``mint_address`` through Jupiter."""

@@ -45,7 +45,7 @@ from solders.signature import Signature
 from solders.system_program import TransferParams, transfer
 from solders.transaction import Transaction, VersionedTransaction
 
-from src.chain.jito import JitoBlockEngineClient
+from src.chain.jito import JITO_TIP_ACCOUNTS, JitoBlockEngineClient
 from src.chain.jupiter import LAMPORTS_PER_SOL, SOL_MINT
 from src.chain.priority_fee import FeeCallback
 
@@ -67,17 +67,6 @@ _COMPACT_ROUTE_MAX_ACCOUNTS = 32
 USE_JITO_BUNDLES = True
 DEFAULT_JITO_MIN_SIZE_SOL = 0.1
 JITO_BLOCK_ENGINE_URL = "https://mainnet.block-engine.jito.wtf/api/v1/bundles"
-# Canonical Jito tip accounts (pick one at random per bundle).
-JITO_TIP_ACCOUNTS = (
-    "96gYZGLnJYVFmbjzopPSU6QiEV5fGqZNyN9nmNhvrZU5",
-    "HFqU5x63VTqvQss8hp11i4wVV8bD44PvwucfZ2bU7gRe",
-    "Cw8CFyM9FkoMi7K7Crf6HNQqf4uEMzpKw6QNghXLvLkY",
-    "ADaUMid9yfUytqMBgopwjb2DTLSokTSzL1zt6iGPaS49",
-    "DfXygSm4jCyNCybVYYK6DwvWqjKee8pbDmJGcLWNDXjh",
-    "ADuUkR4vqLUMWXxW9gh6D6L8pMSawimctcNZ5pGwDcEt",
-    "DttWaMuVvTiduZRnguLF7jNxTgiMBZ1hyAumKUiL2KRL",
-    "3AVi9Tg9Uo68tJfuvoKvqKNWKkC5wPdSSdeBnizKZ6jT",
-)
 # Jito requires a minimum 1,000-lamport bundle tip. The smart tip is drawn
 # from getTipFloor and capped so a busy auction cannot consume trade PnL.
 MIN_JITO_TIP_LAMPORTS = 1_000
