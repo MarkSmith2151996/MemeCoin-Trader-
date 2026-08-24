@@ -77,8 +77,9 @@ SCHEMA = (
       opened_at TEXT NOT NULL,
       closed_at TEXT,
       realized_pnl_sol REAL NOT NULL,
-      adjusted_pnl_sol REAL,
-      partial_exits_json TEXT NOT NULL,
+       adjusted_pnl_sol REAL,
+       mode TEXT NOT NULL DEFAULT 'paper',
+       partial_exits_json TEXT NOT NULL,
       close_price_sol REAL,
       peak_price_sol REAL,
       strategy TEXT DEFAULT 'A'
@@ -293,6 +294,10 @@ async def init_db(path: str | Path) -> None:
         except aiosqlite.OperationalError:
             pass
         try:
+            await db.execute("ALTER TABLE positions ADD COLUMN mode TEXT")
+        except aiosqlite.OperationalError:
+            pass
+        try:
             await db.execute("ALTER TABLE price_snapshots ADD COLUMN position_id TEXT")
         except aiosqlite.OperationalError:
             pass
@@ -311,6 +316,19 @@ async def init_db(path: str | Path) -> None:
             "CREATE INDEX IF NOT EXISTS idx_snapshots_position ON price_snapshots(position_id)",
         )
         await db.execute("UPDATE positions SET strategy = 'A' WHERE strategy IS NULL OR strategy = ''")
+        await db.execute(
+            """UPDATE positions
+               SET mode = CASE
+                   WHEN mode IS NOT NULL AND mode != '' THEN mode
+                   WHEN json_valid(partial_exits_json) THEN COALESCE(
+                       json_extract(partial_exits_json, '$.mode'), 'paper'
+                   )
+                   ELSE 'paper'
+               END""",
+        )
+        await db.execute(
+            "CREATE INDEX IF NOT EXISTS idx_positions_mode_status ON positions (mode, status)",
+        )
         await db.commit()
 
 
@@ -576,8 +594,8 @@ async def record_position(path: str | Path, position: Position, *, strategy: str
             INSERT OR REPLACE INTO positions (
                 id, mint_address, entry_trade_id, amount_sol, token_amount, entry_price_sol,
                 status, opened_at, closed_at, realized_pnl_sol, adjusted_pnl_sol,
-                partial_exits_json, close_price_sol, peak_price_sol, strategy
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                mode, partial_exits_json, close_price_sol, peak_price_sol, strategy
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 position.id,
@@ -591,6 +609,7 @@ async def record_position(path: str | Path, position: Position, *, strategy: str
                 position.closed_at.isoformat() if position.closed_at else None,
                 position.realized_pnl_sol,
                 position.adjusted_pnl_sol,
+                position.mode,
                 position.model_dump_json(),
                 position.close_price_sol,
                 position.peak_price_sol,

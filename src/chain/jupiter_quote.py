@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import time
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -51,14 +52,26 @@ class JupiterV2QuoteClient:
     def __init__(
         self,
         base_url: str = "https://quote-api.jup.ag",
-        solana_rpc_url: str = _DEFAULT_SOLANA_RPC,
+        solana_rpc_url: str | None = None,
+        backup_solana_rpc_url: str | None = None,
         http_client: httpx.AsyncClient | None = None,
         timeout_s: float = 10.0,
         min_interval_s: float = 0.25,
         max_concurrent: int = 2,
     ) -> None:
         self._base_url = base_url.rstrip("/")
-        self._solana_rpc_url = solana_rpc_url
+        self._solana_rpc_url = (
+            solana_rpc_url
+            or os.environ.get("QUICKNODE_RPC_URL")
+            or os.environ.get("PRIMARY_RPC_URL")
+            or _DEFAULT_SOLANA_RPC
+        )
+        self._backup_solana_rpc_url = (
+            backup_solana_rpc_url
+            or os.environ.get("BACKUP_RPC_URL")
+            or os.environ.get("HELIUS_RPC_URL")
+            or None
+        )
         self._client = http_client or httpx.AsyncClient(timeout=timeout_s)
         self._decimals_cache: dict[str, int] = {}
         self._semaphore = asyncio.Semaphore(max_concurrent)
@@ -80,8 +93,7 @@ class JupiterV2QuoteClient:
             "params": [mint],
         }
         try:
-            response = await self._client.post(self._solana_rpc_url, json=payload)
-            response.raise_for_status()
+            response = await self._rpc_post(payload)
             data = response.json()
             decimals = int(data["result"]["value"]["decimals"])
         except (httpx.HTTPError, ValueError, KeyError, TypeError) as exc:
@@ -184,6 +196,23 @@ class JupiterV2QuoteClient:
             token_decimals=decimals,
             price_sol=price_sol,
         )
+
+    async def _rpc_post(self, payload: dict[str, object]) -> httpx.Response:
+        urls = [self._solana_rpc_url]
+        if self._backup_solana_rpc_url and self._backup_solana_rpc_url != self._solana_rpc_url:
+            urls.append(self._backup_solana_rpc_url)
+        last_error: httpx.HTTPError | None = None
+        for index, url in enumerate(urls):
+            try:
+                response = await self._client.post(url, json=payload)
+                response.raise_for_status()
+                return response
+            except httpx.HTTPError as exc:
+                last_error = exc
+                if index + 1 < len(urls):
+                    log.warning("SHADOW primary RPC failed; trying configured backup")
+        assert last_error is not None
+        raise last_error
 
     def _derive_price_sol(
         self,

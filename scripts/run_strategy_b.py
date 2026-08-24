@@ -126,6 +126,7 @@ from src.execution.live import is_jupiter_slippage_error
 from src.execution.paper import PaperExecutionAdapter
 from src.execution.position_reconciliation import reconcile_positions
 from src.execution.price_provider import JupiterPriceProvider
+from src.execution.pumpportal_price import PumpPortalPriceFeed
 from src.monitoring.alerts import send_imessage
 from src.monitoring.position_snapshots import snapshot_loop
 from src.risk.rugcheck import RugCheckClient, RugCheckResult
@@ -321,6 +322,8 @@ except ImportError:
 # backtest which has no such restriction. Loss-mint bans and the eval cap
 # still apply.
 watch_list: dict[str, dict] = {}  # mint -> {coin, ticker, created_ms, first_seen, last_updated}
+_selling_in_progress: set[str] = set()
+_shutting_down = False
 # MT-610: tokens stay on the watch list from MIN_EVAL_AGE_S until
 # MAX_AGE_SECONDS, re-evaluated on every poll cycle — matching the backtest's
 # per-bar 0-22 minute evaluation window. Tokens are dropped when they age past
@@ -1249,6 +1252,10 @@ async def try_enter(
 ) -> str | None:
     from src.core.database import has_losing_close, record_entry_skip
 
+    if _shutting_down:
+        log.info("SKIP %s ticker=%s - shutdown in progress", mint[:16], ticker)
+        return None
+
     # MT-560: pipeline timing. scan_loop seeds t_detect/t_gate_pass; this
     # function stamps the remaining steps and logs one LATENCY line per entry.
     timing = timing if timing is not None else {}
@@ -1455,11 +1462,16 @@ async def monitor_positions(
     db_path: Path,
     gate_tuner: GateTuner | None = None,
     adapter: ExecutionAdapter | None = None,
+    *,
+    price_overrides: dict[str, float] | None = None,
+    only_mints: set[str] | None = None,
 ) -> bool:
     """Re-mark open positions and close on stops; True if any position is in
     the danger zone (below 95% of entry) so the caller polls at 5s."""
     danger = False
     positions = await manager.get_all_open(mode=EXECUTION_MODE)
+    if only_mints is not None:
+        positions = [position for position in positions if position.mint_address in only_mints]
     for pos in positions:
         # MT-593: zombie positions — a 0-token fill can never produce a
         # positive sol_out, so _adapter_close refuses to close it and the
@@ -1472,7 +1484,11 @@ async def monitor_positions(
             )
             await manager.close_position(pos.mint_address, mode=EXECUTION_MODE)
             continue
-        current_price = await mark_provider.get_current_price(pos.mint_address)
+        current_price = (
+            price_overrides[pos.mint_address]
+            if price_overrides is not None and pos.mint_address in price_overrides
+            else await mark_provider.get_current_price(pos.mint_address)
+        )
 
         age_min = (datetime.now(UTC) - pos.opened_at).total_seconds() / 60
 
@@ -1485,12 +1501,12 @@ async def monitor_positions(
                     pos.mint_address[:16], age_min,
                 )
                 close_price = pos.entry_price_sol
-                trade = await _adapter_close(pos, close_price, "time_stop", db_path, adapter)
-                if trade is not None:
-                    if trade.status == "abandoned":
-                        close_price = 0
-                    peak = peak_prices.pop(pos.mint_address, None)
-                    await manager.close_position(pos.mint_address, close_price, mode=EXECUTION_MODE, peak_price_sol=peak)
+                peak = peak_prices.pop(pos.mint_address, None)
+                closed_result = await _close_position(
+                    manager, pos, close_price, "time_stop", db_path, adapter, peak_price_sol=peak,
+                )
+                if closed_result is not None:
+                    _, close_price, _ = closed_result
                     log.info(
                         "CLOSE [time_stop/no_price]: mint=%s entry=%.8f close=%.8f",
                         pos.mint_address[:16], pos.entry_price_sol, close_price,
@@ -1528,16 +1544,16 @@ async def monitor_positions(
         if close_reason:
             peak = peak_prices.get(pos.mint_address)
             peak_prices.pop(pos.mint_address, None)
-            trade = await _adapter_close(pos, close_price, close_reason, db_path, adapter)
-            if trade is None:
+            closed_result = await _close_position(
+                manager, pos, close_price, close_reason, db_path, adapter, peak_price_sol=peak,
+            )
+            if closed_result is None:
                 log.error(
                     "CLOSE FAILED [%s]: mint=%s — position left open",
                     close_reason, pos.mint_address[:16],
                 )
                 continue
-            if trade.status == "abandoned":
-                close_price = 0
-            closed = await manager.close_position(pos.mint_address, close_price, mode=EXECUTION_MODE, peak_price_sol=peak)
+            _, close_price, closed = closed_result
             # AUTO-TUNER PAUSED — oscillating, not converging. See MT-537.
             # if gate_tuner is not None and await gate_tuner.maybe_tune():
             #     log.info("Auto-tuned Strategy B gates: %s", json.dumps(gate_tuner.thresholds.as_dict()))
@@ -1575,6 +1591,7 @@ async def _run_live_safety_checks(
         manager,
         adapter.get_wallet_holdings,  # type: ignore[attr-defined]
         detect_wallet_only_without_positions=True,
+        skip_mints=_selling_in_progress,
     )
     for mismatch in report.mismatches:
         if mismatch.kind == "wallet_only_holding":
@@ -1615,6 +1632,38 @@ async def _run_live_safety_checks(
             error=error,
             reason="low_wallet_balance",
         )
+
+
+async def _close_position(
+    manager: PositionManager,
+    pos,
+    close_price: float,
+    reason: str,
+    db_path: Path,
+    adapter: ExecutionAdapter | None,
+    *,
+    peak_price_sol: float | None,
+) -> tuple[Trade, float, object] | None:
+    """Persist a sell and local position close as one protected lifecycle."""
+    if pos.mint_address in _selling_in_progress:
+        log.info("CLOSE already in progress mint=%s", pos.mint_address[:16])
+        return None
+    _selling_in_progress.add(pos.mint_address)
+    try:
+        trade = await _adapter_close(pos, close_price, reason, db_path, adapter)
+        if trade is None:
+            return None
+        persisted_close_price = 0.0 if trade.status == "abandoned" else close_price
+        closed = await manager.close_position(
+            pos.mint_address,
+            persisted_close_price,
+            mode=EXECUTION_MODE,
+            peak_price_sol=peak_price_sol,
+        )
+        return trade, persisted_close_price, closed
+    finally:
+        # Reconciliation can now observe a fully persisted close, not a half-sold position.
+        _selling_in_progress.discard(pos.mint_address)
 
 
 async def _adapter_close(
@@ -1817,6 +1866,7 @@ async def scan_loop(
     db_path: Path,
     tracked_wallets: list | None = None,
     test_mode: bool = False,
+    single_trade_complete: asyncio.Event | None = None,
 ) -> None:
     global watch_list, cycle_number
     if tracked_wallets is None:
@@ -2117,6 +2167,13 @@ async def scan_loop(
                         open_count += 1
                         open_mints.add(_w_mint)
                         log.info("ENTRY mint=%s ticker=%s [watch]", _w_mint[:16], _w_ticker)
+                        if single_trade_complete is not None:
+                            log.info("SINGLE_TRADE_MODE: entry persisted, waiting for close")
+                            while await manager.get_position(_w_mint, mode=EXECUTION_MODE) is not None:
+                                await asyncio.sleep(0.25)
+                            log.info("SINGLE_TRADE_MODE: cycle complete, shutting down")
+                            single_trade_complete.set()
+                            return
                 main_blocker = max(main_blocker_count, key=main_blocker_count.get) if main_blocker_count else "none"
                 # MT-560: the per-cycle Gates line would flood the
                 # log 30x/min — full line every GATES_LOG_EVERY cycles, DEBUG
@@ -2227,13 +2284,59 @@ async def live_safety_loop(
 
 
 def _install_shutdown_handlers(stop_event: asyncio.Event) -> None:
-    """Turn supervisor SIGTERM/SIGINT into orderly asyncio task cancellation."""
+    """Block new entries before the runtime begins its bounded shutdown grace."""
+    def request_shutdown() -> None:
+        global _shutting_down
+        _shutting_down = True
+        stop_event.set()
+
     loop = asyncio.get_running_loop()
     for shutdown_signal in (signal.SIGINT, signal.SIGTERM):
         try:
-            loop.add_signal_handler(shutdown_signal, stop_event.set)
+            loop.add_signal_handler(shutdown_signal, request_shutdown)
         except NotImplementedError:
-            signal.signal(shutdown_signal, lambda _signum, _frame: stop_event.set())
+            signal.signal(shutdown_signal, lambda _signum, _frame: request_shutdown())
+
+
+async def _wait_for_inflight_sells(timeout_s: float = 30.0) -> None:
+    """Give a confirmed sell time to record its fill and close its position."""
+    deadline = time.monotonic() + timeout_s
+    while _selling_in_progress and time.monotonic() < deadline:
+        await asyncio.sleep(0.1)
+    if _selling_in_progress:
+        log.critical(
+            "Shutdown grace expired with sell persistence pending: %s",
+            ",".join(sorted(mint[:16] for mint in _selling_in_progress)),
+        )
+
+
+async def _close_abandoned_live_positions(
+    manager: PositionManager,
+    adapter: ExecutionAdapter,
+    db_path: Path,
+) -> int:
+    """Close stale local live positions only when the wallet confirms no token remains."""
+    closed_count = 0
+    for position in await manager.get_all_open(mode="live"):
+        balance = await adapter.get_token_balance(position.mint_address)  # type: ignore[attr-defined]
+        if balance is None or balance > 0:
+            continue
+        trade = Trade(
+            mint_address=position.mint_address,
+            side=Side.SELL,
+            amount_sol=0,
+            token_amount=0,
+            price_sol=0,
+            slippage_bps=300,
+            mode="live",
+            status="abandoned",
+            metadata={"abandoned_no_wallet_balance": True, "startup_reconciliation": True},
+        )
+        await record_trade(db_path, trade)
+        await manager.close_position(position.mint_address, 0, mode="live")
+        closed_count += 1
+        log.warning("STARTUP ABANDONED CLOSE mint=%s", position.mint_address[:16])
+    return closed_count
 
 
 async def _run_runtime_until_stopped(
@@ -2244,12 +2347,26 @@ async def _run_runtime_until_stopped(
     gate_tuner: GateTuner,
     tracked_wallets: list,
     wallet_balance_floor_sol: float,
+    *,
+    single_trade: bool = False,
 ) -> None:
     """Run Strategy B workers until NSSM or the operator requests shutdown."""
+    global _shutting_down
+    _shutting_down = False
     stop_event = asyncio.Event()
+    single_trade_complete = asyncio.Event() if single_trade else None
     _install_shutdown_handlers(stop_event)
     tasks = [
-        asyncio.create_task(scan_loop(mark_provider, adapter, manager, db_path, tracked_wallets=tracked_wallets)),
+        asyncio.create_task(
+            scan_loop(
+                mark_provider,
+                adapter,
+                manager,
+                db_path,
+                tracked_wallets=tracked_wallets,
+                single_trade_complete=single_trade_complete,
+            ),
+        ),
         asyncio.create_task(monitor_loop(manager, mark_provider, db_path, gate_tuner, adapter)),
         asyncio.create_task(snapshot_loop(manager, mark_provider, db_path)),
         asyncio.create_task(priority_fee_loop()),
@@ -2260,9 +2377,34 @@ async def _run_runtime_until_stopped(
                 live_safety_loop(manager, adapter, wallet_balance_floor_sol),
             ),
         )
+        async def held_live_mints() -> set[str]:
+            return {position.mint_address for position in await manager.get_all_open(mode="live")}
+
+        async def on_pumpportal_price(mint: str, price_sol: float) -> None:
+            await monitor_positions(
+                manager,
+                mark_provider,
+                db_path,
+                gate_tuner,
+                adapter,
+                price_overrides={mint: price_sol},
+                only_mints={mint},
+            )
+
+        tasks.append(asyncio.create_task(PumpPortalPriceFeed(held_live_mints, on_pumpportal_price).run()))
     try:
-        await stop_event.wait()
-        log.info("Strategy B shutdown signal received; cancelling worker tasks")
+        waiters = [asyncio.create_task(stop_event.wait())]
+        if single_trade_complete is not None:
+            waiters.append(asyncio.create_task(single_trade_complete.wait()))
+        _, pending = await asyncio.wait(waiters, return_when=asyncio.FIRST_COMPLETED)
+        for waiter in pending:
+            waiter.cancel()
+        await asyncio.gather(*pending, return_exceptions=True)
+        if stop_event.is_set():
+            log.info("Strategy B shutdown signal received; waiting for in-flight sells")
+            await _wait_for_inflight_sells()
+        elif single_trade_complete is not None and single_trade_complete.is_set():
+            log.info("SINGLE_TRADE_MODE: cycle complete, shutting down")
     finally:
         for task in tasks:
             task.cancel()
@@ -2298,6 +2440,7 @@ async def main() -> None:
     load_dotenv()
     parser = argparse.ArgumentParser()
     parser.add_argument("--test", action="store_true", help="Run one cycle and exit (2-minute test)")
+    parser.add_argument("--single-trade", action="store_true", help="Enter one trade, wait for its close, then exit")
     args = parser.parse_args()
 
     settings = load_settings()
@@ -2331,6 +2474,10 @@ async def main() -> None:
         adapter = PaperExecutionAdapter(price_provider=mark_provider)
         log.info("Strategy B execution adapter: PAPER (EXECUTION_MODE=%s)", execution_mode)
     manager = PositionManager(db_path, settings, strategy="B")
+    if adapter.mode == "live":
+        abandoned = await _close_abandoned_live_positions(manager, adapter, db_path)
+        if abandoned:
+            log.warning("STARTUP ABANDONED CLOSE count=%d", abandoned)
 
     tracked_wallets: list = []
     # MT-524: tracked wallet loading disabled alongside the whale tracker (no Helius calls
@@ -2365,6 +2512,7 @@ async def main() -> None:
                 gate_tuner,
                 tracked_wallets,
                 settings.live_guardrails.min_wallet_balance_sol,
+                single_trade=args.single_trade,
             )
     finally:
         await _drain_shadow_tasks()

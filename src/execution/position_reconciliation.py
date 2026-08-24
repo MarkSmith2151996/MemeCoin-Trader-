@@ -49,8 +49,14 @@ async def reconcile_positions(
     *,
     material_balance_ratio: float = 0.05,
     detect_wallet_only_without_positions: bool = False,
+    skip_mints: set[str] | None = None,
 ) -> PositionReconciliationReport:
-    live_positions = await position_manager.get_all_open(mode="live")
+    skipped = skip_mints or set()
+    live_positions = [
+        position
+        for position in await position_manager.get_all_open(mode="live")
+        if position.mint_address not in skipped
+    ]
     if not live_positions and not detect_wallet_only_without_positions:
         return PositionReconciliationReport(
             ok=True,
@@ -89,7 +95,11 @@ async def reconcile_positions(
         )
 
     local_by_mint = {position.mint_address: position for position in live_positions}
-    wallet_by_mint = {mint: amount for mint, amount in wallet_holdings.items() if amount > 0}
+    wallet_by_mint = {
+        mint: amount
+        for mint, amount in wallet_holdings.items()
+        if amount > 0 and mint not in skipped
+    }
 
     mismatches: list[PositionReconciliationMismatch] = []
 

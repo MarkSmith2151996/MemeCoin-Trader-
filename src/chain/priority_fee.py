@@ -8,8 +8,7 @@ The lookup is cached and refreshed at most every ``refresh_interval_s`` (30s)
 instead of every cycle. The result is stored in module-level state by the
 caller so it survives across cycles without re-querying.
 
-RPC URL resolution order: ``HELIUS_RPC_URL``, ``PRIMARY_RPC_URL``, then the
-public mainnet-beta endpoint. Every failure degrades to ``None`` so callers
+RPC URL resolution order: QuickNode, ``PRIMARY_RPC_URL``, then Helius. Every failure degrades to ``None`` so callers
 fall back to their existing static fee behavior — a fee lookup failure never
 blocks a trade.
 """
@@ -44,10 +43,11 @@ _SAMPLE_LIMIT = 20
 
 
 def resolve_rpc_url() -> str:
-    """Return the best RPC URL for fee lookups (Helius first, per MT-588)."""
+    """Return the primary RPC for fee lookups (QuickNode first)."""
     return (
-        os.environ.get("HELIUS_RPC_URL")
+        os.environ.get("QUICKNODE_RPC_URL")
         or os.environ.get("PRIMARY_RPC_URL")
+        or os.environ.get("HELIUS_RPC_URL")
         or _DEFAULT_RPC_URL
     )
 
@@ -84,6 +84,13 @@ class PriorityFeeProvider:
         client: httpx.AsyncClient | None = None,
     ) -> None:
         self._rpc_url = rpc_url or resolve_rpc_url()
+        # An injected endpoint is normally a test or one-off diagnostic; retain
+        # the public fallback in that case instead of coupling it to local env.
+        self._backup_rpc_url = (
+            _FALLBACK_RPC_URL
+            if rpc_url is not None
+            else os.environ.get("BACKUP_RPC_URL") or os.environ.get("HELIUS_RPC_URL") or _FALLBACK_RPC_URL
+        )
         self._refresh_interval_s = refresh_interval_s
         self._percentile = percentile
         self._min_lamports = min_lamports
@@ -136,16 +143,17 @@ class PriorityFeeProvider:
         try:
             fees = await self._fetch_recent_fees(self._rpc_url)
         except Exception as exc:  # noqa: BLE001 — a fee lookup must never crash a trade
-            if self._rpc_url != _FALLBACK_RPC_URL:
+            backup_rpc_url = self._backup_rpc_url
+            if self._rpc_url != backup_rpc_url:
                 log.warning(
-                    "PRIORITY_FEE refresh failed on %s: %s — retrying public RPC",
+                    "PRIORITY_FEE refresh failed on %s: %s — retrying backup RPC",
                     _redact_url(self._rpc_url), _sanitize_exc(exc),
                 )
                 try:
-                    fees = await self._fetch_recent_fees(_FALLBACK_RPC_URL)
+                    fees = await self._fetch_recent_fees(backup_rpc_url)
                 except Exception as exc2:  # noqa: BLE001
                     log.warning(
-                        "PRIORITY_FEE refresh failed on public RPC too: %s — static fallback",
+                        "PRIORITY_FEE refresh failed on backup RPC too: %s — static fallback",
                         _sanitize_exc(exc2),
                     )
                     fees = []

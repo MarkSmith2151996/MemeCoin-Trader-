@@ -73,7 +73,6 @@ JITO_TIP_ACCOUNTS = (
     "96gYZGLnJYVFmbjzopPSU6QiEV5fGqZNyN9nmNhvrZU5",
     "HFqU5x63VTqvQss8hp11i4bVqkfRtQo3EZLFNi1Aqtg",
     "Cw8CFyM9FkoMi7K7Crf6HNQqf4uEMzpKw6QNghXLvLkY",
-    "ADaUMid9yfUC5i4YSf4kAqoMfchVbswbPoz8CYmJRBpHt",
     "DfXygSm4jCyNCybVYYK6DwvWqjKee8pbDmJGcLWNDXjh",
     "ADuUkR4vqLUMWXxW9gh6D6L8pMSawimctcNZ5pGwDcEt",
     "DttWaMuVvTiduZRnguLF7jNxTgiMBZ1hyAumKUiL2KRL",
@@ -121,6 +120,16 @@ class JupiterSwapResult:
     token_balance_after: float | None = None
 
 
+@dataclass(frozen=True, slots=True)
+class TokenAccountBalance:
+    """One standard SPL token account owned by the trading wallet."""
+
+    address: str
+    mint: str
+    raw_amount: int
+    decimals: int
+
+
 class JupiterSwapClient:
     """Live Jupiter Swap API client with injectable HTTP and RPC transport."""
 
@@ -128,6 +137,7 @@ class JupiterSwapClient:
         self,
         base_url: str = _DEFAULT_BASE_URL,
         solana_rpc_url: str | None = None,
+        backup_solana_rpc_url: str | None = None,
         http_client: httpx.AsyncClient | None = None,
         keypair: Keypair | None = None,
         api_key: str | None = None,
@@ -142,8 +152,15 @@ class JupiterSwapClient:
         self._base_url = base_url.rstrip("/")
         self._solana_rpc_url = (
             solana_rpc_url
+            or os.environ.get("QUICKNODE_RPC_URL")
             or os.environ.get("PRIMARY_RPC_URL")
             or _DEFAULT_SOLANA_RPC
+        )
+        self._backup_solana_rpc_url = (
+            backup_solana_rpc_url
+            or os.environ.get("BACKUP_RPC_URL")
+            or os.environ.get("HELIUS_RPC_URL")
+            or None
         )
         self._client = http_client or httpx.AsyncClient(timeout=timeout_s)
         self._keypair = keypair if keypair is not None else self._load_keypair()
@@ -199,7 +216,7 @@ class JupiterSwapClient:
             "params": [mint],
         }
         try:
-            response = await self._client.post(self._solana_rpc_url, json=payload)
+            response = await self._rpc_post(payload)
             response.raise_for_status()
             data = response.json()
             decimals = int(data["result"]["value"]["decimals"])
@@ -581,7 +598,7 @@ class JupiterSwapClient:
             ],
         }
         try:
-            response = await self._client.post(self._solana_rpc_url, json=payload)
+            response = await self._rpc_post(payload)
             response.raise_for_status()
             data = response.json()
         except (httpx.HTTPError, ValueError) as exc:
@@ -616,7 +633,7 @@ class JupiterSwapClient:
             "params": [[signature], {"searchTransactionHistory": True}],
         }
         try:
-            response = await self._client.post(self._solana_rpc_url, json=payload)
+            response = await self._rpc_post(payload)
             response.raise_for_status()
             data = response.json()
             value = data["result"]["value"]
@@ -674,7 +691,7 @@ class JupiterSwapClient:
             ],
         }
         try:
-            response = await self._client.post(self._solana_rpc_url, json=payload)
+            response = await self._rpc_post(payload)
             response.raise_for_status()
             accounts = response.json()["result"]["value"]
         except (httpx.HTTPError, ValueError, KeyError, TypeError):
@@ -693,6 +710,82 @@ class JupiterSwapClient:
                 holdings[mint] = holdings.get(mint, 0.0) + amount
         return holdings
 
+    async def get_token_accounts(self) -> list[TokenAccountBalance] | None:
+        """Return standard SPL accounts with raw balances for dust maintenance."""
+        payload = {
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "getTokenAccountsByOwner",
+            "params": [
+                self.wallet_pubkey,
+                {"programId": "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"},
+                {"encoding": "jsonParsed"},
+            ],
+        }
+        try:
+            response = await self._rpc_post(payload)
+            accounts = response.json()["result"]["value"]
+        except (httpx.HTTPError, ValueError, KeyError, TypeError):
+            return None
+
+        balances: list[TokenAccountBalance] = []
+        for account in accounts:
+            try:
+                info = account["account"]["data"]["parsed"]["info"]
+                token_amount = info["tokenAmount"]
+                raw_amount = int(token_amount["amount"])
+                if raw_amount <= 0:
+                    continue
+                balances.append(
+                    TokenAccountBalance(
+                        address=str(account["pubkey"]),
+                        mint=str(info["mint"]),
+                        raw_amount=raw_amount,
+                        decimals=int(token_amount["decimals"]),
+                    ),
+                )
+            except (KeyError, ValueError, TypeError):
+                continue
+        return balances
+
+    async def burn_token_account(self, account: TokenAccountBalance) -> str | None:
+        """Burn a standard SPL balance and return its transaction signature on confirmation.
+
+        This is intentionally limited to accounts returned by ``get_token_accounts``;
+        callers should use it only after an explicit human-confirmed dust cleanup.
+        """
+        from spl.token.constants import TOKEN_PROGRAM_ID
+        from spl.token.instructions import burn
+        from spl.token.models import BurnParams
+
+        blockhash_payload = {
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "getLatestBlockhash",
+            "params": [{"commitment": "confirmed"}],
+        }
+        try:
+            response = await self._rpc_post(blockhash_payload)
+            blockhash = Hash.from_string(response.json()["result"]["value"]["blockhash"])
+            instruction = burn(
+                BurnParams(
+                    program_id=TOKEN_PROGRAM_ID,
+                    mint=Pubkey.from_string(account.mint),
+                    account=Pubkey.from_string(account.address),
+                    owner=self._keypair.pubkey(),
+                    amount=account.raw_amount,
+                    signers=[],
+                ),
+            )
+            transaction = Transaction.new_signed_with_payer(
+                [instruction], self._keypair.pubkey(), [self._keypair], blockhash,
+            )
+            signed_b64 = base64.b64encode(bytes(transaction)).decode()
+        except Exception as exc:  # This is an operator-only recovery path.
+            log.warning("DUST burn build failed for %s: %s", account.mint[:16], exc)
+            return None
+        return await self._send_via_rpc(signed_b64)
+
     async def _sol_balance_lamports(self) -> int | None:
         payload = {
             "jsonrpc": "2.0",
@@ -701,7 +794,7 @@ class JupiterSwapClient:
             "params": [self.wallet_pubkey],
         }
         try:
-            response = await self._client.post(self._solana_rpc_url, json=payload)
+            response = await self._rpc_post(payload)
             response.raise_for_status()
             return int(response.json()["result"]["value"])
         except (httpx.HTTPError, ValueError, KeyError, TypeError):
@@ -719,7 +812,7 @@ class JupiterSwapClient:
             ],
         }
         try:
-            response = await self._client.post(self._solana_rpc_url, json=payload)
+            response = await self._rpc_post(payload)
             response.raise_for_status()
             accounts = response.json()["result"]["value"]
         except (httpx.HTTPError, ValueError, KeyError, TypeError):
@@ -734,6 +827,24 @@ class JupiterSwapClient:
         return total
 
     # ── Helpers ──────────────────────────────────────────────────────
+
+    async def _rpc_post(self, payload: dict[str, object]) -> httpx.Response:
+        """Use QuickNode/primary RPC first and Helius/backup only on transport failure."""
+        urls = [self._solana_rpc_url]
+        if self._backup_solana_rpc_url and self._backup_solana_rpc_url != self._solana_rpc_url:
+            urls.append(self._backup_solana_rpc_url)
+        last_error: httpx.HTTPError | None = None
+        for index, url in enumerate(urls):
+            try:
+                response = await self._client.post(url, json=payload)
+                response.raise_for_status()
+                return response
+            except httpx.HTTPError as exc:
+                last_error = exc
+                if index + 1 < len(urls):
+                    log.warning("LIVE RPC primary failed for %s; trying configured backup", payload["method"])
+        assert last_error is not None
+        raise last_error
 
     def _headers(self) -> dict[str, str]:
         return {"x-api-key": self._api_key}

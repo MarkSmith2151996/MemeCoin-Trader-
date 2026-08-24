@@ -1,0 +1,156 @@
+"""MT-633 coverage for exit persistence, mode migration, and price streaming."""
+
+from __future__ import annotations
+
+import asyncio
+import inspect
+import sqlite3
+from pathlib import Path
+
+from solders.keypair import Keypair
+
+from scripts import run_strategy_b
+from src.chain.jupiter_swap import JupiterSwapClient
+from src.core.config import load_settings
+from src.core.database import init_db
+from src.core.models import Position, PositionStatus, Trade
+from src.execution.position_reconciliation import reconcile_positions
+from src.execution.pumpportal_price import _parse_price_update
+from src.strategy.position_manager import PositionManager
+
+
+def test_reconciliation_skips_sell_being_persisted(tmp_path: Path) -> None:
+    async def run() -> None:
+        db_path = tmp_path / "trades.db"
+        await init_db(db_path)
+        manager = PositionManager(db_path, load_settings(), strategy="B")
+        position = Position(
+            mint_address="mint-in-flight",
+            entry_trade_id="entry",
+            amount_sol=0.01,
+            token_amount=100.0,
+            entry_price_sol=0.0001,
+            mode="live",
+        )
+        await manager.open_position(
+            Trade(
+                mint_address=position.mint_address,
+                side="BUY",
+                amount_sol=0.01,
+                token_amount=100.0,
+                price_sol=0.0001,
+                mode="live",
+            ),
+            None,
+        )
+
+        report = await reconcile_positions(
+            manager,
+            lambda: _empty_holdings(),
+            skip_mints={position.mint_address},
+        )
+        assert report.ok
+        assert report.mismatches == ()
+
+    asyncio.run(run())
+
+
+async def _empty_holdings() -> dict[str, float]:
+    return {}
+
+
+def test_shutdown_waits_for_active_sell_persistence() -> None:
+    async def run() -> None:
+        run_strategy_b._selling_in_progress.add("mint-in-flight")
+
+        async def finish_persisting() -> None:
+            await asyncio.sleep(0.01)
+            run_strategy_b._selling_in_progress.clear()
+
+        await asyncio.gather(run_strategy_b._wait_for_inflight_sells(0.5), finish_persisting())
+
+    asyncio.run(run())
+
+
+def test_shutdown_blocks_new_entries_before_any_adapter_work() -> None:
+    async def run() -> None:
+        run_strategy_b._shutting_down = True
+        try:
+            result = await run_strategy_b.try_enter(
+                "mint",
+                "TST",
+                None,
+                None,
+                None,
+                Path("unused.db"),
+            )
+        finally:
+            run_strategy_b._shutting_down = False
+        assert result is None
+
+    asyncio.run(run())
+
+
+def test_single_trade_mode_is_part_of_the_scan_runtime() -> None:
+    assert "single_trade_complete" in inspect.signature(run_strategy_b.scan_loop).parameters
+    assert "--single-trade" in Path(run_strategy_b.__file__).read_text()
+
+
+def test_positions_mode_migration_backfills_json_and_indexes(tmp_path: Path) -> None:
+    db_path = tmp_path / "legacy.db"
+    connection = sqlite3.connect(db_path)
+    connection.execute(
+        """CREATE TABLE positions (
+            id TEXT PRIMARY KEY, mint_address TEXT, entry_trade_id TEXT, amount_sol REAL,
+            token_amount REAL, entry_price_sol REAL, status TEXT, opened_at TEXT,
+            closed_at TEXT, realized_pnl_sol REAL, partial_exits_json TEXT
+        )""",
+    )
+    connection.execute(
+        "INSERT INTO positions VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        (
+            "legacy",
+            "mint",
+            "entry",
+            0.01,
+            100,
+            0.0001,
+            PositionStatus.OPEN.value,
+            "2026-01-01T00:00:00+00:00",
+            None,
+            0,
+            '{"mode":"live"}',
+        ),
+    )
+    connection.commit()
+    connection.close()
+
+    asyncio.run(init_db(db_path))
+    connection = sqlite3.connect(db_path)
+    mode = connection.execute("SELECT mode FROM positions WHERE id = 'legacy'").fetchone()[0]
+    indexes = {row[1] for row in connection.execute("PRAGMA index_list(positions)")}
+    connection.close()
+    assert mode == "live"
+    assert "idx_positions_mode_status" in indexes
+
+
+def test_pumpportal_trade_updates_produce_safe_prices() -> None:
+    assert _parse_price_update('{"mint":"mint","priceSol":0.00001}') == ("mint", 0.00001)
+    assert _parse_price_update(
+        '{"mint":"mint","solAmount":2,"tokenAmount":1000}',
+    ) == ("mint", 0.002)
+    assert _parse_price_update('{"mint":"mint","tokenAmount":0}') is None
+
+
+def test_quicknode_is_selected_before_primary_rpc(monkeypatch) -> None:
+    monkeypatch.setenv("QUICKNODE_RPC_URL", "https://quicknode.example")
+    monkeypatch.setenv("PRIMARY_RPC_URL", "https://primary.example")
+    client = JupiterSwapClient(keypair=Keypair(), api_key="test-key")
+    assert client._solana_rpc_url == "https://quicknode.example"
+    asyncio.run(client.close())
+
+
+def test_kill_script_and_watchdog_share_killswitch_contract() -> None:
+    root = Path(__file__).resolve().parents[1]
+    assert "/tmp/memecoin_killswitch" in (root / "scripts" / "kill_loop.sh").read_text()
+    assert "/tmp/memecoin_killswitch" in Path("/home/dev/watchdog_memecoin.sh").read_text()

@@ -113,10 +113,12 @@ class PositionManager:
             ]
 
         async with aiosqlite.connect(self.db) as conn:
-            cursor = await conn.execute(
-                "SELECT partial_exits_json FROM positions WHERE status != ? AND strategy = ?",
-                (PositionStatus.CLOSED.value, self.strategy),
-            )
+            query = "SELECT partial_exits_json FROM positions WHERE status != ? AND strategy = ?"
+            params: list[str] = [PositionStatus.CLOSED.value, self.strategy]
+            if mode is not None:
+                query += " AND mode = ?"
+                params.append(mode)
+            cursor = await conn.execute(query, params)
             rows = await cursor.fetchall()
 
         positions = [Position.model_validate_json(row[0]) for row in rows]
@@ -256,12 +258,14 @@ class PositionManager:
             return self._cached_position(mint, mode)
 
         async with aiosqlite.connect(self.db) as conn:
-            cursor = await conn.execute(
-                """SELECT partial_exits_json FROM positions
-                   WHERE mint_address = ? AND status != ? AND strategy = ?
-                   ORDER BY opened_at DESC""",
-                (mint, PositionStatus.CLOSED.value, self.strategy),
-            )
+            query = """SELECT partial_exits_json FROM positions
+                       WHERE mint_address = ? AND status != ? AND strategy = ?"""
+            params: list[str] = [mint, PositionStatus.CLOSED.value, self.strategy]
+            if mode is not None:
+                query += " AND mode = ?"
+                params.append(mode)
+            query += " ORDER BY opened_at DESC"
+            cursor = await conn.execute(query, params)
             rows = await cursor.fetchall()
         positions = [Position.model_validate_json(row[0]) for row in rows]
         return next((position for position in positions if mode is None or position.mode == mode), None)
