@@ -28,6 +28,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import logging
+import math
 import os
 import random
 import time
@@ -57,13 +58,14 @@ _DEFAULT_SOLANA_RPC = "https://api.mainnet-beta.solana.com"
 _FALLBACK_DECIMALS = 9
 _PRIORITY_LEVEL = "veryHigh"
 _PRIORITY_MAX_LAMPORTS = 1_000_000
+_MAX_TRANSACTION_SIZE_BYTES = 1_232
+_COMPACT_ROUTE_MAX_ACCOUNTS = 32
 
 # ── MT-636: Jito bundle routing ────────────────────────────────────────
-# Master switch for Jito bundle submission of every swap. When True, each
-# signed swap is wrapped in a bundle with a tip to one of the canonical Jito
-# tip accounts below; on bundle failure the client falls back to the plain
-# RPC sendTransaction path with a warning log.
+# Master switch for Jito bundle submission. The size threshold below keeps
+# small swaps on direct RPC even when this switch is enabled.
 USE_JITO_BUNDLES = True
+DEFAULT_JITO_MIN_SIZE_SOL = 0.1
 JITO_BLOCK_ENGINE_URL = "https://mainnet.block-engine.jito.wtf/api/v1/bundles"
 # Canonical Jito tip accounts (pick one at random per bundle).
 JITO_TIP_ACCOUNTS = (
@@ -131,6 +133,10 @@ class TokenAccountBalance:
     decimals: int
 
 
+class _TransactionTooLargeError(RuntimeError):
+    """Raised when Jupiter cannot build a swap within Solana's byte limit."""
+
+
 class JupiterSwapClient:
     """Live Jupiter Swap API client with injectable HTTP and RPC transport."""
 
@@ -148,6 +154,7 @@ class JupiterSwapClient:
         max_retries: int = 2,
         priority_fee_callback: FeeCallback | None = None,
         use_jito_bundles: bool | None = None,
+        jito_min_size_sol: float | None = None,
         jito_client: JitoBlockEngineClient | None = None,
     ) -> None:
         # Explicit base_url preserves the old Jupiter /swap/v1 test and
@@ -189,6 +196,7 @@ class JupiterSwapClient:
         self._use_jito_bundles = (
             USE_JITO_BUNDLES if use_jito_bundles is None else use_jito_bundles
         )
+        self._jito_min_size_sol = self._resolve_jito_min_size_sol(jito_min_size_sol)
         self._jito_client = jito_client or JitoBlockEngineClient(
             endpoint=JITO_BLOCK_ENGINE_URL,
             http_client=self._client,
@@ -246,6 +254,7 @@ class JupiterSwapClient:
         output_mint: str,
         amount_lamports: int,
         slippage_bps: int = 100,
+        max_accounts: int | None = None,
     ) -> JupiterSwapQuote | None:
         """Fetch one live quote. Returns ``None`` on any failure — never raises."""
         if amount_lamports <= 0:
@@ -259,6 +268,8 @@ class JupiterSwapClient:
             "slippageBps": str(slippage_bps),
             "dynamicSlippage": "true",
         }
+        if max_accounts is not None:
+            params["maxAccounts"] = str(max_accounts)
         try:
             response, swap_api_base_url, swap_api_legacy_paths = await self._get_swap_response(
                 "quote", params=params,
@@ -322,6 +333,11 @@ class JupiterSwapClient:
             diagnostics.append(f"attempt_{attempts}")
             try:
                 result = await self._execute_single_attempt(quote, diagnostics)
+            except _TransactionTooLargeError as exc:
+                log.error("LIVE swap not submitted: %s", exc)
+                return await self._fail_result(
+                    quote, attempts, "failed", str(exc), diagnostics + ["transaction_too_large"],
+                )
             except Exception as exc:
                 log.error("LIVE swap attempt %d crashed: %s", attempts, exc)
                 last_error = f"swap crash: {exc}"
@@ -362,15 +378,15 @@ class JupiterSwapClient:
         quote: JupiterSwapQuote,
         diagnostics: list[str],
     ) -> JupiterSwapResult:
-        swap_transaction, last_valid_block_height, fees = await self._request_swap_transaction(
-            quote,
+        quote, swap_transaction, last_valid_block_height, fees = (
+            await self._request_sized_swap_transaction(quote)
         )
         diagnostics.append("swap_transaction_ready")
 
         signed_b64 = self._sign_transaction(swap_transaction)
         diagnostics.append("transaction_signed")
 
-        signature = await self._send_transaction(signed_b64)
+        signature = await self._send_transaction(signed_b64, quote)
         if signature is None:
             return self._fail_result(quote, 1, "failed", "sendTransaction failed", diagnostics)
         diagnostics.append(f"signature={signature}")
@@ -430,6 +446,57 @@ class JupiterSwapClient:
             error=confirmation.error or "blockhash expired before confirmation",
             diagnostics=tuple(diagnostics),
         )
+
+    async def _request_sized_swap_transaction(
+        self,
+        quote: JupiterSwapQuote,
+    ) -> tuple[JupiterSwapQuote, str, int | None, int | None]:
+        """Build a swap transaction and retry once with a compact Jupiter route.
+
+        Jito bundles carry the tip as a separate transaction, so a swap over
+        Solana's 1,232-byte limit originates in Jupiter's generated route.
+        Restricting accounts only after detecting that condition avoids
+        degrading normal route selection.
+        """
+        swap_transaction, last_valid_block_height, fees = await self._request_swap_transaction(
+            quote,
+        )
+        size_bytes = self._serialized_transaction_size(swap_transaction)
+        if size_bytes <= _MAX_TRANSACTION_SIZE_BYTES:
+            return quote, swap_transaction, last_valid_block_height, fees
+
+        log.warning(
+            "LIVE Jupiter swap transaction size=%d exceeds %d bytes; retrying with maxAccounts=%d",
+            size_bytes,
+            _MAX_TRANSACTION_SIZE_BYTES,
+            _COMPACT_ROUTE_MAX_ACCOUNTS,
+        )
+        compact_quote = await self.get_quote(
+            quote.input_mint,
+            quote.output_mint,
+            quote.in_amount,
+            quote.slippage_bps,
+            max_accounts=_COMPACT_ROUTE_MAX_ACCOUNTS,
+        )
+        if compact_quote is None:
+            raise _TransactionTooLargeError(
+                f"Jupiter built a {size_bytes}-byte transaction and no compact route was available",
+            )
+        compact_transaction, compact_last_valid, compact_fees = (
+            await self._request_swap_transaction(compact_quote)
+        )
+        compact_size_bytes = self._serialized_transaction_size(compact_transaction)
+        if compact_size_bytes > _MAX_TRANSACTION_SIZE_BYTES:
+            raise _TransactionTooLargeError(
+                "Jupiter compact route is still "
+                f"{compact_size_bytes} bytes (limit {_MAX_TRANSACTION_SIZE_BYTES})",
+            )
+        log.info(
+            "LIVE Jupiter compact route reduced transaction size from %d to %d bytes",
+            size_bytes,
+            compact_size_bytes,
+        )
+        return compact_quote, compact_transaction, compact_last_valid, compact_fees
 
     async def _request_swap_transaction(
         self,
@@ -512,7 +579,7 @@ class JupiterSwapClient:
         except Exception as exc:
             raise RuntimeError(f"transaction signing failed: {exc}") from exc
 
-    async def _send_transaction(self, signed_b64: str) -> str | None:
+    async def _send_transaction(self, signed_b64: str, quote: JupiterSwapQuote) -> str | None:
         """Send the signed swap via Jito bundle (MT-589) or plain RPC.
 
         Returns the swap transaction signature on success, ``None`` on
@@ -520,11 +587,32 @@ class JupiterSwapClient:
         submitted first; any bundle failure logs a warning and falls back to
         the standard RPC ``sendTransaction`` path.
         """
-        if self._use_jito_bundles:
+        if self._should_use_jito_bundles(quote):
             bundle_signature = await self._send_via_jito(signed_b64)
             if bundle_signature is not None:
                 return bundle_signature
         return await self._send_via_rpc(signed_b64)
+
+    def _should_use_jito_bundles(self, quote: JupiterSwapQuote) -> bool:
+        """Use Jito only when the SOL notional meets the configured threshold."""
+        if not self._use_jito_bundles:
+            return False
+        if quote.input_mint == SOL_MINT:
+            notional_lamports = quote.in_amount
+        elif quote.output_mint == SOL_MINT:
+            notional_lamports = quote.out_amount
+        else:
+            log.info("JITO skipped: swap has no SOL notional; using RPC")
+            return False
+        notional_sol = notional_lamports / LAMPORTS_PER_SOL
+        if notional_sol < self._jito_min_size_sol:
+            log.info(
+                "JITO skipped: notional_sol=%.9f below JITO_MIN_SIZE_SOL=%.9f; using RPC",
+                notional_sol,
+                self._jito_min_size_sol,
+            )
+            return False
+        return True
 
     async def _send_via_jito(self, signed_b64: str) -> str | None:
         """Submit the signed swap as a one-transaction Jito bundle with a tip.
@@ -591,6 +679,37 @@ class JupiterSwapClient:
             log.warning("JITO smart tip lookup failed; using minimum: %s", exc)
             return MIN_JITO_TIP_LAMPORTS
         return self._jito_tip_lamports_cache
+
+    @staticmethod
+    def _serialized_transaction_size(transaction_b64: str) -> int:
+        try:
+            return len(base64.b64decode(transaction_b64, validate=True))
+        except Exception as exc:
+            raise _TransactionTooLargeError(
+                f"Jupiter returned invalid base64 transaction: {exc}",
+            ) from exc
+
+    @staticmethod
+    def _resolve_jito_min_size_sol(value: float | None) -> float:
+        """Read a finite, non-negative Jito threshold without blocking swaps."""
+        raw_value: object = value if value is not None else os.environ.get("JITO_MIN_SIZE_SOL")
+        if raw_value is None or raw_value == "":
+            return DEFAULT_JITO_MIN_SIZE_SOL
+        try:
+            threshold = float(raw_value)
+        except (TypeError, ValueError):
+            log.warning(
+                "Invalid JITO_MIN_SIZE_SOL; using default %.3f SOL",
+                DEFAULT_JITO_MIN_SIZE_SOL,
+            )
+            return DEFAULT_JITO_MIN_SIZE_SOL
+        if not math.isfinite(threshold) or threshold < 0:
+            log.warning(
+                "Invalid JITO_MIN_SIZE_SOL; using default %.3f SOL",
+                DEFAULT_JITO_MIN_SIZE_SOL,
+            )
+            return DEFAULT_JITO_MIN_SIZE_SOL
+        return threshold
 
     def _build_tip_transaction(self, tip_lamports: int, tip_account: str, blockhash: Hash) -> str:
         """Build a signed legacy SOL transfer to a Jito tip account (base64).

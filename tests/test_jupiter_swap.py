@@ -20,7 +20,12 @@ from solders.signature import Signature
 from solders.transaction import VersionedTransaction
 
 from src.chain.jupiter import SOL_MINT
-from src.chain.jupiter_swap import MAX_JITO_TIP_LAMPORTS, MIN_JITO_TIP_LAMPORTS, JupiterSwapClient
+from src.chain.jupiter_swap import (
+    MAX_JITO_TIP_LAMPORTS,
+    MIN_JITO_TIP_LAMPORTS,
+    JupiterSwapClient,
+    JupiterSwapQuote,
+)
 
 TOKEN_MINT = "tok12345678901234567890123456789012"
 WSOL_MINT = SOL_MINT
@@ -638,6 +643,7 @@ def test_execute_swap_submits_jito_bundle_when_enabled() -> None:
 
     client = _make_client(handler, keypair=keypair)
     client._use_jito_bundles = True
+    client._jito_min_size_sol = 0.0
 
     quote = asyncio.run(client.get_quote(WSOL_MINT, TOKEN_MINT, 50_000_000))
     assert quote is not None
@@ -650,6 +656,95 @@ def test_execute_swap_submits_jito_bundle_when_enabled() -> None:
     # The swap signature is the wallet's signature over the swap message.
     expected_sig = str(Signature.from_bytes(base64.b64decode(tx_b64)[:64]))
     assert result.signature == expected_sig
+
+
+def test_jito_is_skipped_below_position_size_threshold() -> None:
+    client = _make_client(lambda request: httpx.Response(500))
+    client._use_jito_bundles = True
+    client._jito_min_size_sol = 0.1
+
+    small_buy = JupiterSwapQuote(
+        input_mint=WSOL_MINT,
+        output_mint=TOKEN_MINT,
+        in_amount=20_000_000,
+        out_amount=1,
+        price_impact_pct=0.0,
+        slippage_bps=100,
+        token_decimals=6,
+        price_sol=None,
+        raw={},
+    )
+    large_sell = JupiterSwapQuote(
+        input_mint=TOKEN_MINT,
+        output_mint=WSOL_MINT,
+        in_amount=1,
+        out_amount=400_000_000,
+        price_impact_pct=0.0,
+        slippage_bps=100,
+        token_decimals=6,
+        price_sol=None,
+        raw={},
+    )
+
+    assert client._should_use_jito_bundles(small_buy) is False
+    assert client._should_use_jito_bundles(large_sell) is True
+
+
+def test_jito_min_size_defaults_to_point_one_sol(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("JITO_MIN_SIZE_SOL", raising=False)
+    client = _make_client(lambda request: httpx.Response(500))
+    assert client._jito_min_size_sol == pytest.approx(0.1)
+
+
+def test_oversized_swap_rebuilds_with_compact_jupiter_route() -> None:
+    client = _make_client(lambda request: httpx.Response(500))
+    original_quote = JupiterSwapQuote(
+        input_mint=WSOL_MINT,
+        output_mint=TOKEN_MINT,
+        in_amount=20_000_000,
+        out_amount=1,
+        price_impact_pct=0.0,
+        slippage_bps=100,
+        token_decimals=6,
+        price_sol=None,
+        raw={},
+    )
+    compact_quote = JupiterSwapQuote(
+        input_mint=WSOL_MINT,
+        output_mint=TOKEN_MINT,
+        in_amount=20_000_000,
+        out_amount=2,
+        price_impact_pct=0.0,
+        slippage_bps=100,
+        token_decimals=6,
+        price_sol=None,
+        raw={},
+    )
+    oversized_tx = base64.b64encode(b"x" * 1660).decode()
+    compact_tx = base64.b64encode(b"x" * 1232).decode()
+
+    async def request_swap(quote: JupiterSwapQuote) -> tuple[str, int, int]:
+        return (oversized_tx, 1, 1) if quote is original_quote else (compact_tx, 2, 2)
+
+    async def get_compact_quote(
+        *args,
+        max_accounts: int | None = None,
+        **kwargs,
+    ) -> JupiterSwapQuote:
+        assert max_accounts == 32
+        return compact_quote
+
+    client._request_swap_transaction = request_swap  # type: ignore[method-assign]
+    client.get_quote = get_compact_quote  # type: ignore[method-assign]
+
+    quote, transaction, last_valid, fees = asyncio.run(
+        client._request_sized_swap_transaction(original_quote),
+    )
+
+    assert quote is compact_quote
+    assert transaction == compact_tx
+    assert last_valid == 2
+    assert fees == 2
 
 
 def test_execute_swap_falls_back_to_rpc_when_jito_fails() -> None:
@@ -708,6 +803,7 @@ def test_execute_swap_falls_back_to_rpc_when_jito_fails() -> None:
 
     client = _make_client(handler, keypair=keypair)
     client._use_jito_bundles = True
+    client._jito_min_size_sol = 0.0
 
     quote = asyncio.run(client.get_quote(WSOL_MINT, TOKEN_MINT, 50_000_000))
     assert quote is not None
