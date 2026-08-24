@@ -94,6 +94,83 @@ class SlippageThenSuccessLiveAdapter:
         )
 
 
+class RecoveringLiveAdapter:
+    mode = "live"
+
+    def __init__(self, *, sell_fails: bool = False) -> None:
+        self.sell_fails = sell_fails
+        self.sell_calls: list[tuple[str, float, int]] = []
+        self.breaker_trips: list[dict] = []
+
+    async def execute_swap(
+        self, mint: str, side: Side, size_sol: float, slippage_bps: int = 300,
+    ) -> Trade:
+        return Trade(
+            mint_address=mint,
+            side=side,
+            amount_sol=size_sol,
+            token_amount=1_000.0,
+            price_sol=0.00005,
+            slippage_bps=slippage_bps,
+            tx_signature="live-buy-signature",
+            mode="live",
+            status="confirmed",
+        )
+
+    async def sell(
+        self, mint: str, token_amount: float, slippage_bps: int = 300,
+    ) -> Trade:
+        self.sell_calls.append((mint, token_amount, slippage_bps))
+        if self.sell_fails:
+            raise RuntimeError("sell-back failed")
+        return Trade(
+            mint_address=mint,
+            side=Side.SELL,
+            amount_sol=0.049,
+            token_amount=token_amount,
+            price_sol=0.000049,
+            slippage_bps=slippage_bps,
+            tx_signature="recovery-sell-signature",
+            mode="live",
+            status="confirmed",
+        )
+
+    def trip_circuit_breaker(self, **kwargs) -> None:
+        self.breaker_trips.append(kwargs)
+
+
+class PreSoldLiveAdapter:
+    mode = "live"
+
+    def __init__(self) -> None:
+        self.sell_calls = 0
+
+    async def get_token_balance(self, mint: str) -> float:
+        return 0.0
+
+    async def sell(self, mint: str, token_amount: float, slippage_bps: int = 300) -> Trade:
+        self.sell_calls += 1
+        raise AssertionError("sell should not run for an empty wallet balance")
+
+
+class LiveSafetyAdapter:
+    mode = "live"
+
+    def __init__(self, holdings: dict[str, float], sol_balance: float) -> None:
+        self.holdings = holdings
+        self.sol_balance = sol_balance
+        self.breaker_trips: list[dict] = []
+
+    async def get_wallet_holdings(self) -> dict[str, float]:
+        return self.holdings
+
+    async def get_sol_balance(self) -> float:
+        return self.sol_balance
+
+    def trip_circuit_breaker(self, **kwargs) -> None:
+        self.breaker_trips.append(kwargs)
+
+
 class FakeManager:
     def __init__(self, open_positions: list[Position] | None = None) -> None:
         self._open = list(open_positions or [])
@@ -363,6 +440,97 @@ def test_strategy_b_abandons_live_position_without_wallet_tokens(
             "SELECT amount_sol, price_sol, status FROM trades WHERE side = 'SELL'",
         ).fetchone()
     assert row == (0.0, 0.0, "abandoned")
+
+
+def test_strategy_b_precheck_skips_sell_when_wallet_tokens_are_gone(db: Path) -> None:
+    adapter = PreSoldLiveAdapter()
+
+    trade = asyncio.run(
+        strategy_b._adapter_close(make_position(), 1.0, "hard_stop", db, adapter),
+    )
+
+    assert trade is not None
+    assert trade.status == "abandoned"
+    assert trade.metadata["pre_sell_balance_check"] is True
+    assert adapter.sell_calls == 0
+
+
+def test_strategy_b_live_record_failure_sells_back_and_trips_breaker(
+    db: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(strategy_b, "BLOCKED_UTC_HOURS", frozenset())
+    monkeypatch.setattr(strategy_b, "BLOCKED_WEEKDAYS", frozenset())
+
+    async def fail_record(*args, **kwargs) -> None:
+        raise RuntimeError("database unavailable")
+
+    monkeypatch.setattr(strategy_b, "record_trade", fail_record)
+    adapter = RecoveringLiveAdapter()
+
+    result = asyncio.run(
+        strategy_b.try_enter(
+            "LiveRecordFailure", "LIVE", FakePrice(0.00005), adapter,
+            FakeManager(), db, pool_sol=100.0,
+        ),
+    )
+
+    assert result is None
+    assert adapter.sell_calls == [("LiveRecordFailure", 1_000.0, 500)]
+    assert adapter.breaker_trips[0]["reason"] == "database_failure"
+    assert adapter.breaker_trips[0]["signature_attempt"] == "live-buy-signature"
+
+
+def test_strategy_b_live_open_failure_attempts_sell_back_even_when_it_fails(
+    db: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture,
+) -> None:
+    monkeypatch.setattr(strategy_b, "BLOCKED_UTC_HOURS", frozenset())
+    monkeypatch.setattr(strategy_b, "BLOCKED_WEEKDAYS", frozenset())
+    manager = FakeManager()
+
+    async def fail_open(trade: Trade, signal) -> Position:
+        raise RuntimeError("position insert failed")
+
+    manager.open_position = fail_open
+    adapter = RecoveringLiveAdapter(sell_fails=True)
+
+    with caplog.at_level("CRITICAL"):
+        result = asyncio.run(
+            strategy_b.try_enter(
+                "LiveOpenFailure", "LIVE", FakePrice(0.00005), adapter,
+                manager, db, pool_sol=100.0,
+            ),
+        )
+
+    assert result is None
+    assert adapter.sell_calls == [("LiveOpenFailure", 1_000.0, 500)]
+    assert adapter.breaker_trips[0]["reason"] == "database_failure"
+    assert "manual recovery required" in caplog.text
+
+
+def test_strategy_b_live_safety_logs_orphan_and_phantom_and_trips(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    manager = FakeManager([make_position("PhantomMint")])
+    adapter = LiveSafetyAdapter({"OrphanMint": 42.0}, sol_balance=1.0)
+
+    with caplog.at_level("WARNING"):
+        asyncio.run(strategy_b._run_live_safety_checks(manager, adapter, 0.05))
+
+    assert "orphan token detected mint=OrphanMint balance=42.0" in caplog.text
+    assert "phantom position mint=PhantomMint" in caplog.text
+    assert adapter.breaker_trips[0]["reason"] == "position_reconciliation"
+
+
+def test_strategy_b_live_safety_trips_on_low_sol_balance(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    adapter = LiveSafetyAdapter({}, sol_balance=0.049)
+
+    with caplog.at_level("INFO"):
+        asyncio.run(strategy_b._run_live_safety_checks(FakeManager(), adapter, 0.05))
+
+    assert "WALLET_BALANCE sol=0.0490" in caplog.text
+    assert adapter.breaker_trips[0]["reason"] == "low_wallet_balance"
 
 
 # ── 3. Time-of-day gates ─────────────────────────────────────────────

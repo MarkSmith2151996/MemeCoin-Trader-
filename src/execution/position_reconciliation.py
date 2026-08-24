@@ -48,9 +48,10 @@ async def reconcile_positions(
     wallet_holdings_lookup: SupportsWalletHoldingsLookup | None,
     *,
     material_balance_ratio: float = 0.05,
+    detect_wallet_only_without_positions: bool = False,
 ) -> PositionReconciliationReport:
     live_positions = await position_manager.get_all_open(mode="live")
-    if not live_positions:
+    if not live_positions and not detect_wallet_only_without_positions:
         return PositionReconciliationReport(
             ok=True,
             diagnostics=("no_live_positions_to_reconcile",),
@@ -77,6 +78,13 @@ async def reconcile_positions(
         return PositionReconciliationReport(
             ok=False,
             diagnostics=("wallet_holdings_unknown",),
+            mismatches=(),
+        )
+
+    if not live_positions and not wallet_holdings:
+        return PositionReconciliationReport(
+            ok=True,
+            diagnostics=("no_live_positions_to_reconcile",),
             mismatches=(),
         )
 

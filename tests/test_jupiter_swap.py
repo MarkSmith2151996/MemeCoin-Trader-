@@ -80,6 +80,53 @@ def _make_client(handler, keypair: Keypair | None = None) -> JupiterSwapClient:
     )
 
 
+def test_get_wallet_holdings_returns_positive_balances_by_mint() -> None:
+    def account(mint: str, amount: str, decimals: int) -> dict:
+        return {
+            "account": {
+                "data": {
+                    "parsed": {
+                        "info": {
+                            "mint": mint,
+                            "tokenAmount": {"amount": amount, "decimals": decimals},
+                        },
+                    },
+                },
+            },
+        }
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        payload = json.loads(request.content)
+        assert payload["method"] == "getTokenAccountsByOwner"
+        assert payload["params"][1] == {
+            "programId": "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA",
+        }
+        return httpx.Response(
+            200,
+            json={
+                "jsonrpc": "2.0",
+                "id": 1,
+                "result": {
+                    "value": [
+                        account(TOKEN_MINT, "1250000", 6),
+                        account(TOKEN_MINT, "250000", 6),
+                        account("zero-mint", "0", 6),
+                    ],
+                },
+            },
+        )
+
+    async def run() -> None:
+        client = _make_client(handler)
+        try:
+            holdings = await client.get_wallet_holdings()
+        finally:
+            await client.close()
+        assert holdings == {TOKEN_MINT: 1.5}
+
+    asyncio.run(run())
+
+
 def test_quote_happy_path_sends_api_key() -> None:
     captured: dict[str, object] = {}
 

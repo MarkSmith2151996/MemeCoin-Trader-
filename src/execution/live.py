@@ -204,6 +204,32 @@ class LiveExecutionAdapter(ExecutionAdapter):
         self._ensure_open()
         return await self._client.get_token_balance(mint_address)
 
+    async def get_wallet_holdings(self) -> dict[str, float] | None:
+        """Return all positive SPL-token balances without attempting a swap."""
+        self._ensure_open()
+        return await self._client.get_wallet_holdings()
+
+    async def get_sol_balance(self) -> float | None:
+        """Return the wallet SOL balance without attempting a swap."""
+        self._ensure_open()
+        return await self._client.get_sol_balance()
+
+    def trip_circuit_breaker(
+        self,
+        *,
+        error: str,
+        mint: str | None = None,
+        signature_attempt: str | None = None,
+        reason: str,
+    ) -> None:
+        """Block new live buys after an external consistency failure."""
+        self._circuit_breaker.trip(
+            error=error,
+            mint=mint,
+            signature_attempt=signature_attempt,
+            reason=reason,
+        )
+
     async def execute_swap(
         self,
         mint_address: str,

@@ -331,6 +331,29 @@ def test_wallet_only_holding_is_flagged_with_live_positions(tmp_path: Path) -> N
     asyncio.run(run())
 
 
+def test_wallet_only_holding_is_flagged_without_live_positions(tmp_path: Path) -> None:
+    async def run() -> None:
+        settings = load_settings()
+        db_path = tmp_path / "wallet-only-no-position.db"
+        await init_db(db_path)
+        manager = PositionManager(db_path, settings)
+
+        async def wallet_holdings():
+            return {"orphan-mint": 123.0}
+
+        report = await reconcile_positions(
+            manager,
+            wallet_holdings,
+            detect_wallet_only_without_positions=True,
+        )
+
+        assert report.ok is False
+        assert report.mismatches[0].kind == "wallet_only_holding"
+        assert report.mismatches[0].mint_address == "orphan-mint"
+
+    asyncio.run(run())
+
+
 def test_missing_wallet_data_fails_closed(tmp_path: Path) -> None:
     async def run() -> None:
         db_path = tmp_path / "missing-wallet.db"

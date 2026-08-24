@@ -661,6 +661,38 @@ class JupiterSwapClient:
         raw = await self._token_balance_raw(mint)
         return raw / (10**decimals) if raw is not None else None
 
+    async def get_wallet_holdings(self) -> dict[str, float] | None:
+        """All positive SPL-token balances keyed by mint, or ``None`` on failure."""
+        payload = {
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "getTokenAccountsByOwner",
+            "params": [
+                self.wallet_pubkey,
+                {"programId": "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"},
+                {"encoding": "jsonParsed"},
+            ],
+        }
+        try:
+            response = await self._client.post(self._solana_rpc_url, json=payload)
+            response.raise_for_status()
+            accounts = response.json()["result"]["value"]
+        except (httpx.HTTPError, ValueError, KeyError, TypeError):
+            return None
+
+        holdings: dict[str, float] = {}
+        for account in accounts:
+            try:
+                info = account["account"]["data"]["parsed"]["info"]
+                token_amount = info["tokenAmount"]
+                amount = int(token_amount["amount"]) / (10 ** int(token_amount["decimals"]))
+                mint = str(info["mint"])
+            except (KeyError, ValueError, TypeError):
+                continue
+            if amount > 0:
+                holdings[mint] = holdings.get(mint, 0.0) + amount
+        return holdings
+
     async def _sol_balance_lamports(self) -> int | None:
         payload = {
             "jsonrpc": "2.0",

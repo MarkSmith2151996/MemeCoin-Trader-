@@ -124,6 +124,7 @@ from src.core.models import PositionStatus, Side, Trade
 from src.execution.base import ExecutionAdapter
 from src.execution.live import is_jupiter_slippage_error
 from src.execution.paper import PaperExecutionAdapter
+from src.execution.position_reconciliation import reconcile_positions
 from src.execution.price_provider import JupiterPriceProvider
 from src.monitoring.alerts import send_imessage
 from src.monitoring.position_snapshots import snapshot_loop
@@ -218,6 +219,7 @@ EXECUTION_MODE = "paper"  # set at startup from .env
 SCAN_INTERVAL = int(os.environ.get("STRATEGY_B_SCAN_INTERVAL", "1"))
 MONITOR_INTERVAL = 30
 FAST_MONITOR_INTERVAL_S = 5
+LIVE_SAFETY_CHECK_INTERVAL_S = 300
 FAST_POLL_DROP_PCT = 0.05
 # MT-566: per-mint throttle for candidate_log inserts and SCREEN log lines
 # (replaces the MT-560 screening cooldown). Gate evaluation itself runs every
@@ -1183,6 +1185,56 @@ async def log_candidate(db_path: Path, coin: dict, gates: dict[str, bool], reaso
 
 # ── Entry ────────────────────────────────────────────────────────────
 
+async def _recover_live_entry_after_persistence_failure(
+    adapter: ExecutionAdapter,
+    trade: Trade,
+    persistence_step: str,
+    error: Exception,
+) -> None:
+    log.error(
+        "LIVE ENTRY PERSISTENCE FAILURE step=%s mint=%s token_amount=%s tx_signature=%s error=%s",
+        persistence_step,
+        trade.mint_address,
+        trade.token_amount,
+        trade.tx_signature or "-",
+        error,
+    )
+    try:
+        await adapter.sell(  # type: ignore[attr-defined]
+            trade.mint_address,
+            trade.token_amount,
+            slippage_bps=500,
+        )
+        log.error(
+            "LIVE ENTRY RECOVERY SOLD BACK mint=%s token_amount=%s buy_tx_signature=%s",
+            trade.mint_address,
+            trade.token_amount,
+            trade.tx_signature or "-",
+        )
+    except Exception as sell_error:
+        log.critical(
+            "LIVE ENTRY RECOVERY FAILED mint=%s token_amount=%s buy_tx_signature=%s "
+            "sell_error=%s manual recovery required",
+            trade.mint_address,
+            trade.token_amount,
+            trade.tx_signature or "-",
+            sell_error,
+        )
+    finally:
+        try:
+            adapter.trip_circuit_breaker(  # type: ignore[attr-defined]
+                error=f"{persistence_step} failed after live buy: {error}",
+                mint=trade.mint_address,
+                signature_attempt=trade.tx_signature,
+                reason="database_failure",
+            )
+        except Exception as breaker_error:
+            log.critical(
+                "LIVE ENTRY could not trip circuit breaker mint=%s error=%s",
+                trade.mint_address,
+                breaker_error,
+            )
+
 async def try_enter(
     mint: str,
     ticker: str,
@@ -1332,6 +1384,11 @@ async def try_enter(
     try:
         await record_trade(db_path, trade)
     except Exception as exc:
+        if adapter.mode == "live":
+            await _recover_live_entry_after_persistence_failure(
+                adapter, trade, "record_trade", exc,
+            )
+            return None
         log.warning("SKIP %s ticker=%s \u2014 record_trade failed: %s", mint[:16], ticker, exc)
         log.debug("DEBUG ENTRY_EVAL mint=%s result=rejected reason=record_trade_failed", mint[:16])
         return None
@@ -1347,6 +1404,11 @@ async def try_enter(
         )
         position = await manager.open_position(trade, dummy_signal)
     except Exception as exc:
+        if adapter.mode == "live":
+            await _recover_live_entry_after_persistence_failure(
+                adapter, trade, "open_position", exc,
+            )
+            return None
         log.warning("SKIP %s ticker=%s \u2014 open_position failed: %s", mint[:16], ticker, exc)
         log.debug("DEBUG ENTRY_EVAL mint=%s result=rejected reason=open_position_failed", mint[:16])
         return None
@@ -1501,6 +1563,60 @@ async def monitor_positions(
     return danger
 
 
+async def _run_live_safety_checks(
+    manager: PositionManager,
+    adapter: ExecutionAdapter,
+    wallet_balance_floor_sol: float,
+) -> None:
+    if adapter.mode != "live":
+        return
+
+    report = await reconcile_positions(
+        manager,
+        adapter.get_wallet_holdings,  # type: ignore[attr-defined]
+        detect_wallet_only_without_positions=True,
+    )
+    for mismatch in report.mismatches:
+        if mismatch.kind == "wallet_only_holding":
+            log.warning(
+                "orphan token detected mint=%s balance=%s",
+                mismatch.mint_address,
+                mismatch.wallet_token_amount,
+            )
+        elif mismatch.kind == "local_only_position":
+            log.warning("phantom position mint=%s", mismatch.mint_address)
+        else:
+            log.warning(
+                "position balance mismatch mint=%s db_balance=%s wallet_balance=%s",
+                mismatch.mint_address,
+                mismatch.local_token_amount,
+                mismatch.wallet_token_amount,
+            )
+    if not report.ok:
+        first_mismatch = report.mismatches[0] if report.mismatches else None
+        adapter.trip_circuit_breaker(  # type: ignore[attr-defined]
+            error=",".join(report.diagnostics),
+            mint=first_mismatch.mint_address if first_mismatch is not None else None,
+            reason="position_reconciliation",
+        )
+
+    sol_balance = await adapter.get_sol_balance()  # type: ignore[attr-defined]
+    if sol_balance is None:
+        log.error("WALLET_BALANCE unavailable")
+        return
+    log.info("WALLET_BALANCE sol=%.4f", sol_balance)
+    if sol_balance < wallet_balance_floor_sol:
+        error = (
+            f"wallet SOL balance {sol_balance:.4f} below floor "
+            f"{wallet_balance_floor_sol:.4f}"
+        )
+        log.error("%s", error)
+        adapter.trip_circuit_breaker(  # type: ignore[attr-defined]
+            error=error,
+            reason="low_wallet_balance",
+        )
+
+
 async def _adapter_close(
     pos,
     close_price: float,
@@ -1520,6 +1636,40 @@ async def _adapter_close(
     # keeps the existing simulated record path unchanged. A failed live sell
     # normally returns None so the position stays open for retry.
     if adapter is not None and adapter.mode == "live":
+        try:
+            pre_balance = await adapter.get_token_balance(  # type: ignore[attr-defined]
+                pos.mint_address,
+            )
+        except Exception as balance_error:
+            log.warning(
+                "LIVE SELL PRE-CHECK mint=%s failed: %s; continuing sell",
+                pos.mint_address[:16],
+                balance_error,
+            )
+            pre_balance = None
+        if pre_balance is not None and pre_balance <= 0:
+            log.warning(
+                "LIVE SELL PRE-CHECK mint=%s balance=0 — already sold, abandoning",
+                pos.mint_address[:16],
+            )
+            abandoned_trade = Trade(
+                mint_address=pos.mint_address,
+                side=Side.SELL,
+                amount_sol=0,
+                token_amount=0,
+                price_sol=0,
+                slippage_bps=300,
+                mode=EXECUTION_MODE,
+                status="abandoned",
+                metadata={
+                    "close_reason": reason,
+                    "abandoned_no_wallet_balance": True,
+                    "wallet_token_balance": pre_balance,
+                    "pre_sell_balance_check": True,
+                },
+            )
+            await record_trade(db_path, abandoned_trade)
+            return abandoned_trade
         try:
             live_trade = await adapter.sell(
                 pos.mint_address,
@@ -2061,6 +2211,21 @@ async def priority_fee_loop(interval_s: float = 30.0) -> None:
         await _priority_fee_provider.refresh()
 
 
+async def live_safety_loop(
+    manager: PositionManager,
+    adapter: ExecutionAdapter,
+    wallet_balance_floor_sol: float,
+    interval_s: float = LIVE_SAFETY_CHECK_INTERVAL_S,
+) -> None:
+    """Periodically reconcile live wallet holdings and the SOL reserve."""
+    while True:
+        try:
+            await _run_live_safety_checks(manager, adapter, wallet_balance_floor_sol)
+        except Exception as exc:
+            log.error("LIVE SAFETY CHECK failed: %s", exc, exc_info=True)
+        await asyncio.sleep(interval_s)
+
+
 def _install_shutdown_handlers(stop_event: asyncio.Event) -> None:
     """Turn supervisor SIGTERM/SIGINT into orderly asyncio task cancellation."""
     loop = asyncio.get_running_loop()
@@ -2078,6 +2243,7 @@ async def _run_runtime_until_stopped(
     db_path: Path,
     gate_tuner: GateTuner,
     tracked_wallets: list,
+    wallet_balance_floor_sol: float,
 ) -> None:
     """Run Strategy B workers until NSSM or the operator requests shutdown."""
     stop_event = asyncio.Event()
@@ -2088,6 +2254,12 @@ async def _run_runtime_until_stopped(
         asyncio.create_task(snapshot_loop(manager, mark_provider, db_path)),
         asyncio.create_task(priority_fee_loop()),
     ]
+    if adapter.mode == "live":
+        tasks.append(
+            asyncio.create_task(
+                live_safety_loop(manager, adapter, wallet_balance_floor_sol),
+            ),
+        )
     try:
         await stop_event.wait()
         log.info("Strategy B shutdown signal received; cancelling worker tasks")
@@ -2186,7 +2358,13 @@ async def main() -> None:
             await scan_loop(mark_provider, adapter, manager, db_path, tracked_wallets=tracked_wallets, test_mode=True)
         else:
             await _run_runtime_until_stopped(
-                manager, mark_provider, adapter, db_path, gate_tuner, tracked_wallets,
+                manager,
+                mark_provider,
+                adapter,
+                db_path,
+                gate_tuner,
+                tracked_wallets,
+                settings.live_guardrails.min_wallet_balance_sol,
             )
     finally:
         await _drain_shadow_tasks()
