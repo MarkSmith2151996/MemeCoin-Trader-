@@ -20,6 +20,7 @@ reset it with ``scripts/reset_breaker.py`` after investigating.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from datetime import UTC, datetime, timedelta
 
@@ -34,6 +35,8 @@ log = logging.getLogger("live_execution")
 
 MAX_PRICE_IMPACT_PCT = 5.0
 WALLET_RESERVE_SOL = 0.01
+POST_SELL_BALANCE_ATTEMPTS = 3
+BALANCE_RECONCILIATION_RETRY_S = 10.0
 
 
 class LiveExecutionAdapter(ExecutionAdapter):
@@ -48,6 +51,7 @@ class LiveExecutionAdapter(ExecutionAdapter):
         wallet_reserve_sol: float = WALLET_RESERVE_SOL,
         reference_price_provider: PriceProvider | None = None,
         circuit_breaker: CircuitBreaker | None = None,
+        balance_reconciliation_retry_s: float = BALANCE_RECONCILIATION_RETRY_S,
     ) -> None:
         self._client = client if client is not None else JupiterSwapClient()
         self._banned_tokens = set(banned_tokens or ())
@@ -55,6 +59,7 @@ class LiveExecutionAdapter(ExecutionAdapter):
         self._wallet_reserve_sol = wallet_reserve_sol
         self._reference_price_provider = reference_price_provider
         self._circuit_breaker = circuit_breaker if circuit_breaker is not None else CircuitBreaker()
+        self._balance_reconciliation_retry_s = balance_reconciliation_retry_s
         self._closed = False
 
     @property
@@ -109,21 +114,28 @@ class LiveExecutionAdapter(ExecutionAdapter):
         )
 
     async def sell(self, mint_address: str, token_amount: float, slippage_bps: int = 100) -> Trade:
-        """Sell ``token_amount`` (in token units) of ``mint_address`` through Jupiter."""
+        """Sell the wallet's full balance of ``mint_address`` through Jupiter."""
         self._ensure_open()
         await self._check_token_allowed(mint_address)
+        if token_amount <= 0:
+            raise RuntimeError(f"live sell rejected non-positive token amount {token_amount}")
 
         decimals = await self._client.get_token_decimals(mint_address)
-        token_lamports = int(token_amount * 10**decimals)
-        if token_lamports <= 0:
-            raise RuntimeError(f"live sell rejected non-positive token amount {token_amount}")
+        wallet_balance = await self._wait_for_positive_token_balance(mint_address, decimals)
+        token_lamports = int(wallet_balance * 10**decimals)
+
+        if abs(wallet_balance - token_amount) > 1 / 10**decimals:
+            log.warning(
+                "LIVE SELL %s position_amount=%.8f wallet_amount=%.8f; selling wallet balance",
+                mint_address[:16], token_amount, wallet_balance,
+            )
 
         quote = await self._quote_or_raise(mint_address, SOL_MINT, token_lamports, slippage_bps)
         await self._check_price_impact(mint_address, quote)
 
         log.info(
             "LIVE SELL %s: %.8f tokens → %s SOL @ %.10f SOL impact=%.4f%%",
-            mint_address[:16], token_amount, quote.out_amount / LAMPORTS_PER_SOL,
+            mint_address[:16], wallet_balance, quote.out_amount / LAMPORTS_PER_SOL,
             quote.price_sol or 0.0, quote.price_impact_pct * 100,
         )
 
@@ -153,12 +165,14 @@ class LiveExecutionAdapter(ExecutionAdapter):
                 f"live sell failed ({result.confirmation_status}): {result.error or 'unknown'}",
             )
 
+        token_balance_after = await self._verify_token_balance_cleared(mint_address, decimals)
+
         sol_out = result.out_amount / LAMPORTS_PER_SOL
         return Trade(
             mint_address=mint_address,
             side=Side.SELL,
             amount_sol=sol_out,
-            token_amount=token_amount,
+            token_amount=wallet_balance,
             price_sol=result.price_sol or quote.price_sol,
             slippage_bps=slippage_bps,
             tx_signature=result.signature,
@@ -172,7 +186,8 @@ class LiveExecutionAdapter(ExecutionAdapter):
                 "fees_lamports": result.fees_lamports,
                 "confirmation_status": result.confirmation_status,
                 "slot": result.slot,
-                "token_balance_after": result.token_balance_after,
+                "sol_balance_after": result.token_balance_after,
+                "token_balance_after": token_balance_after,
             },
         )
 
@@ -304,6 +319,51 @@ class LiveExecutionAdapter(ExecutionAdapter):
         if quote.out_amount <= 0:
             raise RuntimeError(f"quote returned zero output for {output_mint[:16]}")
         return quote
+
+    async def _verify_token_balance_cleared(self, mint_address: str, decimals: int) -> float:
+        """Require a confirmed sell to leave no spendable balance for its mint."""
+        dust = 1 / 10**decimals
+        last_balance: float | None = None
+        for attempt in range(1, POST_SELL_BALANCE_ATTEMPTS + 1):
+            balance = await self._client.get_token_balance(mint_address)
+            last_balance = balance
+            if balance is not None and balance <= dust:
+                log.info(
+                    "LIVE SELL BALANCE %s cleared after attempt=%d balance=%.12f",
+                    mint_address[:16], attempt, balance,
+                )
+                return balance
+            if attempt < POST_SELL_BALANCE_ATTEMPTS:
+                log.warning(
+                    "LIVE SELL BALANCE %s still=%s after attempt=%d; retrying",
+                    mint_address[:16], balance, attempt,
+                )
+                await asyncio.sleep(self._balance_reconciliation_retry_s)
+        error = (
+            f"sell confirmed but token balance not cleared after "
+            f"{POST_SELL_BALANCE_ATTEMPTS} checks: {last_balance}"
+        )
+        self._circuit_breaker.trip(mint=mint_address, error=error, reason="sell_failure")
+        raise RuntimeError(error)
+
+    async def _wait_for_positive_token_balance(self, mint_address: str, decimals: int) -> float:
+        """Allow the RPC token-account indexer time to expose a fresh buy fill."""
+        dust = 1 / 10**decimals
+        last_balance: float | None = None
+        for attempt in range(1, POST_SELL_BALANCE_ATTEMPTS + 1):
+            balance = await self._client.get_token_balance(mint_address)
+            last_balance = balance
+            if balance is not None and balance > dust:
+                return balance
+            if attempt < POST_SELL_BALANCE_ATTEMPTS:
+                log.warning(
+                    "LIVE SELL BALANCE %s unavailable after attempt=%d; retrying",
+                    mint_address[:16], attempt,
+                )
+                await asyncio.sleep(self._balance_reconciliation_retry_s)
+        raise RuntimeError(
+            f"cannot verify a positive wallet token balance for {mint_address[:16]}: {last_balance}",
+        )
 
     async def _log_swap_result(self, side: str, mint_address: str, result) -> None:
         """Log the send result, confirmation, and fill vs paper reference price."""

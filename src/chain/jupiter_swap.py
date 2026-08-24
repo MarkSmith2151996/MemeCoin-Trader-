@@ -632,7 +632,9 @@ class JupiterSwapClient:
                 slot=None,
                 error=f"transaction failed: {entry.get('err')}",
             )
-        if entry.get("confirmationStatus") in ("confirmed", "finalized") or entry.get("slot"):
+        # A processed transaction also has a slot. Do not treat it as landed:
+        # only confirmed/finalized status is sufficient to close a live position.
+        if entry.get("confirmationStatus") in ("confirmed", "finalized"):
             return _Confirmation(status="confirmed", slot=entry.get("slot"), error=None)
         return None
 

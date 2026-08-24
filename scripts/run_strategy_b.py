@@ -90,6 +90,7 @@ import asyncio
 import json
 import logging
 import os
+import signal
 import statistics
 import sys
 import time
@@ -202,6 +203,7 @@ THICK_POOL_MIN_SOL = 20.0
 MID_POOL_MIN_SOL = 5.0
 
 PAPER_SIZE_SOL = 0.05
+SATURDAY_SIZE_MULTIPLIER = 0.5
 MIN_MENTIONS = 3
 MENTION_WINDOW_MINUTES = 5
 MAX_OPEN = 5
@@ -1295,6 +1297,8 @@ async def try_enter(
     )
 
     size_sol = PAPER_SIZE_SOL * size_multiplier
+    if utc_now.weekday() == 5:
+        size_sol *= SATURDAY_SIZE_MULTIPLIER
     timing["t_signed"] = time.monotonic()
     timing["t_sent"] = time.monotonic()
     try:
@@ -1504,6 +1508,12 @@ async def _adapter_close(
 ) -> Trade | None:
     import uuid
 
+    log.info(
+        "ADAPTER CLOSE mint=%s reason=%s adapter=%s mode=%s",
+        pos.mint_address[:16], reason,
+        type(adapter).__name__ if adapter is not None else "None",
+        adapter.mode if adapter is not None else "None",
+    )
     # MT-544: in live mode the close is a real Jupiter sell; paper/shadow mode
     # keeps the existing simulated record path unchanged. A failed live sell
     # returns None so the position stays open for retry.
@@ -1995,6 +2005,42 @@ async def priority_fee_loop(interval_s: float = 30.0) -> None:
         await _priority_fee_provider.refresh()
 
 
+def _install_shutdown_handlers(stop_event: asyncio.Event) -> None:
+    """Turn supervisor SIGTERM/SIGINT into orderly asyncio task cancellation."""
+    loop = asyncio.get_running_loop()
+    for shutdown_signal in (signal.SIGINT, signal.SIGTERM):
+        try:
+            loop.add_signal_handler(shutdown_signal, stop_event.set)
+        except NotImplementedError:
+            signal.signal(shutdown_signal, lambda _signum, _frame: stop_event.set())
+
+
+async def _run_runtime_until_stopped(
+    manager: PositionManager,
+    mark_provider: JupiterPriceProvider,
+    adapter: ExecutionAdapter,
+    db_path: Path,
+    gate_tuner: GateTuner,
+    tracked_wallets: list,
+) -> None:
+    """Run Strategy B workers until NSSM or the operator requests shutdown."""
+    stop_event = asyncio.Event()
+    _install_shutdown_handlers(stop_event)
+    tasks = [
+        asyncio.create_task(scan_loop(mark_provider, adapter, manager, db_path, tracked_wallets=tracked_wallets)),
+        asyncio.create_task(monitor_loop(manager, mark_provider, db_path, gate_tuner, adapter)),
+        asyncio.create_task(snapshot_loop(manager, mark_provider, db_path)),
+        asyncio.create_task(priority_fee_loop()),
+    ]
+    try:
+        await stop_event.wait()
+        log.info("Strategy B shutdown signal received; cancelling worker tasks")
+    finally:
+        for task in tasks:
+            task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
+
+
 async def record_manual_freeze(db_path: Path) -> None:
     """MT-537: persist the frozen gate thresholds as a manual_freeze row.
 
@@ -2079,21 +2125,18 @@ async def main() -> None:
         "Strategy B started: mode=%s API-aged candidates<=%.0fmin scan=%ds monitor=%ds.",
         mode_label, SOURCE_MAX_AGE_MINUTES, SCAN_INTERVAL, MONITOR_INTERVAL,
     )
-    if args.test:
-        await scan_loop(mark_provider, adapter, manager, db_path, tracked_wallets=tracked_wallets, test_mode=True)
+    try:
+        if args.test:
+            await scan_loop(mark_provider, adapter, manager, db_path, tracked_wallets=tracked_wallets, test_mode=True)
+        else:
+            await _run_runtime_until_stopped(
+                manager, mark_provider, adapter, db_path, gate_tuner, tracked_wallets,
+            )
+    finally:
         await _drain_shadow_tasks()
+        await adapter.close()
         await _shadow_client.close()
         await _priority_fee_provider.close()
-        return
-    await asyncio.gather(
-        scan_loop(mark_provider, adapter, manager, db_path, tracked_wallets=tracked_wallets),
-        monitor_loop(manager, mark_provider, db_path, gate_tuner, adapter),
-        snapshot_loop(manager, mark_provider, db_path),
-        priority_fee_loop(),
-    )
-    await _drain_shadow_tasks()
-    await _shadow_client.close()
-    await _priority_fee_provider.close()
 
 
 if __name__ == "__main__":

@@ -13,6 +13,7 @@ from src.chain.jupiter import SOL_MINT
 from src.chain.jupiter_swap import JupiterSwapQuote, JupiterSwapResult
 from src.core.models import Side
 from src.execution.live import LiveExecutionAdapter
+from src.execution.safety_controls import CircuitBreaker
 
 TOKEN_MINT = "tok12345678901234567890123456789012"
 
@@ -72,6 +73,8 @@ class FakeSwapClient:
                 attempts=1,
                 error="swap rejected by test",
             )
+        if quote.input_mint != SOL_MINT:
+            self.token_balance = 0.0
         return JupiterSwapResult(
             ok=True,
             signature="sig-abc",
@@ -103,7 +106,7 @@ def _adapter(**overrides) -> LiveExecutionAdapter:
 
 def test_buy_happy_path_records_fill() -> None:
     client = FakeSwapClient()
-    adapter = LiveExecutionAdapter(client=client)
+    adapter = LiveExecutionAdapter(client=client, balance_reconciliation_retry_s=0)
 
     trade = asyncio.run(adapter.buy(TOKEN_MINT, 0.05))
 
@@ -138,7 +141,7 @@ def test_buy_rejects_insufficient_sol() -> None:
 def test_buy_blocks_when_balance_unverifiable() -> None:
     client = FakeSwapClient()
     client.sol_balance = None
-    adapter = LiveExecutionAdapter(client=client)
+    adapter = LiveExecutionAdapter(client=client, balance_reconciliation_retry_s=0)
 
     with pytest.raises(RuntimeError, match="cannot verify"):
         asyncio.run(adapter.buy(TOKEN_MINT, 0.05))
@@ -195,7 +198,7 @@ def test_sell_happy_path_records_fill() -> None:
     trade = asyncio.run(adapter.sell(TOKEN_MINT, 100.0))
 
     assert trade.side == Side.SELL
-    assert trade.token_amount == 100.0
+    assert trade.token_amount == 1000.0
     assert trade.tx_signature == "sig-abc"
     assert trade.mode == "live"
     assert trade.status == "confirmed"
@@ -203,6 +206,40 @@ def test_sell_happy_path_records_fill() -> None:
     assert client.swap_calls[0].output_mint == SOL_MINT
     # 1M token lamports in -> 1M lamports out -> 0.001 SOL
     assert trade.amount_sol == pytest.approx(0.001)
+    assert trade.metadata["token_balance_after"] == 0.0
+
+
+def test_sell_retries_stale_balance_until_wallet_is_clear() -> None:
+    client = FakeSwapClient(token_balance=100.0)
+    balances = iter((100.0, 0.1, 0.0))
+
+    async def get_token_balance(mint: str) -> float:
+        return next(balances)
+
+    client.get_token_balance = get_token_balance
+    adapter = LiveExecutionAdapter(client=client, balance_reconciliation_retry_s=0)
+
+    trade = asyncio.run(adapter.sell(TOKEN_MINT, 100.0))
+
+    assert trade.metadata["token_balance_after"] == 0.0
+
+
+def test_sell_rejects_confirmed_swap_with_remaining_wallet_balance(tmp_path) -> None:
+    client = FakeSwapClient(token_balance=100.0)
+    balances = iter((100.0, 0.1, 0.1, 0.1))
+
+    async def get_token_balance(mint: str) -> float:
+        return next(balances)
+
+    client.get_token_balance = get_token_balance
+    adapter = LiveExecutionAdapter(
+        client=client,
+        circuit_breaker=CircuitBreaker(flag_path=tmp_path / "circuit_breaker.json"),
+        balance_reconciliation_retry_s=0,
+    )
+
+    with pytest.raises(RuntimeError, match="token balance not cleared"):
+        asyncio.run(adapter.sell(TOKEN_MINT, 100.0))
 
 
 def test_sell_rejects_non_positive_token_amount() -> None:

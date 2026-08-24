@@ -57,6 +57,13 @@ class FakeAdapter:
         )
 
 
+class FailingLiveAdapter:
+    mode = "live"
+
+    async def sell(self, mint: str, token_amount: float, slippage_bps: int = 300) -> Trade:
+        raise RuntimeError("confirmed sell left tokens in wallet")
+
+
 class FakeManager:
     def __init__(self, open_positions: list[Position] | None = None) -> None:
         self._open = list(open_positions or [])
@@ -271,6 +278,23 @@ def test_strategy_b_take_profit_matches_backtest_multiplier(db: Path) -> None:
     assert manager.closed_with == [("Mint1", trigger, trigger + 0.01)]
     assert sell_trades(db) == [(trigger, "take_profit")]
     assert danger is False
+
+
+def test_strategy_b_keeps_live_position_open_when_sell_verification_fails(db: Path) -> None:
+    manager = FakeManager([make_position(entry=1.0)])
+    strategy_b.peak_prices.clear()
+
+    asyncio.run(
+        strategy_b.monitor_positions(
+            manager,
+            FakePrice(strategy_b.TAKE_PROFIT_MULTIPLIER + 0.01),
+            db,
+            adapter=FailingLiveAdapter(),
+        ),
+    )
+
+    assert manager.closed_with == []
+    assert sell_trades(db) == []
 
 
 # ── 3. Time-of-day gates ─────────────────────────────────────────────

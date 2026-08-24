@@ -386,6 +386,29 @@ def test_execute_swap_failed_transaction_returns_error() -> None:
     assert "Slippage" in (result.error or "")
 
 
+def test_processed_signature_with_slot_is_not_confirmed() -> None:
+    keypair = _make_keypair()
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        payload = json.loads(request.content)
+        assert payload["method"] == "getSignatureStatuses"
+        return httpx.Response(
+            200,
+            json={
+                "jsonrpc": "2.0",
+                "id": 1,
+                "result": {
+                    "value": [{"slot": 42, "confirmations": 1, "err": None,
+                               "confirmationStatus": "processed"}],
+                },
+            },
+        )
+
+    client = _make_client(handler, keypair=keypair)
+
+    assert asyncio.run(client._signature_status("sig-processed")) is None
+
+
 def test_wallet_pubkey_from_keypair() -> None:
     keypair = _make_keypair()
     client = _make_client(lambda request: httpx.Response(500), keypair=keypair)

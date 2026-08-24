@@ -14,6 +14,7 @@ import uuid
 import pytest
 
 from src.chain.jupiter_swap import JupiterSwapQuote, JupiterSwapResult
+from src.chain.jupiter import SOL_MINT
 from src.core.config import load_settings
 from src.core.database import init_db
 from src.core.models import Position, PositionStatus, Side, Signal, SignalSource, SignalType, Trade
@@ -87,6 +88,8 @@ class FakeSwapClient:
                 attempts=3,
                 error="blockhash expired before confirmation",
             )
+        if quote.input_mint != SOL_MINT:
+            self.token_balance = 0.0
         return JupiterSwapResult(
             ok=True,
             signature="sig-abc",
