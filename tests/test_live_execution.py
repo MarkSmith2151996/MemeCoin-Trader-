@@ -242,6 +242,35 @@ def test_sell_rejects_confirmed_swap_with_remaining_wallet_balance(tmp_path) -> 
         asyncio.run(adapter.sell(TOKEN_MINT, 100.0))
 
 
+def test_sell_slippage_error_does_not_trip_breaker(tmp_path) -> None:
+    client = FakeSwapClient(swap_ok=False)
+    breaker = CircuitBreaker(flag_path=tmp_path / "circuit_breaker.json")
+    adapter = LiveExecutionAdapter(client=client, circuit_breaker=breaker)
+
+    async def slippage_failure(quote: JupiterSwapQuote) -> JupiterSwapResult:
+        return JupiterSwapResult(
+            ok=False,
+            signature=None,
+            input_mint=quote.input_mint,
+            output_mint=quote.output_mint,
+            in_amount=quote.in_amount,
+            out_amount=quote.out_amount,
+            price_sol=quote.price_sol,
+            fees_lamports=0,
+            confirmation_status="failed",
+            slot=None,
+            attempts=1,
+            error="custom program error: 0x1771",
+        )
+
+    client.execute_swap = slippage_failure
+
+    with pytest.raises(RuntimeError, match="0x1771"):
+        asyncio.run(adapter.sell(TOKEN_MINT, 100.0))
+
+    assert breaker.is_tripped() is False
+
+
 def test_sell_rejects_non_positive_token_amount() -> None:
     adapter = LiveExecutionAdapter(client=FakeSwapClient())
 

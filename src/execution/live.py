@@ -39,6 +39,12 @@ POST_SELL_BALANCE_ATTEMPTS = 3
 BALANCE_RECONCILIATION_RETRY_S = 10.0
 
 
+def is_jupiter_slippage_error(error: object) -> bool:
+    """Return whether a Jupiter/Anchor error reports exceeded slippage."""
+    message = str(error).lower()
+    return "6001" in message or "0x1771" in message
+
+
 class LiveExecutionAdapter(ExecutionAdapter):
     """Real-swap execution adapter using the Jupiter Swap API."""
 
@@ -142,27 +148,29 @@ class LiveExecutionAdapter(ExecutionAdapter):
         try:
             result = await self._client.execute_swap(quote)
         except Exception as exc:
-            # MT-546: a crashed swap execution also trips the breaker — the
-            # system cannot know whether the sell landed.
-            self._circuit_breaker.trip(
-                mint=mint_address,
-                error=f"sell crash: {exc}",
-                reason="sell_failure",
-            )
+            if not is_jupiter_slippage_error(exc):
+                # A crashed swap execution leaves the outcome unknown, so
+                # block new buys until an operator reviews the failure.
+                self._circuit_breaker.trip(
+                    mint=mint_address,
+                    error=f"sell crash: {exc}",
+                    reason="sell_failure",
+                )
             raise
         await self._log_swap_result("SELL", mint_address, result)
         if not result.ok:
-            # MT-546: a failed sell (swap error, expired after retries, or
-            # confirmation timeout) trips the circuit breaker — new buys are
-            # blocked until an operator resets the flag.
-            self._circuit_breaker.trip(
-                mint=mint_address,
-                signature_attempt=result.signature,
-                error=result.error or f"sell {result.confirmation_status}",
-                reason="sell_failure",
-            )
+            error = result.error or f"sell {result.confirmation_status}"
+            if not is_jupiter_slippage_error(error):
+                # A failed sell (RPC error, expiry, or confirmation timeout)
+                # blocks new buys until an operator resets the breaker.
+                self._circuit_breaker.trip(
+                    mint=mint_address,
+                    signature_attempt=result.signature,
+                    error=error,
+                    reason="sell_failure",
+                )
             raise RuntimeError(
-                f"live sell failed ({result.confirmation_status}): {result.error or 'unknown'}",
+                f"live sell failed ({result.confirmation_status}): {error}",
             )
 
         token_balance_after = await self._verify_token_balance_cleared(mint_address, decimals)

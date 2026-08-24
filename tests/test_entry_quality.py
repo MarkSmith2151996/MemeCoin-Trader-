@@ -72,6 +72,28 @@ class EmptyBalanceLiveAdapter(FailingLiveAdapter):
         return self.balance
 
 
+class SlippageThenSuccessLiveAdapter:
+    mode = "live"
+
+    def __init__(self) -> None:
+        self.slippages: list[int] = []
+
+    async def sell(self, mint: str, token_amount: float, slippage_bps: int = 300) -> Trade:
+        self.slippages.append(slippage_bps)
+        if slippage_bps == 300:
+            raise RuntimeError("Jupiter swap failed: custom program error: 0x1771")
+        return Trade(
+            mint_address=mint,
+            side=Side.SELL,
+            amount_sol=0.04,
+            token_amount=token_amount,
+            price_sol=0.00004,
+            slippage_bps=slippage_bps,
+            mode="live",
+            status="confirmed",
+        )
+
+
 class FakeManager:
     def __init__(self, open_positions: list[Position] | None = None) -> None:
         self._open = list(open_positions or [])
@@ -305,6 +327,20 @@ def test_strategy_b_keeps_live_position_open_when_sell_verification_fails(db: Pa
     assert sell_trades(db) == []
 
 
+def test_strategy_b_retries_slippage_sell_once_at_500_bps(db: Path) -> None:
+    adapter = SlippageThenSuccessLiveAdapter()
+
+    trade = asyncio.run(
+        strategy_b._adapter_close(
+            make_position(), 1.0, "hard_stop", db, adapter,
+        ),
+    )
+
+    assert trade is not None
+    assert adapter.slippages == [300, 500]
+    assert sell_trades(db) == [(0.00004, "hard_stop")]
+
+
 @pytest.mark.parametrize("wallet_balance", [0.0, None])
 def test_strategy_b_abandons_live_position_without_wallet_tokens(
     db: Path, wallet_balance: float | None,
@@ -529,7 +565,7 @@ def test_strategy_a_saturday_halves_position_size(
     assert adapter.sizes == [paper_loop.PAPER_SIZE_SOL * paper_loop.SATURDAY_SIZE_MULTIPLIER]
 
 
-def test_strategy_b_saturday_halves_position_size(
+def test_strategy_b_uses_flat_position_size_on_saturday(
     db: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     assert _FixedDatetime.now().weekday() == 5
@@ -543,7 +579,7 @@ def test_strategy_b_saturday_halves_position_size(
         ),
     )
     assert result == "pos-1"
-    assert adapter.sizes == [strategy_b.PAPER_SIZE_SOL * strategy_b.SATURDAY_SIZE_MULTIPLIER]
+    assert adapter.sizes == [strategy_b.PAPER_SIZE_SOL]
     # MT-588/MT-590: thick pool (>20 SOL) -> 1% (100 bps) tiered slippage.
     assert adapter.slippages == [strategy_b.SLIPPAGE_BPS_THICK_POOL]
 

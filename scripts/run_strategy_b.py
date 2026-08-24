@@ -122,6 +122,7 @@ from src.core.database import (
 )
 from src.core.models import PositionStatus, Side, Trade
 from src.execution.base import ExecutionAdapter
+from src.execution.live import is_jupiter_slippage_error
 from src.execution.paper import PaperExecutionAdapter
 from src.execution.price_provider import JupiterPriceProvider
 from src.monitoring.alerts import send_imessage
@@ -203,10 +204,9 @@ THICK_POOL_MIN_SOL = 20.0
 MID_POOL_MIN_SOL = 5.0
 
 PAPER_SIZE_SOL = 0.05
-SATURDAY_SIZE_MULTIPLIER = 0.5
 MIN_MENTIONS = 3
 MENTION_WINDOW_MINUTES = 5
-MAX_OPEN = 5
+MAX_OPEN = 3
 EXECUTION_MODE = "paper"  # set at startup from .env
 # MT-560: 60s was legacy from the Chrome/DexScreener era (8s browser-pc
 # capture per cycle). MT-588: with the Jupiter Developer tier (10 RPS) active
@@ -1297,8 +1297,6 @@ async def try_enter(
     )
 
     size_sol = PAPER_SIZE_SOL * size_multiplier
-    if utc_now.weekday() == 5:
-        size_sol *= SATURDAY_SIZE_MULTIPLIER
     timing["t_signed"] = time.monotonic()
     timing["t_sent"] = time.monotonic()
     try:
@@ -1529,6 +1527,26 @@ async def _adapter_close(
                 slippage_bps=300,
             )
         except Exception as exc:
+            if is_jupiter_slippage_error(exc):
+                log.warning(
+                    "LIVE SELL mint=%s reason=%s exceeded 300 bps slippage; retrying at 500 bps",
+                    pos.mint_address[:16], reason,
+                )
+                try:
+                    live_trade = await adapter.sell(
+                        pos.mint_address,
+                        pos.token_amount,
+                        slippage_bps=500,
+                    )
+                except Exception as retry_exc:
+                    exc = retry_exc
+                else:
+                    if live_trade.metadata is None:
+                        live_trade.metadata = {}
+                    live_trade.metadata["close_reason"] = reason
+                    await record_trade(db_path, live_trade)
+                    _fire_shadow_task(_shadow_sell_quote(pos, close_price, db_path))
+                    return live_trade
             log.error("LIVE SELL mint=%s reason=%s failed: %s", pos.mint_address[:16], reason, exc)
             get_token_balance = getattr(adapter, "get_token_balance", None)
             if get_token_balance is None:
