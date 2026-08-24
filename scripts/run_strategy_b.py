@@ -76,7 +76,7 @@ Run:
 """
 
 # ── Position sizing (MT-522/MT-524) ─────────────────────────────────
-# Entry size = PAPER_SIZE_SOL (0.05 SOL) * size_multiplier.
+# Entry size = PAPER_SIZE_SOL (0.01 SOL after the aborted MT-632 validation) * size_multiplier.
 # size_multiplier is always 1.0 in practice:
 #   - Whale conviction sizing: DISABLED since MT-524 — the get_whale_signal
 #     call block and load_tracked_wallets loading block are commented out,
@@ -204,10 +204,10 @@ SLIPPAGE_BPS_MID_POOL = 300
 THICK_POOL_MIN_SOL = 20.0
 MID_POOL_MIN_SOL = 5.0
 
-PAPER_SIZE_SOL = 0.05
+PAPER_SIZE_SOL = 0.01
 MIN_MENTIONS = 3
 MENTION_WINDOW_MINUTES = 5
-MAX_OPEN = 3
+MAX_OPEN = 1
 EXECUTION_MODE = "paper"  # set at startup from .env
 # MT-560: 60s was legacy from the Chrome/DexScreener era (8s browser-pc
 # capture per cycle). MT-588: with the Jupiter Developer tier (10 RPS) active
