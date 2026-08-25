@@ -60,6 +60,10 @@ _PRIORITY_LEVEL = "veryHigh"
 _PRIORITY_MAX_LAMPORTS = 1_000_000
 _MAX_TRANSACTION_SIZE_BYTES = 1_232
 _COMPACT_ROUTE_MAX_ACCOUNTS = 32
+TOKEN_PROGRAM_IDS = (
+    "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA",
+    "TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb",
+)
 
 # ── MT-636: Jito bundle routing ────────────────────────────────────────
 # Master switch for Jito bundle submission. The size threshold below keeps
@@ -114,12 +118,13 @@ class JupiterSwapResult:
 
 @dataclass(frozen=True, slots=True)
 class TokenAccountBalance:
-    """One standard SPL token account owned by the trading wallet."""
+    """One SPL or Token-2022 account owned by the trading wallet."""
 
     address: str
     mint: str
     raw_amount: int
     decimals: int
+    program_id: str
 
 
 class _TransactionTooLargeError(RuntimeError):
@@ -377,7 +382,13 @@ class JupiterSwapClient:
 
         signature = await self._send_transaction(signed_b64, quote)
         if signature is None:
-            return self._fail_result(quote, 1, "failed", "sendTransaction failed", diagnostics)
+            return await self._fail_result(
+                quote,
+                1,
+                "failed",
+                "sendTransaction failed",
+                diagnostics,
+            )
         diagnostics.append(f"signature={signature}")
 
         confirmation = await self._confirm_signature(signature, last_valid_block_height)
@@ -817,72 +828,76 @@ class JupiterSwapClient:
 
     async def get_wallet_holdings(self) -> dict[str, float] | None:
         """All positive SPL-token balances keyed by mint, or ``None`` on failure."""
-        payload = {
-            "jsonrpc": "2.0",
-            "id": 1,
-            "method": "getTokenAccountsByOwner",
-            "params": [
-                self.wallet_pubkey,
-                {"programId": "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"},
-                {"encoding": "jsonParsed"},
-            ],
-        }
-        try:
-            response = await self._rpc_post(payload)
-            response.raise_for_status()
-            accounts = response.json()["result"]["value"]
-        except (httpx.HTTPError, ValueError, KeyError, TypeError):
-            return None
-
         holdings: dict[str, float] = {}
-        for account in accounts:
+        for program_id in TOKEN_PROGRAM_IDS:
+            payload = {
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "getTokenAccountsByOwner",
+                "params": [
+                    self.wallet_pubkey,
+                    {"programId": program_id},
+                    {"encoding": "jsonParsed"},
+                ],
+            }
             try:
-                info = account["account"]["data"]["parsed"]["info"]
-                token_amount = info["tokenAmount"]
-                amount = int(token_amount["amount"]) / (10 ** int(token_amount["decimals"]))
-                mint = str(info["mint"])
-            except (KeyError, ValueError, TypeError):
-                continue
-            if amount > 0:
-                holdings[mint] = holdings.get(mint, 0.0) + amount
+                response = await self._rpc_post(payload)
+                response.raise_for_status()
+                accounts = response.json()["result"]["value"]
+            except (httpx.HTTPError, ValueError, KeyError, TypeError):
+                return None
+
+            for account in accounts:
+                try:
+                    info = account["account"]["data"]["parsed"]["info"]
+                    token_amount = info["tokenAmount"]
+                    amount = int(token_amount["amount"]) / (10 ** int(token_amount["decimals"]))
+                    mint = str(info["mint"])
+                except (KeyError, ValueError, TypeError):
+                    continue
+                if amount > 0:
+                    holdings[mint] = holdings.get(mint, 0.0) + amount
         return holdings
 
     async def get_token_accounts(self) -> list[TokenAccountBalance] | None:
-        """Return standard SPL accounts with raw balances for dust maintenance."""
-        payload = {
-            "jsonrpc": "2.0",
-            "id": 1,
-            "method": "getTokenAccountsByOwner",
-            "params": [
-                self.wallet_pubkey,
-                {"programId": "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"},
-                {"encoding": "jsonParsed"},
-            ],
-        }
-        try:
-            response = await self._rpc_post(payload)
-            accounts = response.json()["result"]["value"]
-        except (httpx.HTTPError, ValueError, KeyError, TypeError):
-            return None
-
+        """Return SPL and Token-2022 accounts with raw balances for maintenance."""
         balances: list[TokenAccountBalance] = []
-        for account in accounts:
+        for program_id in TOKEN_PROGRAM_IDS:
+            payload = {
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "getTokenAccountsByOwner",
+                "params": [
+                    self.wallet_pubkey,
+                    {"programId": program_id},
+                    {"encoding": "jsonParsed"},
+                ],
+            }
             try:
-                info = account["account"]["data"]["parsed"]["info"]
-                token_amount = info["tokenAmount"]
-                raw_amount = int(token_amount["amount"])
-                if raw_amount <= 0:
+                response = await self._rpc_post(payload)
+                response.raise_for_status()
+                accounts = response.json()["result"]["value"]
+            except (httpx.HTTPError, ValueError, KeyError, TypeError):
+                return None
+
+            for account in accounts:
+                try:
+                    info = account["account"]["data"]["parsed"]["info"]
+                    token_amount = info["tokenAmount"]
+                    raw_amount = int(token_amount["amount"])
+                    if raw_amount <= 0:
+                        continue
+                    balances.append(
+                        TokenAccountBalance(
+                            address=str(account["pubkey"]),
+                            mint=str(info["mint"]),
+                            raw_amount=raw_amount,
+                            decimals=int(token_amount["decimals"]),
+                            program_id=program_id,
+                        ),
+                    )
+                except (KeyError, ValueError, TypeError):
                     continue
-                balances.append(
-                    TokenAccountBalance(
-                        address=str(account["pubkey"]),
-                        mint=str(info["mint"]),
-                        raw_amount=raw_amount,
-                        decimals=int(token_amount["decimals"]),
-                    ),
-                )
-            except (KeyError, ValueError, TypeError):
-                continue
         return balances
 
     async def burn_token_account(self, account: TokenAccountBalance) -> str | None:
@@ -891,7 +906,6 @@ class JupiterSwapClient:
         This is intentionally limited to accounts returned by ``get_token_accounts``;
         callers should use it only after an explicit human-confirmed dust cleanup.
         """
-        from spl.token.constants import TOKEN_PROGRAM_ID
         from spl.token.instructions import burn
         from spl.token.models import BurnParams
 
@@ -906,7 +920,7 @@ class JupiterSwapClient:
             blockhash = Hash.from_string(response.json()["result"]["value"]["blockhash"])
             instruction = burn(
                 BurnParams(
-                    program_id=TOKEN_PROGRAM_ID,
+                    program_id=Pubkey.from_string(account.program_id),
                     mint=Pubkey.from_string(account.mint),
                     account=Pubkey.from_string(account.address),
                     owner=self._keypair.pubkey(),

@@ -326,6 +326,8 @@ class KillSwitch:
             )
         if self._adapter is None:
             raise RuntimeError("kill switch requires an execution adapter")
+        if getattr(self._adapter, "mode", None) != "live":
+            raise RuntimeError("kill switch requires a live execution adapter")
 
         set_execution_mode(self._env_path, "paper")
         self._breaker.trip(

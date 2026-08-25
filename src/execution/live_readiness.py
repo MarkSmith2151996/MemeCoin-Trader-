@@ -69,6 +69,7 @@ async def evaluate_micro_live_readiness(
     wallet_holdings_lookup: SupportsWalletHoldingsLookup | None = None,
     circuit_breaker: LiveCircuitBreaker | None = None,
     health_status: HealthStatus | None = None,
+    allow_exit_while_breaker_tripped: bool = False,
 ) -> MicroLiveReadinessReport:
     trade_size = requested_trade_sol if requested_trade_sol is not None else settings.live_guardrails.max_trade_sol
     checks: list[ReadinessCheck] = []
@@ -114,7 +115,9 @@ async def evaluate_micro_live_readiness(
         recon_env = ()
     checks.append(ReadinessCheck("position_reconciliation", reconciliation.ok, reconciliation.diagnostics, recommended_env=recon_env))
 
-    if circuit_breaker is None:
+    if allow_exit_while_breaker_tripped:
+        checks.append(ReadinessCheck("circuit_breaker", True, ("live_exit_not_blocked",)))
+    elif circuit_breaker is None:
         checks.append(ReadinessCheck("circuit_breaker", False, ("circuit_breaker_unavailable",)))
     else:
         breaker_decision = circuit_breaker.status(execution_mode=settings.execution.mode, observed_at=datetime.now(UTC))

@@ -34,6 +34,13 @@ class _FakeJupiter:
             price_sol=amount,
         )
 
+    async def verify_token_balance_cleared(self, mint: str) -> float:
+        self.calls.append("verify_clear")
+        return 0.0
+
+    def trip_circuit_breaker(self, **kwargs) -> None:
+        self.calls.append("trip")
+
     async def close(self) -> None:
         self.calls.append("close")
 
@@ -106,5 +113,22 @@ def test_sell_rechecks_curve_and_falls_back_when_graduated() -> None:
 
         assert jupiter.calls == ["sell"]
         assert trade.metadata["execution_path"] == "jupiter"
+
+    asyncio.run(run())
+
+
+def test_direct_sell_verifies_wallet_balance_cleared() -> None:
+    async def run() -> None:
+        jupiter = _FakeJupiter()
+        direct = _FakeDirect(active=True)
+        router = PumpFunExecutionRouter(jupiter, direct)  # type: ignore[arg-type]
+
+        trade = await router.sell("mint", 42, 300)
+
+        assert direct.calls == ["check", "SELL"]
+        assert jupiter.calls == ["verify_clear"]
+        assert trade.mode == "live"
+        assert trade.metadata["execution_path"] == "direct"
+        assert trade.metadata["token_balance_after"] == 0.0
 
     asyncio.run(run())

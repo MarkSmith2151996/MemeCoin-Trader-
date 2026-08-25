@@ -41,6 +41,8 @@ async def execute_guarded_live_buy(
     circuit_breaker: LiveCircuitBreaker | None,
     env: dict[str, str] | None = None,
 ) -> LiveBuyResult:
+    if adapter.mode != "live":
+        return LiveBuyResult(ok=False, diagnostics=("live_buy_adapter_mode_invalid",))
     if buy_transaction_builder is None:
         return LiveBuyResult(ok=False, diagnostics=("buy_transaction_builder_unavailable",))
 

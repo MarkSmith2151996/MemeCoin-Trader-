@@ -278,11 +278,12 @@ def test_sell_rejects_non_positive_token_amount() -> None:
         asyncio.run(adapter.sell(TOKEN_MINT, 0.0))
 
 
-def test_sell_rejects_banned_token() -> None:
+def test_sell_allows_banned_token_so_exit_cannot_be_stranded() -> None:
     adapter = LiveExecutionAdapter(client=FakeSwapClient(), banned_tokens={TOKEN_MINT})
 
-    with pytest.raises(RuntimeError, match="banned"):
-        asyncio.run(adapter.sell(TOKEN_MINT, 100.0))
+    trade = asyncio.run(adapter.sell(TOKEN_MINT, 100.0))
+
+    assert trade.side == Side.SELL
 
 
 def test_execute_swap_dispatches_buy_and_sell() -> None:

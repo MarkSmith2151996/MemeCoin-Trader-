@@ -38,6 +38,7 @@ from src.chain.pumpfun import (
 from src.chain.pumpfun_tx import build_buy_instructions, build_sell_instruction
 from src.core.models import Side, SwapQuote, Trade
 from src.execution.base import ExecutionAdapter
+from src.execution.redaction import sanitize_provider_error
 
 load_dotenv()
 
@@ -92,13 +93,22 @@ class DirectExecutor(ExecutionAdapter):
     def wallet_pubkey(self) -> Pubkey:
         return self._keypair.pubkey()
 
-    async def buy(self, mint_address: str, amount_sol: float) -> TradeResult:
+    async def buy(
+        self,
+        mint_address: str,
+        amount_sol: float,
+        slippage_bps: int | None = None,
+    ) -> TradeResult:
         """Buy a token directly from an incomplete SOL-paired Pump curve."""
 
         self._ensure_open()
+        resolved_slippage_bps = self._resolve_slippage_bps(slippage_bps)
         amount_lamports = _sol_to_lamports(amount_sol)
         mint = Pubkey.from_string(mint_address)
-        account = await fetch_bonding_curve_state(self._rpc_url, mint, http_client=self._client)
+        try:
+            account = await fetch_bonding_curve_state(self._rpc_url, mint, http_client=self._client)
+        except httpx.HTTPError as exc:
+            raise RuntimeError(sanitize_provider_error(exc)) from None
         self._ensure_tradeable_curve(account.state.complete, account.state.is_sol_paired)
 
         expected_tokens = calculate_buy_amount(
@@ -106,8 +116,8 @@ class DirectExecutor(ExecutionAdapter):
             account.state.virtual_sol_reserves,
             account.state.virtual_token_reserves,
         )
-        token_amount = minimum_output(expected_tokens, self._slippage_bps)
-        max_sol_cost = maximum_input(amount_lamports, self._slippage_bps)
+        token_amount = minimum_output(expected_tokens, resolved_slippage_bps)
+        max_sol_cost = maximum_input(amount_lamports, resolved_slippage_bps)
         pre_token_balance = await self._token_balance_raw(mint_address)
         instructions = build_buy_instructions(
             mint=mint,
@@ -136,7 +146,7 @@ class DirectExecutor(ExecutionAdapter):
             amount_sol=amount_sol,
             token_amount=token_units,
             price_sol=price_sol,
-            slippage_bps=self._slippage_bps,
+            slippage_bps=resolved_slippage_bps,
             tx_signature=signature,
             mode=self.mode,
             status=status,
@@ -153,23 +163,33 @@ class DirectExecutor(ExecutionAdapter):
             },
         )
 
-    async def sell(self, mint_address: str, token_amount: float) -> TradeResult:
+    async def sell(
+        self,
+        mint_address: str,
+        token_amount: float,
+        slippage_bps: int | None = None,
+    ) -> TradeResult:
         """Sell tokens directly into an incomplete SOL-paired Pump curve."""
 
         self._ensure_open()
+        resolved_slippage_bps = self._resolve_slippage_bps(slippage_bps)
         mint = Pubkey.from_string(mint_address)
-        account = await fetch_bonding_curve_state(self._rpc_url, mint, http_client=self._client)
+        try:
+            account = await fetch_bonding_curve_state(self._rpc_url, mint, http_client=self._client)
+        except httpx.HTTPError as exc:
+            raise RuntimeError(sanitize_provider_error(exc)) from None
         self._ensure_tradeable_curve(account.state.complete, account.state.is_sol_paired)
         raw_tokens = int(token_amount * 10**account.token_decimals)
         if raw_tokens <= 0:
             raise ValueError("token_amount must produce at least one base unit")
 
+        pre_sol_balance = await self._sol_balance_raw()
         expected_sol = calculate_sell_amount(
             raw_tokens,
             account.state.virtual_sol_reserves,
             account.state.virtual_token_reserves,
         )
-        min_sol_output = minimum_output(expected_sol, self._slippage_bps)
+        min_sol_output = minimum_output(expected_sol, resolved_slippage_bps)
         instruction = build_sell_instruction(
             mint=mint,
             token_program=account.token_program,
@@ -183,7 +203,12 @@ class DirectExecutor(ExecutionAdapter):
         )
         fill = await self._get_transaction_fill(signature, mint_address)
         actual_sol = fill.sol_delta if fill and fill.sol_delta > 0 else None
-        sol_lamports = actual_sol or expected_sol
+        if actual_sol is None and pre_sol_balance is not None:
+            post_sol_balance = await self._sol_balance_raw()
+            if post_sol_balance is not None and post_sol_balance > pre_sol_balance:
+                actual_sol = post_sol_balance - pre_sol_balance
+        fill_reconciled = actual_sol is not None
+        sol_lamports = actual_sol or 0
         sol_amount = sol_lamports / LAMPORTS_PER_SOL
         return Trade(
             mint_address=mint_address,
@@ -191,15 +216,16 @@ class DirectExecutor(ExecutionAdapter):
             amount_sol=sol_amount,
             token_amount=token_amount,
             price_sol=sol_amount / token_amount if token_amount else None,
-            slippage_bps=self._slippage_bps,
+            slippage_bps=resolved_slippage_bps,
             tx_signature=signature,
             mode=self.mode,
-            status=status,
+            status=status if fill_reconciled else "confirmed_unpriced",
             metadata={
                 "provider": "pumpfun_direct_v2",
                 "expected_sol_lamports": expected_sol,
                 "minimum_sol_output_lamports": min_sol_output,
                 "actual_sol_lamports": actual_sol,
+                "fill_reconciled": fill_reconciled,
                 "jito": used_jito,
                 "jito_tip_lamports": self._jito_tip_lamports if used_jito else 0,
                 "transaction_size_bytes": transaction_size,
@@ -216,14 +242,9 @@ class DirectExecutor(ExecutionAdapter):
     ) -> Trade:
         """Fulfil the common adapter contract; sells interpret ``amount_sol`` as tokens."""
 
-        previous_slippage = self._slippage_bps
-        self._slippage_bps = slippage_bps
-        try:
-            if side == Side.BUY:
-                return await self.buy(mint_address, amount_sol)
-            return await self.sell(mint_address, amount_sol)
-        finally:
-            self._slippage_bps = previous_slippage
+        if side == Side.BUY:
+            return await self.buy(mint_address, amount_sol, slippage_bps)
+        return await self.sell(mint_address, amount_sol, slippage_bps)
 
     async def get_quote(
         self,
@@ -346,8 +367,11 @@ class DirectExecutor(ExecutionAdapter):
 
     async def _latest_blockhash(self) -> Hash:
         payload = {"jsonrpc": "2.0", "id": 1, "method": "getLatestBlockhash", "params": []}
-        response = await self._client.post(self._rpc_url, json=payload)
-        response.raise_for_status()
+        try:
+            response = await self._client.post(self._rpc_url, json=payload)
+            response.raise_for_status()
+        except httpx.HTTPError as exc:
+            raise RuntimeError(sanitize_provider_error(exc)) from None
         try:
             return Hash.from_string(response.json()["result"]["value"]["blockhash"])
         except (KeyError, TypeError, ValueError) as exc:
@@ -363,8 +387,11 @@ class DirectExecutor(ExecutionAdapter):
                 {"encoding": "base64", "skipPreflight": False, "preflightCommitment": "confirmed"},
             ],
         }
-        response = await self._client.post(self._rpc_url, json=payload)
-        response.raise_for_status()
+        try:
+            response = await self._client.post(self._rpc_url, json=payload)
+            response.raise_for_status()
+        except httpx.HTTPError as exc:
+            raise RuntimeError(sanitize_provider_error(exc)) from None
         result = response.json().get("result")
         if not isinstance(result, str):
             raise RuntimeError("RPC sendTransaction returned no signature")
@@ -379,8 +406,11 @@ class DirectExecutor(ExecutionAdapter):
                 "method": "getSignatureStatuses",
                 "params": [[signature], {"searchTransactionHistory": True}],
             }
-            response = await self._client.post(self._rpc_url, json=payload)
-            response.raise_for_status()
+            try:
+                response = await self._client.post(self._rpc_url, json=payload)
+                response.raise_for_status()
+            except httpx.HTTPError as exc:
+                raise RuntimeError(sanitize_provider_error(exc)) from None
             values = response.json().get("result", {}).get("value", [])
             status = values[0] if values else None
             if status is not None:
@@ -406,6 +436,20 @@ class DirectExecutor(ExecutionAdapter):
                 int(item["account"]["data"]["parsed"]["info"]["tokenAmount"]["amount"])
                 for item in accounts
             )
+        except (httpx.HTTPError, KeyError, TypeError, ValueError):
+            return None
+
+    async def _sol_balance_raw(self) -> int | None:
+        payload = {
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "getBalance",
+            "params": [str(self.wallet_pubkey)],
+        }
+        try:
+            response = await self._client.post(self._rpc_url, json=payload)
+            response.raise_for_status()
+            return int(response.json()["result"]["value"])
         except (httpx.HTTPError, KeyError, TypeError, ValueError):
             return None
 
@@ -447,6 +491,12 @@ class DirectExecutor(ExecutionAdapter):
             raise CurveCompleteError("Pump bonding curve is complete; route via PumpSwap/Jupiter")
         if not is_sol_paired:
             raise ValueError("direct executor currently supports SOL-paired Pump curves only")
+
+    def _resolve_slippage_bps(self, slippage_bps: int | None) -> int:
+        resolved = self._slippage_bps if slippage_bps is None else slippage_bps
+        if not 0 <= resolved < 10_000:
+            raise ValueError("slippage_bps must be between 0 and 9999")
+        return resolved
 
     def _ensure_open(self) -> None:
         if self._closed:

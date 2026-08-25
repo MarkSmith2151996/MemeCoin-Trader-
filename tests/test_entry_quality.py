@@ -39,6 +39,8 @@ class FakePrice:
 
 
 class FakeAdapter:
+    mode = "paper"
+
     def __init__(self) -> None:
         self.sizes: list[float] = []
         self.slippages: list[int] = []
@@ -453,7 +455,10 @@ def test_strategy_b_take_profit_matches_backtest_multiplier(db: Path) -> None:
     assert danger is False
 
 
-def test_strategy_b_keeps_live_position_open_when_sell_verification_fails(db: Path) -> None:
+def test_strategy_b_keeps_live_position_open_when_sell_verification_fails(
+    db: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(strategy_b, "EXECUTION_MODE", "live")
     manager = FakeManager([make_position(entry=1.0)])
     strategy_b.peak_prices.clear()
 
@@ -470,7 +475,10 @@ def test_strategy_b_keeps_live_position_open_when_sell_verification_fails(db: Pa
     assert sell_trades(db) == []
 
 
-def test_strategy_b_retries_slippage_sell_once_at_500_bps(db: Path) -> None:
+def test_strategy_b_retries_slippage_sell_once_at_500_bps(
+    db: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(strategy_b, "EXECUTION_MODE", "live")
     adapter = SlippageThenSuccessLiveAdapter()
 
     trade = asyncio.run(
@@ -484,10 +492,10 @@ def test_strategy_b_retries_slippage_sell_once_at_500_bps(db: Path) -> None:
     assert sell_trades(db) == [(0.00004, "hard_stop")]
 
 
-@pytest.mark.parametrize("wallet_balance", [0.0, None])
 def test_strategy_b_abandons_live_position_without_wallet_tokens(
-    db: Path, wallet_balance: float | None,
+    db: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    monkeypatch.setattr(strategy_b, "EXECUTION_MODE", "live")
     manager = FakeManager([make_position(entry=1.0)])
     strategy_b.peak_prices.clear()
 
@@ -496,7 +504,7 @@ def test_strategy_b_abandons_live_position_without_wallet_tokens(
             manager,
             FakePrice(strategy_b.TAKE_PROFIT_MULTIPLIER + 0.01),
             db,
-            adapter=EmptyBalanceLiveAdapter(wallet_balance),
+            adapter=EmptyBalanceLiveAdapter(0.0),
         ),
     )
 
@@ -508,7 +516,29 @@ def test_strategy_b_abandons_live_position_without_wallet_tokens(
     assert row == (0.0, 0.0, "abandoned")
 
 
-def test_strategy_b_precheck_skips_sell_when_wallet_tokens_are_gone(db: Path) -> None:
+def test_strategy_b_unknown_wallet_balance_never_closes_live_position(
+    db: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(strategy_b, "EXECUTION_MODE", "live")
+    manager = FakeManager([make_position(entry=1.0)])
+
+    asyncio.run(
+        strategy_b.monitor_positions(
+            manager,
+            FakePrice(strategy_b.TAKE_PROFIT_MULTIPLIER + 0.01),
+            db,
+            adapter=EmptyBalanceLiveAdapter(None),
+        ),
+    )
+
+    assert manager.closed_with == []
+    assert sell_trades(db) == []
+
+
+def test_strategy_b_precheck_skips_sell_when_wallet_tokens_are_gone(
+    db: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(strategy_b, "EXECUTION_MODE", "live")
     adapter = PreSoldLiveAdapter()
 
     trade = asyncio.run(
@@ -526,6 +556,7 @@ def test_strategy_b_live_record_failure_sells_back_and_trips_breaker(
 ) -> None:
     monkeypatch.setattr(strategy_b, "BLOCKED_UTC_HOURS", frozenset())
     monkeypatch.setattr(strategy_b, "BLOCKED_WEEKDAYS", frozenset())
+    monkeypatch.setattr(strategy_b, "EXECUTION_MODE", "live")
 
     async def fail_record(*args, **kwargs) -> None:
         raise RuntimeError("database unavailable")
@@ -551,6 +582,7 @@ def test_strategy_b_live_open_failure_attempts_sell_back_even_when_it_fails(
 ) -> None:
     monkeypatch.setattr(strategy_b, "BLOCKED_UTC_HOURS", frozenset())
     monkeypatch.setattr(strategy_b, "BLOCKED_WEEKDAYS", frozenset())
+    monkeypatch.setattr(strategy_b, "EXECUTION_MODE", "live")
     manager = FakeManager()
 
     async def fail_open(trade: Trade, signal) -> Position:
@@ -644,6 +676,105 @@ def test_strategy_b_monitor_uses_cached_price_without_provider_lookup(db: Path) 
     assert danger is True
 
 
+def test_strategy_b_live_monitor_rejects_missing_adapter(
+    db: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(strategy_b, "EXECUTION_MODE", "live")
+
+    with pytest.raises(RuntimeError, match="non-null live adapter"):
+        asyncio.run(strategy_b.monitor_positions(FakeManager(), FakePrice(1.0), db))
+
+
+def test_strategy_b_live_close_persists_actual_fill_and_sells_wallet_balance(
+    db: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(strategy_b, "EXECUTION_MODE", "live")
+
+    class FilledLiveAdapter:
+        mode = "live"
+
+        def __init__(self) -> None:
+            self.sell_amounts: list[float] = []
+
+        async def get_token_balance(self, mint: str) -> float:
+            return 1_250.0
+
+        async def sell(self, mint: str, token_amount: float, slippage_bps: int = 300) -> Trade:
+            self.sell_amounts.append(token_amount)
+            return Trade(
+                mint_address=mint,
+                side=Side.SELL,
+                amount_sol=0.04,
+                token_amount=token_amount,
+                price_sol=0.00004,
+                slippage_bps=slippage_bps,
+                mode="live",
+                status="confirmed",
+            )
+
+    adapter = FilledLiveAdapter()
+    manager = FakeManager([make_position(entry=0.00005)])
+    strategy_b.peak_prices.clear()
+
+    asyncio.run(
+        strategy_b.monitor_positions(
+            manager,
+            FakePrice(0.00001),
+            db,
+            adapter=adapter,
+        ),
+    )
+
+    assert adapter.sell_amounts == [1_250.0]
+    assert manager.closed_with == [("Mint1", 0.00004, 0.00005)]
+    with sqlite3.connect(db) as db_conn:
+        price, metadata_json = db_conn.execute(
+            "SELECT price_sol, metadata_json FROM trades WHERE side = 'SELL'",
+        ).fetchone()
+    assert price == pytest.approx(0.00004)
+    assert json.loads(metadata_json)["metadata"]["trigger_price_sol"] == pytest.approx(0.000046)
+
+
+def test_strategy_b_confirmed_unpriced_live_sell_closes_once_at_zero(
+    db: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(strategy_b, "EXECUTION_MODE", "live")
+
+    class ConfirmedUnpricedAdapter:
+        mode = "live"
+
+        def __init__(self) -> None:
+            self.sell_calls = 0
+
+        async def get_token_balance(self, mint: str) -> float:
+            return 1_000.0
+
+        async def sell(self, mint: str, token_amount: float, slippage_bps: int = 300) -> Trade:
+            self.sell_calls += 1
+            return Trade(
+                mint_address=mint,
+                side=Side.SELL,
+                amount_sol=0,
+                token_amount=token_amount,
+                price_sol=0,
+                slippage_bps=slippage_bps,
+                tx_signature="confirmed-unpriced-signature",
+                mode="live",
+                status="confirmed_unpriced",
+                metadata={"token_balance_after": 0.0, "fill_reconciled": False},
+            )
+
+    adapter = ConfirmedUnpricedAdapter()
+    manager = FakeManager([make_position(entry=1.0)])
+    strategy_b.peak_prices.clear()
+
+    asyncio.run(strategy_b.monitor_positions(manager, FakePrice(0.5), db, adapter=adapter))
+
+    assert adapter.sell_calls == 1
+    assert manager.closed_with == [("Mint1", 0.0, 1.0)]
+    assert sell_trades(db) == [(0.0, "hard_stop")]
+
+
 # ── 5. Loss-ban expiry ───────────────────────────────────────────────
 
 def test_has_losing_close_helpers(db: Path) -> None:
@@ -693,7 +824,10 @@ def test_has_recent_losing_close_honors_custom_cooldown(db: Path) -> None:
     assert asyncio.run(has_recent_losing_close(db, "TwoHourOld", cooldown_minutes=180)) is True
 
 
-def test_strategy_a_repeat_loser_fresh_loss_blocked(db: Path) -> None:
+def test_strategy_a_repeat_loser_fresh_loss_blocked(
+    db: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(paper_loop, "BLOCKED_UTC_HOURS", frozenset())
     seed_closed_position(db, "Loser", pnl=-0.002, closed_at=datetime.now(UTC).isoformat())
     manager = FakeManager()
     ok = asyncio.run(
@@ -736,6 +870,7 @@ def test_strategy_b_repeat_loser_blocked_within_ttl(
     # MT-593: Wednesday is blocked again — freeze the weekday gate open so the
     # repeat_loser gate (the gate under test) is the one that rejects.
     monkeypatch.setattr(strategy_b, "BLOCKED_WEEKDAYS", frozenset())
+    monkeypatch.setattr(strategy_b, "BLOCKED_UTC_HOURS", frozenset())
     seed_closed_position(db, "Loser", pnl=-0.002, closed_at=datetime.now(UTC).isoformat())
     manager = FakeManager()
     result = asyncio.run(

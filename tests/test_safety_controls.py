@@ -139,6 +139,10 @@ class FakeSellAdapter:
         )
 
 
+class FakePaperSellAdapter(FakeSellAdapter):
+    mode = "paper"
+
+
 def _live_trade(mint: str, token_amount: float = 1000.0) -> Trade:
     return Trade(
         mint_address=mint,
@@ -360,6 +364,17 @@ def test_kill_switch_refuses_when_not_live(tmp_path) -> None:
 
     with pytest.raises(KillSwitchNotArmedError, match="live-mode only"):
         asyncio.run(kill_switch.run())
+
+
+def test_kill_switch_refuses_paper_adapter_even_when_env_is_live(tmp_path) -> None:
+    env = tmp_path / ".env"
+    env.write_text("EXECUTION_MODE=live\n")
+    kill_switch = KillSwitch(env_path=env, adapter=FakePaperSellAdapter())
+
+    with pytest.raises(RuntimeError, match="live execution adapter"):
+        asyncio.run(kill_switch.run())
+
+    assert read_execution_mode(env) == "live"
 
 
 def test_kill_switch_sets_paper_and_liquidates(tmp_path) -> None:

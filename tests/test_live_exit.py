@@ -189,10 +189,30 @@ def test_live_exit_cannot_open_new_position(tmp_path: Path) -> None:
     asyncio.run(run())
 
 
-def test_live_exit_failures_in_readiness_block_exit(tmp_path: Path) -> None:
+def test_live_exit_is_not_blocked_by_tripped_breaker(tmp_path: Path) -> None:
     async def run() -> None:
         settings = _live_settings()
         manager = await _seed_position_manager(tmp_path / "blocked.db")
+        await manager.open_position(
+            Trade(
+                mint_address="exit-mint",
+                side="BUY",
+                amount_sol=0.01,
+                token_amount=10.0,
+                price_sol=0.001,
+                mode="live",
+            ),
+            None,
+        )
+        holdings_calls = 0
+
+        async def wallet_holdings():
+            nonlocal holdings_calls
+            holdings_calls += 1
+            if holdings_calls == 1:
+                return await _wallet_holdings_for(manager, "exit-mint", mode="live")
+            return {}
+
         breaker = LiveCircuitBreaker(rpc_failure_threshold=1)
         breaker.record_health_check(True)
         breaker.record_rpc_failure()
@@ -212,15 +232,16 @@ def test_live_exit_failures_in_readiness_block_exit(tmp_path: Path) -> None:
             position_manager=manager,
             adapter=adapter,
             exit_transaction_builder=lambda _mint, _amount: _async_return("tx"),
-            wallet_holdings_lookup=lambda: _wallet_holdings_for(manager, "exit-mint"),
+            wallet_holdings_lookup=wallet_holdings,
             wallet_balance_lookup=lambda: _async_return(1.0),
             transaction_simulator=lambda _tx: _async_return(TransactionSimulationResult(ok=True)),
             circuit_breaker=breaker,
             env=_armed_env(settings),
         )
 
-        assert result.ok is False
-        assert result.diagnostics == ("readiness:circuit_breaker",)
+        assert result.ok is True
+        assert result.diagnostics == ("live_exit_wallet_confirmed",)
+        assert await manager.get_position("exit-mint", mode="live") is None
 
     asyncio.run(run())
 
@@ -241,6 +262,15 @@ def test_fully_fake_ready_live_exit_can_close_existing_position(tmp_path: Path) 
             None,
         )
         submitter = RecordingRpcSubmitter()
+        holdings_calls = 0
+
+        async def wallet_holdings():
+            nonlocal holdings_calls
+            holdings_calls += 1
+            if holdings_calls == 1:
+                return await _wallet_holdings_for(manager, "exit-mint", mode="live")
+            return {}
+
         breaker = LiveCircuitBreaker()
         breaker.record_health_check(True)
         adapter = JupiterLiveExecutionAdapter(
@@ -259,7 +289,7 @@ def test_fully_fake_ready_live_exit_can_close_existing_position(tmp_path: Path) 
             position_manager=manager,
             adapter=adapter,
             exit_transaction_builder=lambda mint, amount: _async_return(f"sell:{mint}:{amount}"),
-            wallet_holdings_lookup=lambda: _wallet_holdings_for(manager, "exit-mint", mode="live"),
+            wallet_holdings_lookup=wallet_holdings,
             wallet_balance_lookup=lambda: _async_return(1.0),
             transaction_simulator=lambda _tx: _async_return(TransactionSimulationResult(ok=True)),
             circuit_breaker=breaker,
@@ -267,11 +297,60 @@ def test_fully_fake_ready_live_exit_can_close_existing_position(tmp_path: Path) 
         )
 
         assert result.ok is True
-        assert result.diagnostics == ("live_exit_submitted",)
+        assert result.diagnostics == ("live_exit_wallet_confirmed",)
         assert result.provider == "rpc"
         assert submitter.calls and str(submitter.calls[0]).startswith("sell:exit-mint:")
         assert await manager.get_position("exit-mint", mode="live") is None
         assert await manager.get_position("exit-mint", mode="paper") is not None
+
+    asyncio.run(run())
+
+
+def test_live_exit_keeps_db_open_until_wallet_balance_clears(tmp_path: Path) -> None:
+    async def run() -> None:
+        settings = _live_settings()
+        db_path = tmp_path / "wallet-still-held.db"
+        await init_db(db_path)
+        manager = PositionManager(db_path, load_settings())
+        await manager.open_position(
+            Trade(
+                mint_address="exit-mint",
+                side="BUY",
+                amount_sol=0.01,
+                token_amount=10.0,
+                price_sol=0.001,
+                mode="live",
+            ),
+            None,
+        )
+        breaker = LiveCircuitBreaker()
+        breaker.record_health_check(True)
+        adapter = JupiterLiveExecutionAdapter(
+            rpc_submitter=RecordingRpcSubmitter(),
+            settings=settings,
+            guardrail_env=_armed_env(settings),
+            wallet_balance_lookup=lambda: _async_return(1.0),
+            transaction_simulator=lambda _tx: _async_return(TransactionSimulationResult(ok=True)),
+            circuit_breaker=breaker,
+            daily_live_state_lookup=_available_daily_state,
+        )
+
+        result = await execute_guarded_live_exit(
+            settings=settings,
+            mint_address="exit-mint",
+            position_manager=manager,
+            adapter=adapter,
+            exit_transaction_builder=lambda _mint, _amount: _async_return("tx"),
+            wallet_holdings_lookup=lambda: _async_return({"exit-mint": 10.0}),
+            wallet_balance_lookup=lambda: _async_return(1.0),
+            transaction_simulator=lambda _tx: _async_return(TransactionSimulationResult(ok=True)),
+            circuit_breaker=breaker,
+            env=_armed_env(settings),
+        )
+
+        assert result.ok is False
+        assert result.diagnostics == ("live_exit_wallet_balance_not_cleared",)
+        assert await manager.get_position("exit-mint", mode="live") is not None
 
     asyncio.run(run())
 

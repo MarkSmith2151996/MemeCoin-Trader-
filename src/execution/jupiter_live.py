@@ -89,8 +89,9 @@ class JupiterLiveExecutionAdapter(ExecutionAdapter):
         transaction: str | bytes,
         *,
         amount_sol: float | None = None,
+        allow_tripped_circuit_breaker: bool = False,
     ) -> LiveSubmissionResult:
-        if self._circuit_breaker is not None:
+        if self._circuit_breaker is not None and not allow_tripped_circuit_breaker:
             breaker_decision = self._circuit_breaker.status(execution_mode=self._settings.execution.mode)
             if not breaker_decision.allowed:
                 return LiveSubmissionResult(

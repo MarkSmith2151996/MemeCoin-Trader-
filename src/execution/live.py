@@ -127,7 +127,6 @@ class LiveExecutionAdapter(ExecutionAdapter):
     async def sell(self, mint_address: str, token_amount: float, slippage_bps: int = 100) -> Trade:
         """Sell the wallet's full balance of ``mint_address`` through Jupiter."""
         self._ensure_open()
-        await self._check_token_allowed(mint_address)
         if token_amount <= 0:
             raise RuntimeError(f"live sell rejected non-positive token amount {token_amount}")
 
@@ -218,6 +217,12 @@ class LiveExecutionAdapter(ExecutionAdapter):
         """Return the wallet SOL balance without attempting a swap."""
         self._ensure_open()
         return await self._client.get_sol_balance()
+
+    async def verify_token_balance_cleared(self, mint_address: str) -> float:
+        """Require the wallet to hold no spendable balance after any live sell path."""
+        self._ensure_open()
+        decimals = await self._client.get_token_decimals(mint_address)
+        return await self._verify_token_balance_cleared(mint_address, decimals)
 
     def trip_circuit_breaker(
         self,

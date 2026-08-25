@@ -101,23 +101,29 @@ def test_get_wallet_holdings_returns_positive_balances_by_mint() -> None:
             },
         }
 
+    requested_programs: list[str] = []
+
     def handler(request: httpx.Request) -> httpx.Response:
         payload = json.loads(request.content)
         assert payload["method"] == "getTokenAccountsByOwner"
-        assert payload["params"][1] == {
-            "programId": "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA",
-        }
+        program_id = payload["params"][1]["programId"]
+        requested_programs.append(program_id)
+        values = (
+            [
+                account(TOKEN_MINT, "1250000", 6),
+                account(TOKEN_MINT, "250000", 6),
+                account("zero-mint", "0", 6),
+            ]
+            if program_id == "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"
+            else [account("token-2022-mint", "2000000", 6)]
+        )
         return httpx.Response(
             200,
             json={
                 "jsonrpc": "2.0",
                 "id": 1,
                 "result": {
-                    "value": [
-                        account(TOKEN_MINT, "1250000", 6),
-                        account(TOKEN_MINT, "250000", 6),
-                        account("zero-mint", "0", 6),
-                    ],
+                    "value": values,
                 },
             },
         )
@@ -128,7 +134,63 @@ def test_get_wallet_holdings_returns_positive_balances_by_mint() -> None:
             holdings = await client.get_wallet_holdings()
         finally:
             await client.close()
-        assert holdings == {TOKEN_MINT: 1.5}
+        assert holdings == {TOKEN_MINT: 1.5, "token-2022-mint": 2.0}
+        assert requested_programs == [
+            "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA",
+            "TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb",
+        ]
+
+    asyncio.run(run())
+
+
+def test_get_token_accounts_includes_classic_and_token_2022() -> None:
+    def account(address: str, mint: str, amount: str) -> dict:
+        return {
+            "pubkey": address,
+            "account": {
+                "data": {
+                    "parsed": {
+                        "info": {
+                            "mint": mint,
+                            "tokenAmount": {"amount": amount, "decimals": 6},
+                        },
+                    },
+                },
+            },
+        }
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        payload = json.loads(request.content)
+        program_id = payload["params"][1]["programId"]
+        value = (
+            [account("classic-account", TOKEN_MINT, "1000000")]
+            if program_id == "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"
+            else [account("token-2022-account", "token-2022-mint", "2000000")]
+        )
+        return httpx.Response(
+            200,
+            json={"jsonrpc": "2.0", "id": 1, "result": {"value": value}},
+        )
+
+    async def run() -> None:
+        client = _make_client(handler)
+        try:
+            accounts = await client.get_token_accounts()
+        finally:
+            await client.close()
+        assert accounts is not None
+        assert [(item.address, item.mint, item.program_id) for item in accounts] == [
+            (
+                "classic-account",
+                TOKEN_MINT,
+                "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA",
+            ),
+            (
+                "token-2022-account",
+                "token-2022-mint",
+                "TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb",
+            ),
+        ]
 
     asyncio.run(run())
 

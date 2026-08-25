@@ -60,7 +60,7 @@ class PumpFunExecutionRouter(ExecutionAdapter):
         if await self._direct.has_active_curve(mint_address):
             log.info("LIVE SELL [direct] mint=%s", mint_address[:16])
             try:
-                return self._tag(
+                trade = self._tag(
                     await self._direct.execute_swap(
                         mint_address,
                         Side.SELL,
@@ -71,6 +71,18 @@ class PumpFunExecutionRouter(ExecutionAdapter):
                 )
             except CurveCompleteError:
                 log.info("LIVE SELL [jupiter] mint=%s direct_curve_completed", mint_address[:16])
+            except Exception as exc:
+                self._jupiter.trip_circuit_breaker(
+                    error=f"direct sell failed: {exc}",
+                    mint=mint_address,
+                    reason="sell_failure",
+                )
+                raise
+            else:
+                trade.metadata["token_balance_after"] = (
+                    await self._jupiter.verify_token_balance_cleared(mint_address)
+                )
+                return trade
         else:
             log.info("LIVE SELL [jupiter] mint=%s direct_curve_unavailable", mint_address[:16])
         return self._tag(

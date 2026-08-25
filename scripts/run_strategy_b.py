@@ -401,6 +401,20 @@ _priority_fee_provider = PriorityFeeProvider()
 _sol_price_cache: tuple[float, float] | None = None
 
 
+def _adapter_mode(adapter: ExecutionAdapter | None) -> str:
+    """Return the runtime position mode, rejecting live/paper mismatches."""
+    if adapter is None:
+        if EXECUTION_MODE == "live":
+            raise RuntimeError("live execution requires a non-null live adapter")
+        return "paper"
+    if adapter.mode != EXECUTION_MODE:
+        raise RuntimeError(
+            f"execution adapter mode mismatch: EXECUTION_MODE={EXECUTION_MODE} "
+            f"adapter={adapter.mode}",
+        )
+    return adapter.mode
+
+
 def _fire_shadow_task(coro) -> None:
     """Schedule a shadow quote coroutine without blocking the caller."""
     task = asyncio.create_task(coro)
@@ -1267,7 +1281,8 @@ async def try_enter(
     t0 = timing.setdefault("t_detect", time.monotonic())
     t_gate = timing.setdefault("t_gate_pass", time.monotonic())
 
-    if len(await manager.get_all_open(mode=EXECUTION_MODE)) >= MAX_OPEN:
+    position_mode = _adapter_mode(adapter)
+    if len(await manager.get_all_open(mode=position_mode)) >= MAX_OPEN:
         log.warning("SKIP %s ticker=%s — strategy capacity reached", mint[:16], ticker)
         log.debug("DEBUG ENTRY_EVAL mint=%s result=rejected reason=capacity", mint[:16])
         return None
@@ -1326,7 +1341,7 @@ async def try_enter(
         return None
 
 
-    existing = await manager.get_position(mint, mode=EXECUTION_MODE)
+    existing = await manager.get_position(mint, mode=position_mode)
     if existing is not None:
         log.debug("DEBUG ENTRY_EVAL mint=%s result=rejected reason=already_open", mint[:16])
         return None
@@ -1485,8 +1500,9 @@ async def monitor_positions(
 ) -> bool:
     """Re-mark open positions and close on stops; True if any position is in
     the danger zone (below 95% of entry)."""
+    position_mode = _adapter_mode(adapter)
     danger = False
-    positions = await manager.get_all_open(mode=EXECUTION_MODE)
+    positions = await manager.get_all_open(mode=position_mode)
     if only_mints is not None:
         positions = [position for position in positions if position.mint_address in only_mints]
     for pos in positions:
@@ -1504,7 +1520,7 @@ async def monitor_positions(
                 "ZOMBIE CLOSE mint=%s entry_trade=%s token_amount=%s \u2014 closing 0-token position to free slot",
                 pos.mint_address[:16], pos.entry_trade_id[:8], pos.token_amount,
             )
-            await manager.close_position(pos.mint_address, mode=EXECUTION_MODE)
+            await manager.close_position(pos.mint_address, mode=position_mode)
             continue
         current_price = (
             price_overrides[pos.mint_address]
@@ -1671,6 +1687,7 @@ async def _close_position(
     peak_price_sol: float | None,
 ) -> tuple[Trade, float, object] | None:
     """Persist a sell and local position close as one protected lifecycle."""
+    position_mode = _adapter_mode(adapter)
     if pos.mint_address in _selling_in_progress:
         return None
     _selling_in_progress.add(pos.mint_address)
@@ -1678,11 +1695,23 @@ async def _close_position(
         trade = await _adapter_close(pos, close_price, reason, db_path, adapter)
         if trade is None:
             return None
-        persisted_close_price = 0.0 if trade.status == "abandoned" else close_price
+        persisted_close_price = close_price
+        if trade.status == "abandoned":
+            persisted_close_price = 0.0
+        elif position_mode == "live":
+            if trade.status == "confirmed_unpriced" and trade.price_sol == 0:
+                persisted_close_price = 0.0
+            elif trade.price_sol is None or trade.price_sol <= 0:
+                log.critical(
+                    "LIVE SELL mint=%s returned no valid fill price; position left open",
+                    pos.mint_address[:16],
+                )
+                return None
+            persisted_close_price = trade.price_sol
         closed = await manager.close_position(
             pos.mint_address,
             persisted_close_price,
-            mode=EXECUTION_MODE,
+            mode=position_mode,
             peak_price_sol=peak_price_sol,
         )
         return trade, persisted_close_price, closed
@@ -1700,6 +1729,7 @@ async def _adapter_close(
 ) -> Trade | None:
     import uuid
 
+    position_mode = _adapter_mode(adapter)
     log.info(
         "ADAPTER CLOSE mint=%s reason=%s adapter=%s mode=%s",
         pos.mint_address[:16], reason,
@@ -1709,7 +1739,8 @@ async def _adapter_close(
     # MT-544: in live mode the close is a real Jupiter sell; paper/shadow mode
     # keeps the existing simulated record path unchanged. A failed live sell
     # normally returns None so the position stays open for retry.
-    if adapter is not None and adapter.mode == "live":
+    if position_mode == "live":
+        assert adapter is not None
         try:
             pre_balance = await adapter.get_token_balance(  # type: ignore[attr-defined]
                 pos.mint_address,
@@ -1733,7 +1764,7 @@ async def _adapter_close(
                 token_amount=0,
                 price_sol=0,
                 slippage_bps=300,
-                mode=EXECUTION_MODE,
+                mode=position_mode,
                 status="abandoned",
                 metadata={
                     "close_reason": reason,
@@ -1745,9 +1776,10 @@ async def _adapter_close(
             await record_trade(db_path, abandoned_trade)
             return abandoned_trade
         try:
+            sell_amount = pre_balance if pre_balance is not None else pos.remaining_token_amount
             live_trade = await adapter.sell(
                 pos.mint_address,
-                pos.token_amount,
+                sell_amount,
                 slippage_bps=300,
             )
         except Exception as exc:
@@ -1759,7 +1791,7 @@ async def _adapter_close(
                 try:
                     live_trade = await adapter.sell(
                         pos.mint_address,
-                        pos.token_amount,
+                        sell_amount,
                         slippage_bps=500,
                     )
                 except Exception as retry_exc:
@@ -1768,6 +1800,7 @@ async def _adapter_close(
                     if live_trade.metadata is None:
                         live_trade.metadata = {}
                     live_trade.metadata["close_reason"] = reason
+                    live_trade.metadata["trigger_price_sol"] = close_price
                     await record_trade(db_path, live_trade)
                     _fire_shadow_task(_shadow_sell_quote(pos, close_price, db_path))
                     return live_trade
@@ -1783,7 +1816,7 @@ async def _adapter_close(
                     pos.mint_address[:16], balance_exc,
                 )
                 return None
-            if wallet_balance is None or wallet_balance <= 0:
+            if wallet_balance is not None and wallet_balance <= 0:
                 log.warning(
                     "LIVE SELL ABANDON mint=%s reason=%s wallet_balance=%s; "
                     "closing position at zero",
@@ -1796,7 +1829,7 @@ async def _adapter_close(
                     token_amount=0,
                     price_sol=0,
                     slippage_bps=300,
-                    mode=EXECUTION_MODE,
+                    mode=position_mode,
                     status="abandoned",
                     metadata={
                         "close_reason": reason,
@@ -1810,6 +1843,7 @@ async def _adapter_close(
         if live_trade.metadata is None:
             live_trade.metadata = {}
         live_trade.metadata["close_reason"] = reason
+        live_trade.metadata["trigger_price_sol"] = close_price
         await record_trade(db_path, live_trade)
         _fire_shadow_task(_shadow_sell_quote(pos, close_price, db_path))
         return live_trade
@@ -1827,7 +1861,7 @@ async def _adapter_close(
         token_amount=token_remaining,
         price_sol=close_price,
         slippage_bps=300,
-        mode=EXECUTION_MODE,
+        mode=position_mode,
         status="simulated",
         metadata={"close_reason": reason},
     )
@@ -1886,7 +1920,7 @@ def _log_lag_report() -> None:
 
 async def scan_loop(
     mark_provider: JupiterPriceProvider,
-    adapter: PaperExecutionAdapter,
+    adapter: ExecutionAdapter,
     manager: PositionManager,
     db_path: Path,
     tracked_wallets: list | None = None,
@@ -1894,6 +1928,7 @@ async def scan_loop(
     single_trade_complete: asyncio.Event | None = None,
 ) -> None:
     global watch_list, cycle_number
+    position_mode = _adapter_mode(adapter)
     if tracked_wallets is None:
         tracked_wallets = []
     async with httpx.AsyncClient() as http:
@@ -1912,7 +1947,7 @@ async def scan_loop(
                 # error in the blocked branch can never kill the loop — and a
                 # failed position-count read still lets exit management run.
                 try:
-                    open_positions = await manager.get_all_open(mode=EXECUTION_MODE)
+                    open_positions = await manager.get_all_open(mode=position_mode)
                     open_count = len(open_positions)
                 except Exception as exc:
                     log.error("BLOCKED window: position count failed: %s", exc, exc_info=True)
@@ -1946,7 +1981,7 @@ async def scan_loop(
                 cycle_number += 1
                 log.debug("--- Strategy B Scan (cycle %d) ---", cycle_number)
                 log.debug("whale tracker disabled — re-enable when Helius integration is built into entry pipeline.")
-                open_positions = await manager.get_all_open(mode=EXECUTION_MODE)
+                open_positions = await manager.get_all_open(mode=position_mode)
                 log.debug("Open positions: %d / %d", len(open_positions), MAX_OPEN)
 
                 detailed = {
@@ -2023,7 +2058,7 @@ async def scan_loop(
                 # stays on the list (it may reappear with fresh data next poll)
                 # but is not re-evaluated with unchanged data.
                 try:
-                    open_positions = await manager.get_all_open(mode=EXECUTION_MODE)
+                    open_positions = await manager.get_all_open(mode=position_mode)
                 except Exception as exc:
                     log.error("watch sweep: open-position read failed: %s", exc, exc_info=True)
                     open_positions = []
@@ -2210,7 +2245,7 @@ async def scan_loop(
                         log.info("ENTRY mint=%s ticker=%s [watch]", _w_mint[:16], _w_ticker)
                         if single_trade_complete is not None:
                             log.info("SINGLE_TRADE_MODE: entry persisted, waiting for close")
-                            while await manager.get_position(_w_mint, mode=EXECUTION_MODE) is not None:
+                            while await manager.get_position(_w_mint, mode=position_mode) is not None:
                                 await asyncio.sleep(0.25)
                             log.info("SINGLE_TRADE_MODE: cycle complete, shutting down")
                             single_trade_complete.set()
@@ -2286,7 +2321,7 @@ async def monitor_loop(
     mark_provider: JupiterPriceProvider,
     db_path: Path,
     gate_tuner: GateTuner,
-    adapter: ExecutionAdapter | None = None,
+    adapter: ExecutionAdapter,
     price_cache: dict[str, float] | None = None,
 ) -> None:
     while True:
@@ -2465,7 +2500,7 @@ async def _run_runtime_until_stopped(
     async def held_position_mints() -> set[str]:
         held = {
             position.mint_address
-            for position in await manager.get_all_open(mode=EXECUTION_MODE)
+            for position in await manager.get_all_open(mode=adapter.mode)
         }
         for mint in set(latest_pumpportal_prices) - held:
             latest_pumpportal_prices.pop(mint, None)
@@ -2573,10 +2608,13 @@ async def main() -> None:
     # MT-544: EXECUTION_MODE selects the execution adapter. paper = current
     # behavior (default), shadow = paper + Jupiter quotes (MT-538), live =
     # real Jupiter swaps via src/execution/live.py.
-    execution_mode = os.environ.get("EXECUTION_MODE", "paper").strip().lower()
+    requested_execution_mode = os.environ.get("EXECUTION_MODE", "paper").strip().lower()
+    if requested_execution_mode not in {"paper", "shadow", "live"}:
+        raise RuntimeError(
+            f"invalid EXECUTION_MODE={requested_execution_mode!r}; expected paper, shadow, or live",
+        )
     global EXECUTION_MODE
-    EXECUTION_MODE = execution_mode
-    if execution_mode == "live":
+    if requested_execution_mode == "live":
         from src.chain.jupiter_swap import JupiterSwapClient
         from src.execution.direct import DirectExecutor
         from src.execution.live import LiveExecutionAdapter
@@ -2594,7 +2632,13 @@ async def main() -> None:
         log.info("Strategy B execution adapter: LIVE (Pump direct bonding curve, Jupiter fallback)")
     else:
         adapter = PaperExecutionAdapter(price_provider=mark_provider)
-        log.info("Strategy B execution adapter: PAPER (EXECUTION_MODE=%s)", execution_mode)
+        log.info(
+            "Strategy B execution adapter: PAPER (EXECUTION_MODE=%s)",
+            requested_execution_mode,
+        )
+    # Position identity follows the selected adapter. Shadow is paper execution
+    # with extra quote telemetry, so its persisted/query mode is paper.
+    EXECUTION_MODE = adapter.mode
     manager = PositionManager(db_path, settings, strategy="B")
     if adapter.mode == "live":
         abandoned = await _close_abandoned_live_positions(manager, adapter, db_path)

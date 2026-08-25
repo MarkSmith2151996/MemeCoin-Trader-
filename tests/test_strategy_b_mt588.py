@@ -235,14 +235,23 @@ async def _screen(coin: dict, sol_price: float = SOL_PRICE) -> tuple[bool, str, 
     import scripts.run_strategy_b as sb
 
     sb._sol_price_cache = None
+    sb._rugcheck_cache.clear()
     transport, _ = _transport(sol_price=sol_price)
 
     async def _fetch_rugcheck(client: httpx.AsyncClient, mint: str) -> httpx.Response:
         return _rugcheck_response()
 
     rugcheck = RugCheckClient(fetcher=_fetch_rugcheck)
-    async with httpx.AsyncClient(transport=transport) as http:
-        return await screen_coin(coin, http, rugcheck)
+    blocked_hours = sb.BLOCKED_UTC_HOURS
+    blocked_weekdays = sb.BLOCKED_WEEKDAYS
+    sb.BLOCKED_UTC_HOURS = frozenset()
+    sb.BLOCKED_WEEKDAYS = frozenset()
+    try:
+        async with httpx.AsyncClient(transport=transport) as http:
+            return await screen_coin(coin, http, rugcheck)
+    finally:
+        sb.BLOCKED_UTC_HOURS = blocked_hours
+        sb.BLOCKED_WEEKDAYS = blocked_weekdays
 
 
 def test_screen_coin_accepts_graduated_token_with_enough_depth() -> None:
@@ -420,8 +429,16 @@ async def _screen_with_creator(
         liquidity_usd=40.0 * SOL_PRICE,
         buys=40, sells=5, vol=10_000.0, mcap=10_000.0,
     )
-    async with httpx.AsyncClient(transport=transport) as http:
-        return await screen_coin(coin, http, rugcheck)
+    blocked_hours = sb.BLOCKED_UTC_HOURS
+    blocked_weekdays = sb.BLOCKED_WEEKDAYS
+    sb.BLOCKED_UTC_HOURS = frozenset()
+    sb.BLOCKED_WEEKDAYS = frozenset()
+    try:
+        async with httpx.AsyncClient(transport=transport) as http:
+            return await screen_coin(coin, http, rugcheck)
+    finally:
+        sb.BLOCKED_UTC_HOURS = blocked_hours
+        sb.BLOCKED_WEEKDAYS = blocked_weekdays
 
 
 def test_screen_coin_rejects_creator_still_holding() -> None:
