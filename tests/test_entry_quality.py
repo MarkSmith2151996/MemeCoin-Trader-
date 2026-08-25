@@ -291,6 +291,72 @@ def test_strategy_b_hard_stop_closes_at_trigger_price(db: Path) -> None:
     assert danger is False
 
 
+def test_strategy_b_monitor_silently_skips_mint_while_close_is_in_progress(
+    db: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture,
+) -> None:
+    manager = FakeManager([make_position(entry=1.0)])
+    started = asyncio.Event()
+    release = asyncio.Event()
+    close_calls = 0
+
+    async def slow_close(*args, **kwargs) -> Trade:
+        nonlocal close_calls
+        close_calls += 1
+        started.set()
+        await release.wait()
+        return Trade(
+            mint_address="Mint1",
+            side=Side.SELL,
+            amount_sol=0.92,
+            token_amount=1_000.0,
+            price_sol=0.92,
+            mode="paper",
+            status="simulated",
+        )
+
+    monkeypatch.setattr(strategy_b, "_adapter_close", slow_close)
+    strategy_b.peak_prices.clear()
+    strategy_b._selling_in_progress.clear()
+
+    async def verify() -> None:
+        first_monitor = asyncio.create_task(
+            strategy_b.monitor_positions(manager, FakePrice(0.65), db),
+        )
+        await started.wait()
+        await strategy_b.monitor_positions(manager, FakePrice(0.65), db)
+        release.set()
+        await first_monitor
+
+    with caplog.at_level("ERROR"):
+        asyncio.run(verify())
+
+    assert close_calls == 1
+    assert "CLOSE FAILED" not in caplog.text
+    assert not strategy_b._selling_in_progress
+
+
+def test_strategy_b_monitor_retries_after_failed_close(
+    db: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    manager = FakeManager([make_position(entry=1.0)])
+    close_calls = 0
+
+    async def failed_close(*args, **kwargs) -> None:
+        nonlocal close_calls
+        close_calls += 1
+        return None
+
+    monkeypatch.setattr(strategy_b, "_adapter_close", failed_close)
+    strategy_b.peak_prices.clear()
+    strategy_b._selling_in_progress.clear()
+
+    asyncio.run(strategy_b.monitor_positions(manager, FakePrice(0.65), db))
+    asyncio.run(strategy_b.monitor_positions(manager, FakePrice(0.65), db))
+
+    assert close_calls == 2
+    assert not strategy_b._selling_in_progress
+
+
 def test_strategy_a_danger_zone_triggers_fast_polling(db: Path) -> None:
     manager = FakeManager([make_position(entry=1.0, opened_minutes_ago=0.5)])
     paper_loop.peak_prices.clear()

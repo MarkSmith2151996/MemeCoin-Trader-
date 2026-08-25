@@ -1490,6 +1490,11 @@ async def monitor_positions(
     if only_mints is not None:
         positions = [position for position in positions if position.mint_address in only_mints]
     for pos in positions:
+        # The 100ms monitor can run again while a sell awaits confirmation.
+        # Skip that mint before evaluating its stops; other positions continue
+        # at the normal cadence.
+        if pos.mint_address in _selling_in_progress:
+            continue
         # MT-593: zombie positions — a 0-token fill can never produce a
         # positive sol_out, so _adapter_close refuses to close it and the
         # slot is held forever. Close it outright (nothing to sell) to free
@@ -1667,7 +1672,6 @@ async def _close_position(
 ) -> tuple[Trade, float, object] | None:
     """Persist a sell and local position close as one protected lifecycle."""
     if pos.mint_address in _selling_in_progress:
-        log.info("CLOSE already in progress mint=%s", pos.mint_address[:16])
         return None
     _selling_in_progress.add(pos.mint_address)
     try:
