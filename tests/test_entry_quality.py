@@ -391,7 +391,7 @@ def test_trailing_stop_arms_above_entry_plus_2pct(db: Path) -> None:
     manager = FakeManager([make_position(entry=1.0)])
     paper_loop.peak_prices.clear()
     paper_loop.peak_prices["Mint1"] = 1.03
-    danger = asyncio.run(paper_loop.monitor_positions(manager, FakePrice(0.98), db))
+    asyncio.run(paper_loop.monitor_positions(manager, FakePrice(0.98), db))
     assert manager.closed_with == [("Mint1", 0.98, 1.03)]
     assert sell_trades(db) == [(0.98, "trailing_stop")]
 
@@ -489,7 +489,7 @@ def test_strategy_b_retries_slippage_sell_once_at_500_bps(
 
     assert trade is not None
     assert adapter.slippages == [300, 500]
-    assert sell_trades(db) == [(0.00004, "hard_stop")]
+    assert sell_trades(db) == []
 
 
 def test_strategy_b_abandons_live_position_without_wallet_tokens(
@@ -712,18 +712,18 @@ def test_strategy_b_live_close_persists_actual_fill_and_sells_wallet_balance(
                 status="confirmed",
             )
 
+        async def verify_token_balance_cleared(self, mint: str) -> float:
+            return 0.0
+
     adapter = FilledLiveAdapter()
     manager = FakeManager([make_position(entry=0.00005)])
     strategy_b.peak_prices.clear()
 
-    asyncio.run(
-        strategy_b.monitor_positions(
-            manager,
-            FakePrice(0.00001),
-            db,
-            adapter=adapter,
-        ),
-    )
+    async def run_monitor() -> None:
+        await strategy_b.monitor_positions(manager, FakePrice(0.00001), db, adapter=adapter)
+        await strategy_b._wait_for_inflight_sells(timeout_s=1)
+
+    asyncio.run(run_monitor())
 
     assert adapter.sell_amounts == [1_250.0]
     assert manager.closed_with == [("Mint1", 0.00004, 0.00005)]
@@ -764,11 +764,18 @@ def test_strategy_b_confirmed_unpriced_live_sell_closes_once_at_zero(
                 metadata={"token_balance_after": 0.0, "fill_reconciled": False},
             )
 
+        async def verify_token_balance_cleared(self, mint: str) -> float:
+            return 0.0
+
     adapter = ConfirmedUnpricedAdapter()
     manager = FakeManager([make_position(entry=1.0)])
     strategy_b.peak_prices.clear()
 
-    asyncio.run(strategy_b.monitor_positions(manager, FakePrice(0.5), db, adapter=adapter))
+    async def run_monitor() -> None:
+        await strategy_b.monitor_positions(manager, FakePrice(0.5), db, adapter=adapter)
+        await strategy_b._wait_for_inflight_sells(timeout_s=1)
+
+    asyncio.run(run_monitor())
 
     assert adapter.sell_calls == 1
     assert manager.closed_with == [("Mint1", 0.0, 1.0)]

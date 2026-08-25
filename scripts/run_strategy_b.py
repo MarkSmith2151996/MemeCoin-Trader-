@@ -117,6 +117,7 @@ from src.core.database import (
     mark_strategy_candidate_entered,
     record_discovery_lag,
     record_jupiter_quote,
+    record_runtime_event,
     record_strategy_candidate,
     record_trade,
 )
@@ -127,7 +128,7 @@ from src.execution.paper import PaperExecutionAdapter
 from src.execution.position_reconciliation import reconcile_positions
 from src.execution.price_provider import JupiterPriceProvider
 from src.execution.pumpportal_price import PumpPortalPriceFeed
-from src.monitoring.alerts import send_imessage
+from src.monitoring.alerts import AlertManager, send_imessage
 from src.monitoring.position_snapshots import snapshot_loop
 from src.risk.rugcheck import RugCheckClient, RugCheckResult
 from src.strategy.gate_tuner import GateThresholds, GateTuner
@@ -298,13 +299,17 @@ DB_PATH = Path("data/trades.db")
 # shell redirect owns the file. Handlers are cleared first so re-initializing
 # (e.g. under pytest or a supervisor that imports this module twice) can
 # never attach a duplicate handler.
+class _UtcFormatter(logging.Formatter):
+    converter = time.gmtime
+
+
 _root_logger = logging.getLogger()
 _root_logger.handlers.clear()
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s %(levelname)s %(message)s",
-    handlers=[logging.StreamHandler(sys.stdout)],
+_runtime_handler = logging.StreamHandler(sys.stdout)
+_runtime_handler.setFormatter(
+    _UtcFormatter("%(asctime)sZ %(levelname)s %(message)s", datefmt="%Y-%m-%dT%H:%M:%S"),
 )
+logging.basicConfig(level=logging.INFO, handlers=[_runtime_handler])
 log = logging.getLogger("strategy_b")
 logging.getLogger("httpx").setLevel(logging.WARNING)
 
@@ -324,6 +329,7 @@ except ImportError:
 # still apply.
 watch_list: dict[str, dict] = {}  # mint -> {coin, ticker, created_ms, first_seen, last_updated}
 _selling_in_progress: set[str] = set()
+_live_sell_cleanup_tasks: set[asyncio.Task] = set()
 _shutting_down = False
 # MT-610: tokens stay on the watch list from MIN_EVAL_AGE_S until
 # MAX_AGE_SECONDS, re-evaluated on every poll cycle — matching the backtest's
@@ -420,6 +426,13 @@ def _fire_shadow_task(coro) -> None:
     task = asyncio.create_task(coro)
     _shadow_tasks.add(task)
     task.add_done_callback(_shadow_tasks.discard)
+
+
+def _fire_live_sell_cleanup(coro) -> None:
+    """Reconcile a confirmed live sell without blocking the price monitor."""
+    task = asyncio.create_task(coro)
+    _live_sell_cleanup_tasks.add(task)
+    task.add_done_callback(_live_sell_cleanup_tasks.discard)
 
 
 async def _drain_shadow_tasks() -> None:
@@ -1685,14 +1698,23 @@ async def _close_position(
     adapter: ExecutionAdapter | None,
     *,
     peak_price_sol: float | None,
+    force_jupiter: bool = False,
 ) -> tuple[Trade, float, object] | None:
     """Persist a sell and local position close as one protected lifecycle."""
     position_mode = _adapter_mode(adapter)
     if pos.mint_address in _selling_in_progress:
         return None
     _selling_in_progress.add(pos.mint_address)
+    cleanup_scheduled = False
     try:
-        trade = await _adapter_close(pos, close_price, reason, db_path, adapter)
+        trade = await _adapter_close(
+            pos,
+            close_price,
+            reason,
+            db_path,
+            adapter,
+            force_jupiter=force_jupiter,
+        )
         if trade is None:
             return None
         persisted_close_price = close_price
@@ -1708,6 +1730,19 @@ async def _close_position(
                 )
                 return None
             persisted_close_price = trade.price_sol
+            _fire_live_sell_cleanup(
+                _complete_live_sell_cleanup(
+                    manager,
+                    pos,
+                    trade,
+                    persisted_close_price,
+                    peak_price_sol,
+                    db_path,
+                    adapter,
+                ),
+            )
+            cleanup_scheduled = True
+            return trade, persisted_close_price, None
         closed = await manager.close_position(
             pos.mint_address,
             persisted_close_price,
@@ -1716,7 +1751,54 @@ async def _close_position(
         )
         return trade, persisted_close_price, closed
     finally:
-        # Reconciliation can now observe a fully persisted close, not a half-sold position.
+        if not cleanup_scheduled:
+            _selling_in_progress.discard(pos.mint_address)
+
+
+async def _complete_live_sell_cleanup(
+    manager: PositionManager,
+    pos,
+    trade: Trade,
+    close_price: float,
+    peak_price_sol: float | None,
+    db_path: Path,
+    adapter: ExecutionAdapter,
+) -> None:
+    """Verify the on-chain balance, then persist the confirmed live close."""
+    try:
+        verify_balance = getattr(adapter, "verify_token_balance_cleared", None)
+        if verify_balance is None:
+            raise RuntimeError("live adapter cannot verify a confirmed sell balance")
+        balance = await verify_balance(pos.mint_address)
+        trade.metadata["token_balance_after"] = balance
+        await record_trade(db_path, trade)
+        await manager.close_position(
+            pos.mint_address,
+            close_price,
+            mode="live",
+            peak_price_sol=peak_price_sol,
+        )
+        log.info(
+            "LIVE SELL CLEANUP complete mint=%s fill=%.10f balance=%.12f",
+            pos.mint_address[:16],
+            close_price,
+            balance,
+        )
+    except Exception as exc:
+        log.critical(
+            "LIVE SELL CLEANUP failed mint=%s: %s",
+            pos.mint_address[:16],
+            exc,
+            exc_info=True,
+        )
+        trip_breaker = getattr(adapter, "trip_circuit_breaker", None)
+        if trip_breaker is not None:
+            trip_breaker(
+                mint=pos.mint_address,
+                error=f"post-sell cleanup failed: {exc}",
+                reason="sell_cleanup_failure",
+            )
+    finally:
         _selling_in_progress.discard(pos.mint_address)
 
 
@@ -1726,6 +1808,8 @@ async def _adapter_close(
     reason: str,
     db_path: Path,
     adapter: ExecutionAdapter | None = None,
+    *,
+    force_jupiter: bool = False,
 ) -> Trade | None:
     import uuid
 
@@ -1741,6 +1825,9 @@ async def _adapter_close(
     # normally returns None so the position stays open for retry.
     if position_mode == "live":
         assert adapter is not None
+        sell = getattr(adapter, "sell_via_jupiter", None) if force_jupiter else None
+        if sell is None:
+            sell = adapter.sell  # type: ignore[attr-defined]
         try:
             pre_balance = await adapter.get_token_balance(  # type: ignore[attr-defined]
                 pos.mint_address,
@@ -1777,7 +1864,7 @@ async def _adapter_close(
             return abandoned_trade
         try:
             sell_amount = pre_balance if pre_balance is not None else pos.remaining_token_amount
-            live_trade = await adapter.sell(
+            live_trade = await sell(
                 pos.mint_address,
                 sell_amount,
                 slippage_bps=300,
@@ -1789,7 +1876,7 @@ async def _adapter_close(
                     pos.mint_address[:16], reason,
                 )
                 try:
-                    live_trade = await adapter.sell(
+                    live_trade = await sell(
                         pos.mint_address,
                         sell_amount,
                         slippage_bps=500,
@@ -1801,7 +1888,6 @@ async def _adapter_close(
                         live_trade.metadata = {}
                     live_trade.metadata["close_reason"] = reason
                     live_trade.metadata["trigger_price_sol"] = close_price
-                    await record_trade(db_path, live_trade)
                     _fire_shadow_task(_shadow_sell_quote(pos, close_price, db_path))
                     return live_trade
             log.error("LIVE SELL mint=%s reason=%s failed: %s", pos.mint_address[:16], reason, exc)
@@ -1844,7 +1930,6 @@ async def _adapter_close(
             live_trade.metadata = {}
         live_trade.metadata["close_reason"] = reason
         live_trade.metadata["trigger_price_sol"] = close_price
-        await record_trade(db_path, live_trade)
         _fire_shadow_task(_shadow_sell_quote(pos, close_price, db_path))
         return live_trade
 
@@ -2394,6 +2479,68 @@ async def _wait_for_inflight_sells(timeout_s: float = 30.0) -> None:
         )
 
 
+async def _emergency_close_all(
+    manager: PositionManager,
+    adapter: ExecutionAdapter,
+    db_path: Path,
+    reason: str,
+) -> list[dict[str, object]]:
+    """Fail closed: stop entries and liquidate every open runtime position."""
+    global _shutting_down
+    _shutting_down = True
+    positions = await manager.get_all_open(mode=adapter.mode)
+
+    async def close_one(pos) -> dict[str, object]:
+        result = await _close_position(
+            manager,
+            pos,
+            pos.entry_price_sol,
+            "emergency_close",
+            db_path,
+            adapter,
+            peak_price_sol=peak_prices.pop(pos.mint_address, None),
+            force_jupiter=adapter.mode == "live",
+        )
+        if result is None:
+            return {"mint": pos.mint_address, "status": "failed", "fill_price_sol": None}
+        trade, fill_price, _ = result
+        return {
+            "mint": pos.mint_address,
+            "status": "submitted",
+            "fill_price_sol": fill_price,
+            "signature": trade.tx_signature,
+        }
+
+    details = list(await asyncio.gather(*(close_one(pos) for pos in positions)))
+    await _wait_for_inflight_sells()
+    for detail in details:
+        if detail["status"] == "submitted" and detail["mint"] in _selling_in_progress:
+            detail["status"] = "cleanup_pending"
+        elif detail["status"] == "submitted":
+            detail["status"] = "closed"
+    try:
+        await record_runtime_event(
+            db_path,
+            event_type="emergency_close_all",
+            reason=reason,
+            details={"positions": details},
+        )
+    except Exception as exc:
+        log.critical("EMERGENCY CLOSE event persistence failed: %s", exc, exc_info=True)
+
+    fills = "; ".join(
+        f"{str(detail['mint'])[:16]}={detail['fill_price_sol']} ({detail['status']})"
+        for detail in details
+    ) or "no open positions"
+    message = f"Reason: {reason}\nPositions: {fills}"
+    log.critical("EMERGENCY CLOSE ALL reason=%s positions=%s", reason, fills)
+    try:
+        await AlertManager.from_env().send("critical", "Strategy B emergency close", message)
+    except Exception as exc:
+        log.critical("EMERGENCY CLOSE Telegram alert failed: %s", exc, exc_info=True)
+    return details
+
+
 async def _close_abandoned_live_positions(
     manager: PositionManager,
     adapter: ExecutionAdapter,
@@ -2467,6 +2614,19 @@ async def _run_runtime_until_stopped(
     single_trade_complete = asyncio.Event() if single_trade else None
     latest_pumpportal_prices: dict[str, float] = {}
     _install_shutdown_handlers(stop_event)
+    emergency_event = asyncio.Event()
+    emergency_reason: str | None = None
+    emergency_started = False
+
+    async def trigger_emergency(reason: str) -> None:
+        nonlocal emergency_reason, emergency_started
+        if emergency_started:
+            return
+        emergency_started = True
+        emergency_reason = reason
+        await _emergency_close_all(manager, adapter, db_path, reason)
+        emergency_event.set()
+
     tasks = [
         asyncio.create_task(
             scan_loop(
@@ -2519,21 +2679,8 @@ async def _run_runtime_until_stopped(
         )
 
     async def on_pumpportal_stale(mint: str) -> None:
-        """Force a Jupiter mark when a subscribed PumpPortal price goes quiet."""
-        latest_pumpportal_prices.pop(mint, None)
-        current_price = await mark_provider.get_current_price(mint)
-        if current_price is not None and current_price > 0:
-            latest_pumpportal_prices[mint] = current_price
-        await monitor_positions(
-            manager,
-            mark_provider,
-            db_path,
-            gate_tuner,
-            adapter,
-            price_overrides=latest_pumpportal_prices,
-            only_mints={mint},
-            allow_provider_lookup=False,
-        )
+        del mint
+        await trigger_emergency("PumpPortal stale 15s")
 
     # The stream is a price source, not an execution capability. Keep it on in
     # paper mode too, so paper exits receive the same immediate stop checks.
@@ -2547,14 +2694,31 @@ async def _run_runtime_until_stopped(
         ),
     )
     try:
-        waiters = [asyncio.create_task(stop_event.wait())]
+        stop_waiter = asyncio.create_task(stop_event.wait())
+        emergency_waiter = asyncio.create_task(emergency_event.wait())
+        waiters = [stop_waiter, emergency_waiter]
         if single_trade_complete is not None:
             waiters.append(asyncio.create_task(single_trade_complete.wait()))
-        _, pending = await asyncio.wait(waiters, return_when=asyncio.FIRST_COMPLETED)
+        monitor_task = tasks[1]
+        done, pending = await asyncio.wait(
+            [*waiters, monitor_task],
+            return_when=asyncio.FIRST_COMPLETED,
+        )
+        if monitor_task in done:
+            try:
+                monitor_task.result()
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                await trigger_emergency(f"price monitor worker crashed: {exc}")
+            else:
+                await trigger_emergency("price monitor worker exited unexpectedly")
         for waiter in pending:
             waiter.cancel()
         await asyncio.gather(*pending, return_exceptions=True)
-        if stop_event.is_set():
+        if emergency_event.is_set():
+            log.critical("Strategy B halted after emergency close: %s", emergency_reason)
+        elif stop_event.is_set():
             log.info("Strategy B shutdown signal received; waiting for in-flight sells")
             await _wait_for_inflight_sells()
         elif single_trade_complete is not None and single_trade_complete.is_set():

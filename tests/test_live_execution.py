@@ -154,6 +154,21 @@ def test_buy_rejects_high_price_impact() -> None:
         asyncio.run(adapter.buy(TOKEN_MINT, 0.05))
 
 
+def test_sell_allows_looser_exit_price_impact() -> None:
+    adapter = LiveExecutionAdapter(client=FakeSwapClient(quote_impact_pct=0.15))
+
+    trade = asyncio.run(adapter.sell(TOKEN_MINT, 100.0))
+
+    assert trade.side == Side.SELL
+
+
+def test_sell_rejects_price_impact_above_exit_limit() -> None:
+    adapter = LiveExecutionAdapter(client=FakeSwapClient(quote_impact_pct=0.21))
+
+    with pytest.raises(RuntimeError, match="price impact"):
+        asyncio.run(adapter.sell(TOKEN_MINT, 100.0))
+
+
 def test_buy_rejects_zero_output_quote() -> None:
     client = FakeSwapClient()
 
@@ -224,7 +239,7 @@ def test_sell_retries_stale_balance_until_wallet_is_clear() -> None:
     assert trade.metadata["token_balance_after"] == 0.0
 
 
-def test_sell_rejects_confirmed_swap_with_remaining_wallet_balance(tmp_path) -> None:
+def test_post_sell_verification_rejects_remaining_wallet_balance(tmp_path) -> None:
     client = FakeSwapClient(token_balance=100.0)
     balances = iter((100.0, 0.1, 0.1, 0.1))
 
@@ -236,10 +251,13 @@ def test_sell_rejects_confirmed_swap_with_remaining_wallet_balance(tmp_path) -> 
         client=client,
         circuit_breaker=CircuitBreaker(flag_path=tmp_path / "circuit_breaker.json"),
         balance_reconciliation_retry_s=0,
+        balance_reconciliation_timeout_s=0,
     )
 
+    asyncio.run(adapter.sell(TOKEN_MINT, 100.0))
+
     with pytest.raises(RuntimeError, match="token balance not cleared"):
-        asyncio.run(adapter.sell(TOKEN_MINT, 100.0))
+        asyncio.run(adapter.verify_token_balance_cleared(TOKEN_MINT))
 
 
 def test_sell_slippage_error_does_not_trip_breaker(tmp_path) -> None:

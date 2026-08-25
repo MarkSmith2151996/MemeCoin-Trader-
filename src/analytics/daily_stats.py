@@ -164,13 +164,13 @@ def build_series(db_path: str | Path) -> list[DayStats]:
 
 
 async def _upsert_series(db_path: str | Path, series: Sequence[DayStats]) -> None:
-    # Both strategy runtimes write to the same DB; retry transient lock
-    # collisions (same pattern as prune_position_price_snapshots, MT-519).
-    last_error: sqlite3.OperationalError | None = None
-    for attempt in range(3):
+    # Retry transient shared-DB locks at 100ms intervals rather than sleeping
+    # through increasingly long blind backoff windows.
+    deadline = asyncio.get_running_loop().time() + 6.0
+    while True:
         try:
-            async with aiosqlite.connect(db_path, timeout=10.0) as db:
-                await db.execute("PRAGMA busy_timeout=10000")
+            async with aiosqlite.connect(db_path, timeout=0.1) as db:
+                await db.execute("PRAGMA busy_timeout=100")
                 await db.execute(DAILY_STATS_SCHEMA)
                 for stats in series:
                     await db.execute(
@@ -198,12 +198,9 @@ async def _upsert_series(db_path: str | Path, series: Sequence[DayStats]) -> Non
                 await db.commit()
             return
         except sqlite3.OperationalError as exc:
-            last_error = exc
-            if "locked" not in str(exc).lower() or attempt == 2:
+            if "locked" not in str(exc).lower() or asyncio.get_running_loop().time() >= deadline:
                 raise
-            await asyncio.sleep(2 * (attempt + 1))
-    if last_error is not None:
-        raise last_error
+            await asyncio.sleep(0.1)
 
 
 def backfill(db_path: str | Path) -> list[DayStats]:

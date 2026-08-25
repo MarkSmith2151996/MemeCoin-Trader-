@@ -268,6 +268,15 @@ SCHEMA = (
     CREATE INDEX IF NOT EXISTS idx_discovery_lag_recorded
     ON discovery_lag (recorded_at)
     """,
+    """
+    CREATE TABLE IF NOT EXISTS runtime_events (
+      id TEXT PRIMARY KEY,
+      occurred_at TEXT NOT NULL,
+      event_type TEXT NOT NULL,
+      reason TEXT NOT NULL,
+      details_json TEXT NOT NULL
+    )
+    """,
 )
 
 
@@ -351,6 +360,29 @@ async def record_trade(path: str | Path, trade: Trade) -> None:
                 trade.status,
                 trade.executed_at.isoformat(),
                 trade.model_dump_json(),
+            ),
+        )
+        await db.commit()
+
+
+async def record_runtime_event(
+    path: str | Path,
+    *,
+    event_type: str,
+    reason: str,
+    details: dict[str, object],
+) -> None:
+    """Persist a safety-critical runtime event with an explicit UTC timestamp."""
+    async with aiosqlite.connect(path) as db:
+        await db.execute(
+            """INSERT INTO runtime_events (id, occurred_at, event_type, reason, details_json)
+               VALUES (?, ?, ?, ?, ?)""",
+            (
+                str(uuid4()),
+                datetime.now(UTC).isoformat(),
+                event_type,
+                reason,
+                json.dumps(details, sort_keys=True),
             ),
         )
         await db.commit()
@@ -944,13 +976,13 @@ async def prune_position_price_snapshots(
     cutoff = (now or datetime.now(UTC)) - timedelta(days=retention_days)
     if cutoff.tzinfo is None:
         cutoff = cutoff.replace(tzinfo=UTC)
-    # Both runtimes prune on the same cadence; the DELETE can collide with the other
-    # runtime's writes. Wait on the lock (10s) and retry so a transient collision never
-    # kills the snapshot loop.
-    for attempt in range(3):
+    # Poll a transient SQLite lock at monitor cadence instead of sleeping through
+    # multi-second retry windows.
+    deadline = asyncio.get_running_loop().time() + 6.0
+    while True:
         try:
-            async with aiosqlite.connect(path, timeout=10.0) as db:
-                await db.execute("PRAGMA busy_timeout=10000")
+            async with aiosqlite.connect(path, timeout=0.1) as db:
+                await db.execute("PRAGMA busy_timeout=100")
                 await db.execute(
                     """
                     DELETE FROM price_snapshots
@@ -961,9 +993,9 @@ async def prune_position_price_snapshots(
                 await db.commit()
             return
         except sqlite3.OperationalError as exc:
-            if "locked" not in str(exc).lower() or attempt == 2:
+            if "locked" not in str(exc).lower() or asyncio.get_running_loop().time() >= deadline:
                 raise
-            await asyncio.sleep(2 * (attempt + 1))
+            await asyncio.sleep(0.1)
 
 
 async def record_jupiter_quote(

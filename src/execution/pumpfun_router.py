@@ -50,7 +50,10 @@ class PumpFunExecutionRouter(ExecutionAdapter):
                 log.info("LIVE BUY [jupiter] mint=%s direct_curve_completed", mint_address[:16])
         else:
             log.info("LIVE BUY [jupiter] mint=%s direct_curve_unavailable", mint_address[:16])
-        return self._tag(await self._jupiter.buy(mint_address, amount_sol, slippage_bps), "jupiter")
+        return self._tag(
+            await self._jupiter.buy(mint_address, amount_sol, slippage_bps, prevalidated=True),
+            "jupiter",
+        )
 
     async def buy(self, mint_address: str, amount_sol: float, slippage_bps: int = 100) -> Trade:
         log.info("LIVE BUY [jupiter] mint=%s", mint_address[:16])
@@ -79,9 +82,6 @@ class PumpFunExecutionRouter(ExecutionAdapter):
                 )
                 raise
             else:
-                trade.metadata["token_balance_after"] = (
-                    await self._jupiter.verify_token_balance_cleared(mint_address)
-                )
                 return trade
         else:
             log.info("LIVE SELL [jupiter] mint=%s direct_curve_unavailable", mint_address[:16])
@@ -89,6 +89,21 @@ class PumpFunExecutionRouter(ExecutionAdapter):
             await self._jupiter.sell(mint_address, token_amount, slippage_bps),
             "jupiter",
         )
+
+    async def sell_via_jupiter(
+        self,
+        mint_address: str,
+        token_amount: float,
+        slippage_bps: int = 100,
+    ) -> Trade:
+        """Bypass the bonding-curve route for fail-closed emergency exits."""
+        return self._tag(
+            await self._jupiter.sell(mint_address, token_amount, slippage_bps),
+            "jupiter",
+        )
+
+    async def verify_token_balance_cleared(self, mint_address: str) -> float:
+        return await self._jupiter.verify_token_balance_cleared(mint_address)
 
     async def execute_swap(
         self,

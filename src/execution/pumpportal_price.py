@@ -1,7 +1,7 @@
 """PumpPortal token-trade price stream for live exit monitoring.
 
 The runtime retains stream marks in memory for high-frequency stop checks. A
-stale stream invokes its supplied Jupiter fallback handler once per mint.
+stale stream invokes its supplied fail-closed handler once per held mint.
 """
 
 from __future__ import annotations
@@ -36,7 +36,7 @@ class PumpPortalPriceFeed:
         url: str = PUMPPORTAL_WS_URL,
         refresh_interval_s: float = 1.0,
         reconnect_delay_s: float = 2.0,
-        stale_after_s: float = 60.0,
+        stale_after_s: float = 15.0,
     ) -> None:
         self._held_mints = held_mints
         self._on_price = on_price
@@ -45,12 +45,13 @@ class PumpPortalPriceFeed:
         self._refresh_interval_s = refresh_interval_s
         self._reconnect_delay_s = reconnect_delay_s
         self._stale_after_s = stale_after_s
+        self._last_price_at: dict[str, float] = {}
+        self._stale_notified: set[str] = set()
 
     async def run(self) -> None:
-        """Reconnect indefinitely; callers use the stale handler as fallback."""
+        """Reconnect indefinitely while retaining stale detection across reconnects."""
         log.info(
-            "PRICE_FEED: PumpPortal WebSocket starting; "
-            "stale marks fall back to Jupiter until connected",
+            "PRICE_FEED: PumpPortal WebSocket starting; stale stream triggers fail-closed handler",
         )
         while True:
             try:
@@ -63,17 +64,23 @@ class PumpPortalPriceFeed:
                     await self._run_connection(websocket)
             except asyncio.CancelledError:
                 raise
-            except Exception as exc:  # A stream failure must not stop exit monitoring.
-                log.warning(
-                    "PRICE_FEED: fallback to Jupiter polling (PumpPortal disconnected: %s)",
-                    exc,
-                )
-                await asyncio.sleep(self._reconnect_delay_s)
+            except Exception as exc:
+                log.warning("PRICE_FEED: PumpPortal disconnected: %s", exc)
+                await self._wait_to_reconnect()
+
+    async def _wait_to_reconnect(self) -> None:
+        """Keep evaluating stream freshness while reconnect backoff is in progress."""
+        deadline = time.monotonic() + self._reconnect_delay_s
+        while True:
+            held = await self._held_mints()
+            await self._notify_stale_mints(held)
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                return
+            await asyncio.sleep(min(0.1, remaining))
 
     async def _run_connection(self, websocket: object) -> None:
         subscribed: set[str] = set()
-        last_price_at: dict[str, float] = {}
-        stale_notified: set[str] = set()
         while True:
             held = await self._held_mints()
             additions = held - subscribed
@@ -83,53 +90,52 @@ class PumpPortalPriceFeed:
                     json.dumps({"method": "subscribeTokenTrade", "keys": sorted(additions)}),
                 )
                 subscribed.update(additions)
-                last_price_at.update({mint: time.monotonic() for mint in additions})
-                stale_notified.difference_update(additions)
+                now = time.monotonic()
+                for mint in additions:
+                    self._last_price_at.setdefault(mint, now)
+                    self._stale_notified.discard(mint)
             if removals:
                 await websocket.send(
                     json.dumps({"method": "unsubscribeTokenTrade", "keys": sorted(removals)}),
                 )
                 subscribed.difference_update(removals)
                 for mint in removals:
-                    last_price_at.pop(mint, None)
-                    stale_notified.discard(mint)
+                    self._last_price_at.pop(mint, None)
+                    self._stale_notified.discard(mint)
 
             try:
                 raw = await asyncio.wait_for(websocket.recv(), timeout=self._refresh_interval_s)
             except TimeoutError:
-                await self._notify_stale_mints(subscribed, last_price_at, stale_notified)
+                await self._notify_stale_mints(subscribed)
                 continue
             price = _parse_price_update(raw)
             if price is not None and price[0] in subscribed:
-                last_price_at[price[0]] = time.monotonic()
-                stale_notified.discard(price[0])
+                self._last_price_at[price[0]] = time.monotonic()
+                self._stale_notified.discard(price[0])
                 await self._on_price(*price)
-            await self._notify_stale_mints(subscribed, last_price_at, stale_notified)
+            await self._notify_stale_mints(subscribed)
 
     async def _notify_stale_mints(
         self,
         subscribed: set[str],
-        last_price_at: dict[str, float],
-        stale_notified: set[str],
     ) -> None:
         if self._on_stale is None:
             return
         now = time.monotonic()
-        for mint in subscribed - stale_notified:
-            elapsed = now - last_price_at.get(mint, now)
+        for mint in subscribed - self._stale_notified:
+            elapsed = now - self._last_price_at.get(mint, now)
             if elapsed < self._stale_after_s:
                 continue
-            stale_notified.add(mint)
+            self._stale_notified.add(mint)
             log.warning(
-                "PRICE_FEED: stale PumpPortal price mint=%s age=%.1fs; "
-                "falling back to Jupiter polling",
+                "PRICE_FEED: stale PumpPortal price mint=%s age=%.1fs; triggering fail-closed handler",
                 mint[:16],
                 elapsed,
             )
             try:
                 await self._on_stale(mint)
-            except Exception as exc:  # A fallback failure must not break reconnecting.
-                log.warning("PRICE_FEED: Jupiter stale fallback failed mint=%s: %s", mint[:16], exc)
+            except Exception as exc:
+                log.error("PRICE_FEED: stale handler failed mint=%s: %s", mint[:16], exc)
 
 
 def _parse_price_update(raw: object) -> tuple[str, float] | None:

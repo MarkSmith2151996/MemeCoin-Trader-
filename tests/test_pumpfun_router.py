@@ -14,7 +14,8 @@ class _FakeJupiter:
     async def validate_direct_buy(self, mint: str, amount: float) -> None:
         self.calls.append("validate")
 
-    async def buy(self, mint: str, amount: float, slippage: int) -> Trade:
+    async def buy(self, mint: str, amount: float, slippage: int, *, prevalidated: bool = False) -> Trade:
+        assert prevalidated is True
         self.calls.append("buy")
         return Trade(
             mint_address=mint,
@@ -117,7 +118,7 @@ def test_sell_rechecks_curve_and_falls_back_when_graduated() -> None:
     asyncio.run(run())
 
 
-def test_direct_sell_verifies_wallet_balance_cleared() -> None:
+def test_direct_sell_defers_wallet_balance_cleanup() -> None:
     async def run() -> None:
         jupiter = _FakeJupiter()
         direct = _FakeDirect(active=True)
@@ -126,9 +127,8 @@ def test_direct_sell_verifies_wallet_balance_cleared() -> None:
         trade = await router.sell("mint", 42, 300)
 
         assert direct.calls == ["check", "SELL"]
-        assert jupiter.calls == ["verify_clear"]
+        assert jupiter.calls == []
         assert trade.mode == "live"
         assert trade.metadata["execution_path"] == "direct"
-        assert trade.metadata["token_balance_after"] == 0.0
 
     asyncio.run(run())

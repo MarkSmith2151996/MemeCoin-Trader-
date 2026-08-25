@@ -359,6 +359,210 @@ def test_pumpportal_runtime_starts_in_paper_mode(monkeypatch, tmp_path: Path) ->
     assert started.is_set()
 
 
+def test_pumpportal_stale_emergency_closes_paper_positions(monkeypatch, tmp_path: Path) -> None:
+    async def run() -> None:
+        db_path = tmp_path / "trades.db"
+        await init_db(db_path)
+        manager = PositionManager(db_path, load_settings(), strategy="B")
+        await manager.open_position(
+            Trade(
+                mint_address="stale-mint",
+                side="BUY",
+                amount_sol=0.01,
+                token_amount=100.0,
+                price_sol=0.0001,
+                mode="paper",
+            ),
+            None,
+        )
+
+        class FakeFeed:
+            def __init__(self, _held_mints, _on_price, on_stale) -> None:
+                self.on_stale = on_stale
+
+            async def run(self) -> None:
+                await self.on_stale("stale-mint")
+
+        class PaperAdapter:
+            mode = "paper"
+
+        class FakeAlerts:
+            messages: list[tuple[str, str, str]] = []
+
+            async def send(self, level: str, title: str, message: str) -> None:
+                self.messages.append((level, title, message))
+
+        alerts = FakeAlerts()
+
+        async def wait_forever(*_args, **_kwargs) -> None:
+            await asyncio.Event().wait()
+
+        monkeypatch.setattr(run_strategy_b, "PumpPortalPriceFeed", FakeFeed)
+        monkeypatch.setattr(run_strategy_b, "scan_loop", wait_forever)
+        monkeypatch.setattr(run_strategy_b, "monitor_loop", wait_forever)
+        monkeypatch.setattr(run_strategy_b, "snapshot_loop", wait_forever)
+        monkeypatch.setattr(run_strategy_b, "priority_fee_loop", wait_forever)
+        monkeypatch.setattr(
+            run_strategy_b.AlertManager,
+            "from_env",
+            classmethod(lambda _cls: alerts),
+        )
+
+        await run_strategy_b._run_runtime_until_stopped(
+            manager,
+            object(),
+            PaperAdapter(),
+            db_path,
+            object(),
+            [],
+            0.0,
+        )
+
+        assert await manager.get_all_open(mode="paper") == []
+        assert alerts.messages == [
+            ("critical", "Strategy B emergency close", "Reason: PumpPortal stale 15s\nPositions: stale-mint=0.0001 (closed)"),
+        ]
+        with sqlite3.connect(db_path) as connection:
+            event = connection.execute(
+                "SELECT event_type, reason FROM runtime_events",
+            ).fetchone()
+        assert event == ("emergency_close_all", "PumpPortal stale 15s")
+
+    asyncio.run(run())
+
+
+def test_monitor_worker_crash_emergency_closes_paper_positions(monkeypatch, tmp_path: Path) -> None:
+    async def run() -> None:
+        db_path = tmp_path / "trades.db"
+        await init_db(db_path)
+        manager = PositionManager(db_path, load_settings(), strategy="B")
+        await manager.open_position(
+            Trade(
+                mint_address="monitor-mint",
+                side="BUY",
+                amount_sol=0.01,
+                token_amount=100.0,
+                price_sol=0.0002,
+                mode="paper",
+            ),
+            None,
+        )
+
+        class FakeFeed:
+            def __init__(self, *_args) -> None:
+                pass
+
+            async def run(self) -> None:
+                await asyncio.Event().wait()
+
+        class PaperAdapter:
+            mode = "paper"
+
+        class FakeAlerts:
+            async def send(self, *_args) -> None:
+                pass
+
+        async def crash_monitor(*_args, **_kwargs) -> None:
+            raise RuntimeError("simulated monitor failure")
+
+        async def wait_forever(*_args, **_kwargs) -> None:
+            await asyncio.Event().wait()
+
+        monkeypatch.setattr(run_strategy_b, "PumpPortalPriceFeed", FakeFeed)
+        monkeypatch.setattr(run_strategy_b, "scan_loop", wait_forever)
+        monkeypatch.setattr(run_strategy_b, "monitor_loop", crash_monitor)
+        monkeypatch.setattr(run_strategy_b, "snapshot_loop", wait_forever)
+        monkeypatch.setattr(run_strategy_b, "priority_fee_loop", wait_forever)
+        monkeypatch.setattr(
+            run_strategy_b.AlertManager,
+            "from_env",
+            classmethod(lambda _cls: FakeAlerts()),
+        )
+
+        await run_strategy_b._run_runtime_until_stopped(
+            manager,
+            object(),
+            PaperAdapter(),
+            db_path,
+            object(),
+            [],
+            0.0,
+        )
+
+        assert await manager.get_all_open(mode="paper") == []
+        with sqlite3.connect(db_path) as connection:
+            reason = connection.execute("SELECT reason FROM runtime_events").fetchone()[0]
+        assert reason == "price monitor worker crashed: simulated monitor failure"
+
+    asyncio.run(run())
+
+
+def test_confirmed_live_sell_cleanup_does_not_block_monitor(tmp_path: Path) -> None:
+    async def run() -> None:
+        db_path = tmp_path / "trades.db"
+        await init_db(db_path)
+        manager = PositionManager(db_path, load_settings(), strategy="B")
+        await manager.open_position(
+            Trade(
+                mint_address="live-mint",
+                side="BUY",
+                amount_sol=0.01,
+                token_amount=100.0,
+                price_sol=0.0003,
+                mode="live",
+            ),
+            None,
+        )
+        position = (await manager.get_all_open(mode="live"))[0]
+        release_cleanup = asyncio.Event()
+
+        class DelayedCleanupAdapter:
+            mode = "live"
+
+            async def get_token_balance(self, _mint: str) -> float:
+                return 100.0
+
+            async def sell(self, mint: str, amount: float, *, slippage_bps: int) -> Trade:
+                return Trade(
+                    mint_address=mint,
+                    side="SELL",
+                    amount_sol=0.005,
+                    token_amount=amount,
+                    price_sol=0.00025,
+                    mode="live",
+                    status="confirmed",
+                )
+
+            async def verify_token_balance_cleared(self, _mint: str) -> float:
+                await release_cleanup.wait()
+                return 0.0
+
+        adapter = DelayedCleanupAdapter()
+        previous_mode = run_strategy_b.EXECUTION_MODE
+        run_strategy_b.EXECUTION_MODE = "live"
+        try:
+            result = await run_strategy_b._close_position(
+                manager,
+                position,
+                0.00025,
+                "hard_stop",
+                db_path,
+                adapter,
+                peak_price_sol=None,
+            )
+            assert result is not None
+            assert await manager.get_all_open(mode="live") != []
+            assert "live-mint" in run_strategy_b._selling_in_progress
+
+            release_cleanup.set()
+            await run_strategy_b._wait_for_inflight_sells(timeout_s=1)
+            assert await manager.get_all_open(mode="live") == []
+        finally:
+            run_strategy_b.EXECUTION_MODE = previous_mode
+
+    asyncio.run(run())
+
+
 def test_kill_script_and_watchdog_share_killswitch_contract() -> None:
     root = Path(__file__).resolve().parents[1]
     assert "/tmp/memecoin_killswitch" in (root / "scripts" / "kill_loop.sh").read_text()

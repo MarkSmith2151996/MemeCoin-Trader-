@@ -13,8 +13,8 @@ import uuid
 
 import pytest
 
-from src.chain.jupiter_swap import JupiterSwapQuote, JupiterSwapResult
 from src.chain.jupiter import SOL_MINT
+from src.chain.jupiter_swap import JupiterSwapQuote, JupiterSwapResult
 from src.core.config import load_settings
 from src.core.database import init_db
 from src.core.models import Position, PositionStatus, Side, Signal, SignalSource, SignalType, Trade
@@ -250,6 +250,33 @@ def test_breaker_corrupt_flag_treated_as_clear(tmp_path) -> None:
     flag = tmp_path / "cb.json"
     flag.write_text("not json {{{")
     breaker = CircuitBreaker(flag_path=flag)
+    assert breaker.is_tripped() is False
+
+
+def test_breaker_unreadable_flag_trips_in_live_mode(tmp_path, monkeypatch) -> None:
+    flag = tmp_path / "cb.json"
+    flag.write_text("{}")
+    breaker = CircuitBreaker(flag_path=flag)
+
+    def unreadable(_self, **_kwargs):
+        raise OSError("permission denied")
+
+    monkeypatch.setattr(type(flag), "read_text", unreadable)
+    state = breaker.status()
+
+    assert state.tripped is True
+    assert state.reason == "breaker_state_unreadable"
+
+
+def test_breaker_unreadable_flag_stays_clear_in_paper_mode(tmp_path, monkeypatch) -> None:
+    flag = tmp_path / "cb.json"
+    flag.write_text("{}")
+    breaker = CircuitBreaker(flag_path=flag, execution_mode="paper")
+
+    def unreadable(_self, **_kwargs):
+        raise OSError("permission denied")
+
+    monkeypatch.setattr(type(flag), "read_text", unreadable)
     assert breaker.is_tripped() is False
 
 

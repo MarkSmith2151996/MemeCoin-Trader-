@@ -64,9 +64,8 @@ class CircuitBreaker:
 
     The flag lives in ``data/circuit_breaker.json`` so the Strategy B process
     and the standalone kill switch / reset scripts observe the same state.
-    Missing or corrupt state is treated as clear (fail-open for reading,
-    fail-closed for buying only because a clear flag simply allows the normal
-    gates to run).
+    Missing and corrupt state is treated as clear. An unreadable existing flag
+    is treated as tripped in live mode, because its state is unknown.
     """
 
     def __init__(
@@ -74,8 +73,10 @@ class CircuitBreaker:
         *,
         flag_path: str | Path = DEFAULT_BREAKER_PATH,
         cooldown_seconds: int | None = None,
+        execution_mode: str = "live",
     ) -> None:
         self._path = Path(flag_path)
+        self._execution_mode = execution_mode.strip().lower()
         if cooldown_seconds is None:
             try:
                 cooldown_seconds = int(
@@ -93,7 +94,11 @@ class CircuitBreaker:
             raw = self._path.read_text(encoding="utf-8")
         except FileNotFoundError:
             return BreakerState(tripped=False)
-        except OSError:
+        except OSError as exc:
+            if self._execution_mode == "live":
+                log.error("CIRCUIT BREAKER flag %s unreadable — treating as tripped", self._path)
+                return BreakerState(tripped=True, reason="breaker_state_unreadable", error=str(exc))
+            log.warning("CIRCUIT BREAKER flag %s unreadable — paper mode treats it as clear", self._path)
             return BreakerState(tripped=False)
         try:
             data = json.loads(raw)
@@ -134,6 +139,8 @@ class CircuitBreaker:
             return False
         if last_error_at.tzinfo is None:
             last_error_at = last_error_at.replace(tzinfo=UTC)
+        # Status checks are non-blocking. The runtime's normal 100ms polling
+        # observes elapsed time instead of sleeping through the cooldown.
         elapsed = (datetime.now(UTC) - last_error_at).total_seconds()
         if elapsed < self._cooldown_seconds:
             return False
