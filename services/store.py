@@ -285,7 +285,9 @@ class MemecoinStore:
                     UPDATE memecoin.positions
                     SET status = 'closed', closed_at = NOW(), close_reason = $2,
                         close_price_sol = $3, realized_pnl_sol = $4,
-                        adjusted_pnl_sol = $4
+                        adjusted_pnl_sol = $4,
+                        peak_price_sol = GREATEST(COALESCE(peak_price_sol, 0), $5),
+                        trailing_armed = trailing_armed OR $6
                     WHERE id = $1 AND status = 'open'
                     RETURNING id
                     """,
@@ -293,6 +295,8 @@ class MemecoinStore:
                     close_reason,
                     close_price_sol,
                     realized_pnl_sol,
+                    float(position.get("peak_price_sol") or position["entry_price_sol"]),
+                    bool(position.get("trailing_armed")),
                 )
                 if closed_id is None:
                     raise RuntimeError(f"position {position['id']} is no longer open")

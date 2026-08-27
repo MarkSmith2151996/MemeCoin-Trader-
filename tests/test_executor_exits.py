@@ -150,12 +150,12 @@ def test_trailing_exit_uses_persisted_peak_and_arm_state(tmp_path: Path) -> None
         await executor.start()
         await executor.handle_price("mint", 0.000102)
 
-        assert store.marks == [("position-1", 0.000102, True)]
-        assert store.evaluations[-1]["source"] == "pumpportal"
-        assert store.evaluations[-1]["trigger_price_sol"] == 0.000102
+        assert store.marks == []
+        assert executor._positions["mint"]["peak_price_sol"] == 0.000102
+        assert executor._positions["mint"]["trailing_armed"] is True
         await executor.handle_price("mint", 0.000099)
         assert len(store.closed) == 1
-        assert store.closed[0]["close_price_sol"] == 0.000099
+        assert store.closed[0]["close_price_sol"] == pytest.approx(0.00009996)
         assert store.closed[0]["close_reason"] == "trailing_stop"
 
     asyncio.run(run())
@@ -182,7 +182,7 @@ def test_no_price_time_stop_closes_at_entry_with_correct_paper_proceeds(tmp_path
             mark_provider=FakeJupiterPriceProvider({}),
         )
         await executor.start()
-        await executor.run_cycle()
+        await executor._monitor_positions_once()
 
         assert len(store.closed) == 1
         closed = store.closed[0]
@@ -220,16 +220,17 @@ def test_mark_sla_closes_after_120_seconds_without_valid_mark(tmp_path: Path) ->
         )
         await executor.start()
         executor._last_valid_mark_at["sla-mint"] = time.monotonic() - 121
-        await executor.run_cycle()
+        await executor._monitor_positions_once()
 
         assert len(store.closed) == 1
         assert store.closed[0]["close_reason"] == "mark_sla_timeout"
         assert store.closed[0]["close_price_sol"] == 0.0001
+        assert store.closed[0]["realized_pnl_sol"] == 0.0
 
     asyncio.run(run())
 
 
-def test_paper_hard_stop_uses_trigger_mark_for_pnl_and_sell_proceeds(tmp_path: Path) -> None:
+def test_paper_hard_stop_uses_stop_level_for_pnl_and_sell_proceeds(tmp_path: Path) -> None:
     async def run() -> None:
         position = {
             "id": "position-hard-stop",
@@ -249,15 +250,16 @@ def test_paper_hard_stop_uses_trigger_mark_for_pnl_and_sell_proceeds(tmp_path: P
             halt_path=tmp_path / "halt",
         )
         await executor.start()
-        await executor.handle_price("hard-stop-mint", 0.000092)
+        await executor.handle_price("hard-stop-mint", 0.00007)
 
         closed = store.closed[0]
-        assert closed["close_price_sol"] == 0.000092
+        assert closed["close_price_sol"] == pytest.approx(0.000092)
         assert closed["realized_pnl_sol"] == pytest.approx(-0.0016)
         trade = closed["trade"]
         assert trade["amount_sol"] == pytest.approx(0.0184)
-        assert trade["price_sol"] == 0.000092
+        assert trade["price_sol"] == pytest.approx(0.000092)
         assert trade["metadata"]["mark_source"] == "pumpportal"
+        assert trade["metadata"]["trigger_price_sol"] == 0.00007
 
     asyncio.run(run())
 
@@ -314,11 +316,43 @@ def test_quiet_position_uses_jupiter_mark_for_exit_evaluation(tmp_path: Path) ->
             mark_provider=mark_provider,
         )
         await executor.start()
-        await executor.run_cycle()
+        await executor._refresh_quiet_position_marks()
+        await executor._monitor_positions_once()
 
         assert mark_provider.calls == ["quiet-mint"]
-        assert store.marks == [("position-quiet", 0.000102, True)]
-        assert store.evaluations[-1]["source"] == "jupiter"
+        assert executor._positions["quiet-mint"]["peak_price_sol"] == 0.000102
+        assert store.evaluations == []
         assert store.closed == []
+
+    asyncio.run(run())
+
+
+def test_paper_take_profit_uses_configured_level_not_crashed_price(tmp_path: Path) -> None:
+    async def run() -> None:
+        position = {
+            "id": "position-take-profit",
+            "mint_address": "take-profit-mint",
+            "entry_price_sol": 0.0001,
+            "amount_sol": 0.02,
+            "token_amount": 200,
+            "peak_price_sol": 0.0001,
+            "trailing_armed": False,
+            "opened_at": datetime.now(UTC),
+        }
+        store = FakeStore(position)
+        executor = StrategyExecutor(
+            store,
+            FakeAdapter(),
+            heartbeat_path=tmp_path / "heartbeat",
+            halt_path=tmp_path / "halt",
+        )
+        await executor.start()
+        await executor.handle_price("take-profit-mint", 0.0003)
+
+        closed = store.closed[0]
+        assert closed["close_reason"] == "take_profit"
+        assert closed["close_price_sol"] == pytest.approx(0.00025)
+        assert closed["realized_pnl_sol"] == pytest.approx(0.03)
+        assert closed["trade"]["amount_sol"] == pytest.approx(0.05)
 
     asyncio.run(run())

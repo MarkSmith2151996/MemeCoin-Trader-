@@ -35,6 +35,10 @@ from src.monitoring.alerts import AlertManager
 log = logging.getLogger("memecoin.executor")
 EXECUTOR_LOCK_PATH = Path("/tmp/memecoin_executor.lock")
 _executor_lock_handle: Any | None = None
+MONITOR_INTERVAL_SECONDS = 0.1
+JUPITER_FALLBACK_RPS = 7.0
+JUPITER_FALLBACK_INTERVAL_SECONDS = 1 / JUPITER_FALLBACK_RPS
+MIN_JUPITER_POSITION_INTERVAL_SECONDS = 0.25
 
 
 class ExecutorStore(Protocol):
@@ -119,12 +123,13 @@ class StrategyExecutor:
         self._mark_provider = mark_provider or JupiterPriceProvider()
         self._alerts = alert_manager or AlertManager.from_env()
         self._positions: dict[str, dict[str, Any]] = {}
+        self._cached_marks: dict[str, tuple[float | None, str, datetime, str]] = {}
         self._last_pumpportal_price_at: dict[str, float] = {}
         self._last_jupiter_fallback_at: dict[str, float] = {}
+        self._last_jupiter_request_at = 0.0
         self._last_valid_mark_at: dict[str, float] = {}
         self._mark_sla_warned: set[str] = set()
         self._mint_locks: dict[str, asyncio.Lock] = {}
-        self._price_tasks: set[asyncio.Task[None]] = set()
         self._gates: GateConfig | None = None
         self._exits: dict[str, float] = {}
         self._last_cycle_monotonic: float | None = None
@@ -159,6 +164,8 @@ class StrategyExecutor:
         """Run until a failure requires permanent manual intervention."""
 
         feed_task: asyncio.Task[None] | None = None
+        monitor_task: asyncio.Task[None] | None = None
+        refresh_task: asyncio.Task[None] | None = None
         try:
             await self.start()
             feed = PumpPortalPriceFeed(
@@ -167,8 +174,14 @@ class StrategyExecutor:
                 self._on_feed_stale,
             )
             feed_task = asyncio.create_task(feed.run(), name="memecoin-pumpportal-price-feed")
+            monitor_task = asyncio.create_task(
+                self._monitor_loop(), name="memecoin-exit-monitor"
+            )
+            refresh_task = asyncio.create_task(
+                self._price_refresh_loop(), name="memecoin-jupiter-price-refresh"
+            )
             while True:
-                self._raise_if_fatal(feed_task)
+                self._raise_if_fatal(feed_task, monitor_task, refresh_task)
                 started = time.monotonic()
                 await self.run_cycle()
                 self._last_cycle_monotonic = time.monotonic()
@@ -181,11 +194,11 @@ class StrategyExecutor:
             await self._emergency_close_all(str(exc))
             raise SystemExit(42) from exc
         finally:
-            if feed_task is not None:
-                feed_task.cancel()
-                await asyncio.gather(feed_task, return_exceptions=True)
-            if self._price_tasks:
-                await asyncio.gather(*self._price_tasks, return_exceptions=True)
+            tasks = [task for task in (feed_task, monitor_task, refresh_task) if task is not None]
+            for task in tasks:
+                task.cancel()
+            if tasks:
+                await asyncio.gather(*tasks, return_exceptions=True)
             try:
                 await self._adapter.close()
             except Exception as exc:
@@ -205,7 +218,6 @@ class StrategyExecutor:
         if self._gates is None:
             raise RuntimeError("executor was not started")
         self._check_live_circuit_breaker()
-        await self._refresh_quiet_position_marks()
         if (
             self._mode == "live"
             and self._last_reconciliation_monotonic is not None
@@ -232,13 +244,14 @@ class StrategyExecutor:
     async def handle_price(self, mint_address: str, price_sol: float) -> None:
         """Evaluate one streamed mark; exposed for deterministic paper verification."""
 
-        await self._on_price(
+        self._cache_mark(
             mint_address,
             price_sol,
             source="pumpportal",
             mark_timestamp=datetime.now(UTC),
             diagnostic="stream_mark",
         )
+        await self._monitor_positions_once()
 
     async def _held_mints(self) -> set[str]:
         return set(self._positions)
@@ -248,155 +261,154 @@ class StrategyExecutor:
         if mint_address not in self._positions:
             return
         self._last_pumpportal_price_at[mint_address] = time.monotonic()
-        task = asyncio.create_task(
-            self._on_price(
-                mint_address,
-                price_sol,
-                source="pumpportal",
-                mark_timestamp=datetime.now(UTC),
-                diagnostic="stream_mark",
-            ),
-            name=f"memecoin-price-{mint_address}",
+        self._cache_mark(
+            mint_address,
+            price_sol,
+            source="pumpportal",
+            mark_timestamp=datetime.now(UTC),
+            diagnostic="stream_mark",
         )
-        self._price_tasks.add(task)
-        task.add_done_callback(self._on_price_task_done)
-
-    async def _on_price(
-        self,
-        mint_address: str,
-        price_sol: float,
-        *,
-        source: str,
-        mark_timestamp: datetime,
-        diagnostic: str,
-    ) -> None:
-        async with self._lock_for(mint_address):
-            await self._on_price_locked(
-                mint_address,
-                price_sol,
-                source=source,
-                mark_timestamp=mark_timestamp,
-                diagnostic=diagnostic,
-            )
-
-    async def _on_price_locked(
-        self,
-        mint_address: str,
-        price_sol: float,
-        *,
-        source: str,
-        mark_timestamp: datetime,
-        diagnostic: str,
-    ) -> None:
-        try:
-            if price_sol <= 0:
-                raise ValueError(f"invalid non-positive price for {mint_address}")
-            position = self._positions.get(mint_address)
-            if position is None:
-                return
-            self._last_valid_mark_at[mint_address] = time.monotonic()
-            self._mark_sla_warned.discard(mint_address)
-            entry = float(position["entry_price_sol"])
-            previous_peak = max(float(position.get("peak_price_sol") or entry), entry)
-            peak = max(previous_peak, price_sol)
-            arm_ratio = self._exits["trailing_arm_pct"] / 100
-            # Decimal market prices make an exact percentage boundary susceptible
-            # to binary rounding; never leave a configured threshold unarmed.
-            armed = bool(position.get("trailing_armed")) or (peak / entry >= arm_ratio + 1 - 1e-12)
-            if peak > previous_peak or armed != bool(position.get("trailing_armed")):
-                await self._store.update_position_mark(str(position["id"]), peak, armed)
-                position["peak_price_sol"] = peak
-                position["trailing_armed"] = armed
-            reason = self._exit_reason(position, price_sol)
-            await self._store.record_exit_evaluation(
-                str(position["id"]),
-                mint_address,
-                source=source,
-                mark_timestamp=mark_timestamp,
-                trigger_price_sol=price_sol,
-                usable=True,
-                diagnostic=diagnostic,
-                exit_reason=reason,
-            )
-            if reason is not None:
-                await self._close_position(
-                    position,
-                    price_sol,
-                    reason,
-                    mark_source=source,
-                    mark_timestamp=mark_timestamp,
-                    mark_diagnostic=diagnostic,
-                    lock_held=True,
-                )
-        except Exception as exc:
-            self._fatal_reason = f"price monitor failure: {exc}"
-            raise
 
     async def _on_feed_stale(self) -> None:
         self._fatal_reason = "PumpPortal global feed stale >15s"
 
-    async def _refresh_quiet_position_marks(self) -> None:
-        """Use Jupiter marks when a held token has no recent PumpPortal trade."""
-        now = time.monotonic()
-        interval = max(self._cycle_seconds, 1.0)
-        quiet_mints = [
-            mint
-            for mint in self._positions
-            if now - self._last_pumpportal_price_at.get(mint, 0.0) >= interval
-            and now - self._last_jupiter_fallback_at.get(mint, 0.0) >= interval
-        ]
-        if not quiet_mints:
-            return
-
-        async def refresh(mint: str) -> None:
-            self._last_jupiter_fallback_at[mint] = now
-            mark = await self._get_mark(mint)
-            price_sol = _positive_float(mark.price_sol)
-            if price_sol is not None:
-                await self._on_price(
-                    mint,
-                    price_sol,
-                    source=self._mark_provider.name,
-                    mark_timestamp=datetime.now(UTC),
-                    diagnostic=mark.reason,
-                )
-            else:
-                await self._on_mark_unavailable(
-                    mint,
-                    source=self._mark_provider.name,
-                    mark_timestamp=datetime.now(UTC),
-                    diagnostic=mark.reason,
-                )
-
-        await asyncio.gather(*(refresh(mint) for mint in quiet_mints))
-
-    async def _on_mark_unavailable(
+    def _cache_mark(
         self,
         mint_address: str,
+        price_sol: float | None,
         *,
         source: str,
         mark_timestamp: datetime,
         diagnostic: str,
     ) -> None:
-        async with self._lock_for(mint_address):
-            await self._on_mark_unavailable_locked(
+        """Accept price producers without performing database work on their path."""
+
+        price = _positive_float(price_sol)
+        self._cached_marks[mint_address] = (price, source, mark_timestamp, diagnostic)
+        if price is not None:
+            self._last_valid_mark_at[mint_address] = time.monotonic()
+            self._mark_sla_warned.discard(mint_address)
+
+    async def _monitor_loop(self) -> None:
+        """Evaluate cached marks independently of the one-second discovery loop."""
+
+        log.info("exit monitor started interval_ms=%d", int(MONITOR_INTERVAL_SECONDS * 1000))
+        while True:
+            started = time.monotonic()
+            await self._monitor_positions_once()
+            await asyncio.sleep(
+                max(0.0, MONITOR_INTERVAL_SECONDS - (time.monotonic() - started))
+            )
+
+    async def _price_refresh_loop(self) -> None:
+        """Refresh quiet holdings under the Jupiter budget; never evaluates exits."""
+
+        while True:
+            await self._refresh_quiet_position_marks()
+            await asyncio.sleep(0.05)
+
+    async def _refresh_quiet_position_marks(self) -> None:
+        """Refresh one quiet mint at a time, preserving seven RPS for exit marks."""
+
+        now = time.monotonic()
+        if now - self._last_jupiter_request_at < JUPITER_FALLBACK_INTERVAL_SECONDS:
+            return
+        position_interval = max(
+            MIN_JUPITER_POSITION_INTERVAL_SECONDS,
+            len(self._positions) / JUPITER_FALLBACK_RPS,
+        )
+        quiet_mints = [
+            mint
+            for mint in self._positions
+            if now - self._last_pumpportal_price_at.get(mint, 0.0)
+            >= position_interval
+            and now - self._last_jupiter_fallback_at.get(mint, 0.0)
+            >= position_interval
+        ]
+        if not quiet_mints:
+            return
+        mint = min(quiet_mints, key=lambda item: self._last_jupiter_fallback_at.get(item, 0.0))
+        self._last_jupiter_fallback_at[mint] = now
+        self._last_jupiter_request_at = now
+        mark = await self._get_mark(mint)
+        self._cache_mark(
+            mint,
+            mark.price_sol,
+            source=self._mark_provider.name,
+            mark_timestamp=datetime.now(UTC),
+            diagnostic=mark.reason,
+        )
+
+    async def _monitor_positions_once(self) -> None:
+        """Perform only in-memory comparisons until an exit is triggered."""
+
+        for mint in list(self._positions):
+            async with self._lock_for(mint):
+                position = self._positions.get(mint)
+                if position is not None:
+                    await self._monitor_position_locked(mint, position)
+
+    async def _monitor_position_locked(
+        self,
+        mint_address: str,
+        position: dict[str, Any],
+    ) -> None:
+        cached = self._cached_marks.get(mint_address)
+        if cached is None or cached[0] is None:
+            source, mark_timestamp, diagnostic = (
+                cached[1:]
+                if cached is not None
+                else ("cache", datetime.now(UTC), "no_cached_mark")
+            )
+            await self._monitor_unmarked_position_locked(
                 mint_address,
+                position,
                 source=source,
                 mark_timestamp=mark_timestamp,
                 diagnostic=diagnostic,
             )
+            return
 
-    async def _on_mark_unavailable_locked(
+        current_price, source, mark_timestamp, diagnostic = cached
+        entry = float(position["entry_price_sol"])
+        previous_peak = max(float(position.get("peak_price_sol") or entry), entry)
+        peak = max(previous_peak, current_price)
+        arm_ratio = 1 + self._exits["trailing_arm_pct"] / 100
+        armed = bool(position.get("trailing_armed")) or peak / entry >= arm_ratio - 1e-12
+        position["peak_price_sol"] = peak
+        position["trailing_armed"] = armed
+        reason = self._exit_reason(position, current_price)
+        if reason is None:
+            return
+        await self._store.record_exit_evaluation(
+            str(position["id"]),
+            mint_address,
+            source=source,
+            mark_timestamp=mark_timestamp,
+            trigger_price_sol=current_price,
+            usable=True,
+            diagnostic=diagnostic,
+            exit_reason=reason,
+        )
+        await self._close_position(
+            position,
+            current_price,
+            reason,
+            mark_source=source,
+            mark_timestamp=mark_timestamp,
+            mark_diagnostic=diagnostic,
+            lock_held=True,
+        )
+
+    async def _monitor_unmarked_position_locked(
         self,
         mint_address: str,
+        position: dict[str, Any],
         *,
         source: str,
         mark_timestamp: datetime,
         diagnostic: str,
     ) -> None:
-        position = self._positions.get(mint_address)
-        if position is None:
-            return
         opened_at = position.get("opened_at")
         age_minutes = (
             (datetime.now(UTC) - opened_at).total_seconds() / 60
@@ -420,7 +432,8 @@ class StrategyExecutor:
                     mint_address[:16],
                     no_mark_seconds,
                 )
-
+        if reason is None:
+            return
         await self._store.record_exit_evaluation(
             str(position["id"]),
             mint_address,
@@ -431,16 +444,15 @@ class StrategyExecutor:
             diagnostic=diagnostic,
             exit_reason=reason,
         )
-        if reason is not None:
-            await self._close_position(
-                position,
-                float(position["entry_price_sol"]),
-                reason,
-                mark_source=source,
-                mark_timestamp=mark_timestamp,
-                mark_diagnostic=diagnostic,
-                lock_held=True,
-            )
+        await self._close_position(
+            position,
+            float(position["entry_price_sol"]),
+            reason,
+            mark_source=source,
+            mark_timestamp=mark_timestamp,
+            mark_diagnostic=diagnostic,
+            lock_held=True,
+        )
 
     def _exit_reason(self, position: dict[str, Any], current_price: float) -> str | None:
         entry = float(position["entry_price_sol"])
@@ -587,7 +599,7 @@ class StrategyExecutor:
         token_amount = float(position["token_amount"])
         trigger_timestamp = mark_timestamp or datetime.now(UTC)
         if self._mode == "paper":
-            close_price = fallback_price_sol
+            close_price = self._paper_exit_price(position, fallback_price_sol, reason)
             trade = Trade(
                 mint_address=mint,
                 side=Side.SELL,
@@ -637,6 +649,7 @@ class StrategyExecutor:
             realized_pnl_sol=realized_pnl,
         )
         self._positions.pop(mint, None)
+        self._cached_marks.pop(mint, None)
         self._last_pumpportal_price_at.pop(mint, None)
         self._last_jupiter_fallback_at.pop(mint, None)
         self._last_valid_mark_at.pop(mint, None)
@@ -651,13 +664,23 @@ class StrategyExecutor:
             self._mint_locks[mint_address] = lock
         return lock
 
-    def _on_price_task_done(self, task: asyncio.Task[None]) -> None:
-        self._price_tasks.discard(task)
-        if task.cancelled():
-            return
-        exception = task.exception()
-        if exception is not None:
-            self._fatal_reason = f"price task failure: {exception}"
+    def _paper_exit_price(
+        self,
+        position: dict[str, Any],
+        fallback_price_sol: float,
+        reason: str,
+    ) -> float:
+        """Mirror fixed-level backtest fills while leaving live fills untouched."""
+
+        entry = float(position["entry_price_sol"])
+        if reason == "hard_stop":
+            return entry * (1 - self._exits["hard_stop_pct"] / 100)
+        if reason == "take_profit":
+            return entry * (1 + self._exits["take_profit_pct"] / 100)
+        if reason == "trailing_stop":
+            peak = max(float(position.get("peak_price_sol") or entry), entry)
+            return peak * (1 - self._exits["trailing_stop_pct"] / 100)
+        return fallback_price_sol
 
     async def _check_live_entry_guardrails(self, amount_sol: float) -> None:
         settings = _live_settings()
@@ -731,12 +754,22 @@ class StrategyExecutor:
         if checker():
             raise FailClosed("live circuit breaker is tripped")
 
-    def _raise_if_fatal(self, feed_task: asyncio.Task[None]) -> None:
+    def _raise_if_fatal(
+        self,
+        feed_task: asyncio.Task[None],
+        *background_tasks: asyncio.Task[None],
+    ) -> None:
         if self._fatal_reason:
             raise FailClosed(self._fatal_reason)
         if feed_task.done():
             exception = feed_task.exception()
             raise FailClosed(f"PumpPortal monitor stopped: {exception or 'unexpected completion'}")
+        for task in background_tasks:
+            if task.done():
+                exception = task.exception()
+                raise FailClosed(
+                    f"{task.get_name()} stopped: {exception or 'unexpected completion'}"
+                )
 
     def _validate_exit_config(self) -> None:
         required = {
