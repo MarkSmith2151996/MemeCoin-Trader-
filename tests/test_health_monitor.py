@@ -8,10 +8,11 @@ import subprocess
 from scripts.health_monitor import CheckResult, HealthMonitor
 
 
-def test_run_cycle_restarts_each_failed_component(monkeypatch):
+def test_run_cycle_restarts_each_failed_component(monkeypatch, tmp_path):
     monitor = HealthMonitor(sleep=lambda _: None)
     reported = []
 
+    monkeypatch.setattr("scripts.health_monitor.STRATEGY_B_HALT_PATH", tmp_path / "no-halt")
     monkeypatch.setattr(monitor, "check_chrome", lambda: CheckResult(True, "ok"))
     monkeypatch.setattr(monitor, "check_browser_pc", lambda: CheckResult(True, "ok"))
     monkeypatch.setattr(
@@ -24,6 +25,26 @@ def test_run_cycle_restarts_each_failed_component(monkeypatch):
 
     assert not monitor.run_cycle()
     assert reported == [("Strategy B", "missing", True)]
+
+
+def test_halt_file_prevents_all_automatic_restarts(monkeypatch, tmp_path) -> None:
+    halt_path = tmp_path / "strategy_b_halted"
+    halt_path.write_text('{"reason":"test"}\n')
+    monitor = HealthMonitor(sleep=lambda _: None)
+    restart_attempts = []
+
+    monkeypatch.setattr("scripts.health_monitor.STRATEGY_B_HALT_PATH", halt_path)
+    monkeypatch.setattr(monitor, "restart_strategy_b", lambda: restart_attempts.append("strategy"))
+    monkeypatch.setattr(monitor, "restart_chrome", lambda: restart_attempts.append("chrome"))
+    monkeypatch.setattr(monitor, "restart_browser_pc", lambda: restart_attempts.append("browser"))
+    monkeypatch.setattr(
+        monitor,
+        "restart_telegram_bot",
+        lambda: restart_attempts.append("telegram"),
+    )
+
+    assert not monitor.run_cycle()
+    assert restart_attempts == []
 
 
 def test_telegram_alert_uses_direct_curl(monkeypatch, tmp_path):

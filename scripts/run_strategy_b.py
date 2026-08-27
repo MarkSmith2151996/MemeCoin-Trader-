@@ -90,12 +90,15 @@ import asyncio
 import fcntl
 import json
 import logging
+import math
 import os
 import signal
 import statistics
 import sys
+import tempfile
 import time
 from collections import deque
+from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
@@ -129,6 +132,7 @@ from src.execution.paper import PaperExecutionAdapter
 from src.execution.position_reconciliation import reconcile_positions
 from src.execution.price_provider import JupiterPriceProvider
 from src.execution.pumpportal_price import PumpPortalPriceFeed
+from src.execution.safety_controls import CircuitBreaker
 from src.monitoring.alerts import AlertManager, send_imessage
 from src.monitoring.position_snapshots import snapshot_loop
 from src.risk.rugcheck import RugCheckClient, RugCheckResult
@@ -223,6 +227,8 @@ EXECUTION_MODE = "paper"  # set at startup from .env
 # STRATEGY_B_SCAN_INTERVAL in .env.
 SCAN_INTERVAL = int(os.environ.get("STRATEGY_B_SCAN_INTERVAL", "1"))
 MONITOR_INTERVAL_S = 0.1
+MONITOR_HEARTBEAT_TIMEOUT_S = 30.0
+MONITOR_HEARTBEAT_WATCHDOG_INTERVAL_S = 1.0
 LIVE_SAFETY_CHECK_INTERVAL_S = 300
 FAST_POLL_DROP_PCT = 0.05
 # MT-566: per-mint throttle for candidate_log inserts and SCREEN log lines
@@ -294,6 +300,7 @@ HOLDER_TIERS = [
 
 DB_PATH = Path("data/trades.db")
 STRATEGY_B_LOCK_PATH = Path("/tmp/strategy_b.lock")
+STRATEGY_B_HALT_PATH = Path("/tmp/strategy_b_halted")
 _strategy_b_lock_handle = None
 
 # MT-589: single-writer logging. The watchdog starts this script with
@@ -377,6 +384,7 @@ _rugcheck_cache: dict[str, tuple[float, RugCheckResult]] = {}
 _rugcheck_cache_hits = 0
 _rugcheck_cache_misses = 0
 peak_prices: dict[str, float] = {}  # mint -> highest price seen
+monitor_heartbeat_monotonic: float | None = None
 
 # ── MT-560 latency telemetry state ────────────────────────────────────
 # Discovery lag: first wall-clock sighting of each mint in a Jupiter API
@@ -1532,6 +1540,7 @@ async def monitor_positions(
 ) -> bool:
     """Re-mark open positions and close on stops; True if any position is in
     the danger zone (below 95% of entry)."""
+    global monitor_heartbeat_monotonic
     position_mode = _adapter_mode(adapter)
     danger = False
     positions = await manager.get_all_open(mode=position_mode)
@@ -1552,7 +1561,11 @@ async def monitor_positions(
                 "ZOMBIE CLOSE mint=%s entry_trade=%s token_amount=%s \u2014 closing 0-token position to free slot",
                 pos.mint_address[:16], pos.entry_trade_id[:8], pos.token_amount,
             )
-            await manager.close_position(pos.mint_address, mode=position_mode)
+            await manager.close_position(
+                pos.mint_address,
+                mode=position_mode,
+                peak_price_sol=peak_prices.pop(pos.mint_address, pos.peak_price_sol),
+            )
             continue
         current_price = (
             price_overrides[pos.mint_address]
@@ -1575,7 +1588,7 @@ async def monitor_positions(
                     pos.mint_address[:16], age_min,
                 )
                 close_price = pos.entry_price_sol
-                peak = peak_prices.pop(pos.mint_address, None)
+                peak = peak_prices.pop(pos.mint_address, pos.peak_price_sol)
                 closed_result = await _close_position(
                     manager, pos, close_price, "time_stop", db_path, adapter, peak_price_sol=peak,
                 )
@@ -1591,9 +1604,19 @@ async def monitor_positions(
 
         entry = pos.entry_price_sol if pos.entry_price_sol > 0 else current_price
 
-        prev_peak = peak_prices.get(pos.mint_address, entry)
+        persisted_peak = (
+            pos.peak_price_sol
+            if pos.peak_price_sol and pos.peak_price_sol > 0
+            else entry
+        )
+        prev_peak = max(peak_prices.get(pos.mint_address, entry), persisted_peak)
         peak = max(prev_peak, current_price)
-        peak_prices[pos.mint_address] = peak
+        if peak_prices.get(pos.mint_address) != peak:
+            peak_prices[pos.mint_address] = peak
+        if pos.peak_price_sol != peak:
+            update_peak_price = getattr(manager, "update_peak_price", None)
+            if update_peak_price is not None:
+                await update_peak_price(pos.mint_address, peak, mode=position_mode)
 
         close_reason = None
         close_price = current_price
@@ -1616,7 +1639,7 @@ async def monitor_positions(
             close_reason = "time_stop"
 
         if close_reason:
-            peak = peak_prices.get(pos.mint_address)
+            peak = peak_prices.get(pos.mint_address, pos.peak_price_sol)
             peak_prices.pop(pos.mint_address, None)
             closed_result = await _close_position(
                 manager, pos, close_price, close_reason, db_path, adapter, peak_price_sol=peak,
@@ -1650,6 +1673,7 @@ async def monitor_positions(
         elif current_price < entry * (1.0 - FAST_POLL_DROP_PCT):
             danger = True
 
+    monitor_heartbeat_monotonic = time.monotonic()
     return danger
 
 
@@ -1657,9 +1681,11 @@ async def _run_live_safety_checks(
     manager: PositionManager,
     adapter: ExecutionAdapter,
     wallet_balance_floor_sol: float,
-) -> None:
+) -> str | None:
     if adapter.mode != "live":
-        return
+        return None
+
+    failures: list[str] = []
 
     report = await reconcile_positions(
         manager,
@@ -1690,11 +1716,12 @@ async def _run_live_safety_checks(
             mint=first_mismatch.mint_address if first_mismatch is not None else None,
             reason="position_reconciliation",
         )
+        failures.append("position reconciliation mismatch")
 
     sol_balance = await adapter.get_sol_balance()  # type: ignore[attr-defined]
     if sol_balance is None:
         log.error("WALLET_BALANCE unavailable")
-        return
+        return "; ".join(failures) or None
     log.info("WALLET_BALANCE sol=%.4f", sol_balance)
     if sol_balance < wallet_balance_floor_sol:
         error = (
@@ -1706,6 +1733,9 @@ async def _run_live_safety_checks(
             error=error,
             reason="low_wallet_balance",
         )
+        failures.append("low wallet balance")
+
+    return "; ".join(failures) or None
 
 
 async def _close_position(
@@ -2443,6 +2473,29 @@ async def monitor_loop(
         await asyncio.sleep(max(0.0, MONITOR_INTERVAL_S - elapsed))
 
 
+async def _hydrate_peak_prices(manager: PositionManager, mode: str) -> dict[str, float]:
+    """Restore trailing-stop highs before the monitor begins evaluating prices."""
+    peak_prices.clear()
+    for position in await manager.get_all_open(mode=mode):
+        peak = position.peak_price_sol
+        if isinstance(peak, (int, float)) and math.isfinite(peak) and peak > 0:
+            peak_prices[position.mint_address] = float(peak)
+    return dict(peak_prices)
+
+
+async def _monitor_heartbeat_watchdog(
+    on_stale: Callable[[str], Awaitable[None]],
+) -> None:
+    """Halt when a monitor pass has not completed within the exit-system SLA."""
+    while True:
+        await asyncio.sleep(MONITOR_HEARTBEAT_WATCHDOG_INTERVAL_S)
+        heartbeat = monitor_heartbeat_monotonic
+        age = float("inf") if heartbeat is None else time.monotonic() - heartbeat
+        if age > MONITOR_HEARTBEAT_TIMEOUT_S:
+            await on_stale(f"price monitor heartbeat stale {age:.1f}s")
+            return
+
+
 async def priority_fee_loop(interval_s: float = 30.0) -> None:
     """MT-588: keep the dynamic priority fee warm and visible in the log.
 
@@ -2461,13 +2514,22 @@ async def live_safety_loop(
     adapter: ExecutionAdapter,
     wallet_balance_floor_sol: float,
     interval_s: float = LIVE_SAFETY_CHECK_INTERVAL_S,
+    on_failure: Callable[[str], Awaitable[None]] | None = None,
 ) -> None:
     """Periodically reconcile live wallet holdings and the SOL reserve."""
     while True:
         try:
-            await _run_live_safety_checks(manager, adapter, wallet_balance_floor_sol)
+            failure = await _run_live_safety_checks(manager, adapter, wallet_balance_floor_sol)
         except Exception as exc:
-            log.error("LIVE SAFETY CHECK failed: %s", exc, exc_info=True)
+            log.critical("LIVE SAFETY CHECK failed: %s", exc, exc_info=True)
+            if on_failure is not None:
+                await on_failure(f"live safety check crashed: {exc}")
+                return
+            raise
+        if failure is not None:
+            if on_failure is not None:
+                await on_failure(f"live safety check failed: {failure}")
+            return
         await asyncio.sleep(interval_s)
 
 
@@ -2498,6 +2560,54 @@ async def _wait_for_inflight_sells(timeout_s: float = 30.0) -> None:
         )
 
 
+def _write_strategy_b_halt(reason: str) -> dict[str, str]:
+    """Atomically persist an operator-cleared-only runtime halt marker."""
+    payload = {
+        "halted_at": datetime.now(UTC).isoformat(),
+        "reason": reason,
+    }
+    fd, temporary_path = tempfile.mkstemp(
+        dir=str(STRATEGY_B_HALT_PATH.parent),
+        prefix=f".{STRATEGY_B_HALT_PATH.name}.",
+        suffix=".tmp",
+    )
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            json.dump(payload, handle, sort_keys=True)
+            handle.write("\n")
+        os.replace(temporary_path, STRATEGY_B_HALT_PATH)
+    except BaseException:
+        try:
+            os.unlink(temporary_path)
+        except OSError:
+            pass
+        raise
+    return payload
+
+
+def _circuit_breaker_failure_reason() -> str | None:
+    """Return a fail-closed reason when the shared live breaker is tripped."""
+    state = CircuitBreaker().status()
+    if not state.tripped:
+        return None
+    parts = [state.reason or "unknown reason"]
+    if state.mint:
+        parts.append(f"mint={state.mint}")
+    return "circuit breaker tripped: " + ", ".join(parts)
+
+
+async def _circuit_breaker_watchdog(
+    on_failure: Callable[[str], Awaitable[None]],
+) -> None:
+    """Escalate every live circuit-breaker trip into a full runtime halt."""
+    while True:
+        reason = _circuit_breaker_failure_reason()
+        if reason is not None:
+            await on_failure(reason)
+            return
+        await asyncio.sleep(MONITOR_HEARTBEAT_WATCHDOG_INTERVAL_S)
+
+
 async def _emergency_close_all(
     manager: PositionManager,
     adapter: ExecutionAdapter,
@@ -2510,6 +2620,19 @@ async def _emergency_close_all(
     positions = await manager.get_all_open(mode=adapter.mode)
 
     async def close_one(pos) -> dict[str, object]:
+        peak = peak_prices.pop(pos.mint_address, pos.peak_price_sol)
+        if adapter.mode == "paper" and pos.entry_price_sol <= 0:
+            closed = await manager.close_position(
+                pos.mint_address,
+                0.0,
+                mode="paper",
+                peak_price_sol=peak,
+            )
+            return {
+                "mint": pos.mint_address,
+                "status": "closed" if closed is not None else "failed",
+                "fill_price_sol": 0.0,
+            }
         result = await _close_position(
             manager,
             pos,
@@ -2517,7 +2640,7 @@ async def _emergency_close_all(
             "emergency_close",
             db_path,
             adapter,
-            peak_price_sol=peak_prices.pop(pos.mint_address, None),
+            peak_price_sol=peak,
             force_jupiter=adapter.mode == "live",
         )
         if result is None:
@@ -2547,11 +2670,22 @@ async def _emergency_close_all(
     except Exception as exc:
         log.critical("EMERGENCY CLOSE event persistence failed: %s", exc, exc_info=True)
 
+    try:
+        halt = _write_strategy_b_halt(reason)
+    except Exception as exc:
+        log.critical("EMERGENCY CLOSE halt persistence failed: %s", exc, exc_info=True)
+        halt = None
+
     fills = "; ".join(
         f"{str(detail['mint'])[:16]}={detail['fill_price_sol']} ({detail['status']})"
         for detail in details
     ) or "no open positions"
-    message = f"Reason: {reason}\nPositions: {fills}"
+    halt_detail = (
+        f"Halt: {STRATEGY_B_HALT_PATH} at {halt['halted_at']}"
+        if halt is not None
+        else f"Halt: failed to write {STRATEGY_B_HALT_PATH}"
+    )
+    message = f"Reason: {reason}\nPositions: {fills}\n{halt_detail}"
     log.critical("EMERGENCY CLOSE ALL reason=%s positions=%s", reason, fills)
     try:
         await AlertManager.from_env().send("critical", "Strategy B emergency close", message)
@@ -2627,8 +2761,9 @@ async def _run_runtime_until_stopped(
     single_trade: bool = False,
 ) -> None:
     """Run Strategy B workers until NSSM or the operator requests shutdown."""
-    global _shutting_down
+    global _shutting_down, monitor_heartbeat_monotonic
     _shutting_down = False
+    monitor_heartbeat_monotonic = time.monotonic()
     stop_event = asyncio.Event()
     single_trade_complete = asyncio.Event() if single_trade else None
     latest_pumpportal_prices: dict[str, float] = {}
@@ -2646,6 +2781,39 @@ async def _run_runtime_until_stopped(
         await _emergency_close_all(manager, adapter, db_path, reason)
         emergency_event.set()
 
+    try:
+        hydrated_peaks = await _hydrate_peak_prices(manager, adapter.mode)
+    except Exception as exc:
+        await trigger_emergency(f"peak-price hydration failed: {exc}")
+        return
+    if hydrated_peaks:
+        log.info("Hydrated %d persisted Strategy B peak price(s)", len(hydrated_peaks))
+
+    if adapter.mode == "live":
+        try:
+            startup_failure = await _run_live_safety_checks(
+                manager,
+                adapter,
+                wallet_balance_floor_sol,
+            )
+            startup_failure = startup_failure or _circuit_breaker_failure_reason()
+        except Exception as exc:
+            await trigger_emergency(f"startup live safety check crashed: {exc}")
+            return
+        if startup_failure is not None:
+            await trigger_emergency(f"startup {startup_failure}")
+            return
+
+    monitor_task = asyncio.create_task(
+        monitor_loop(
+            manager,
+            mark_provider,
+            db_path,
+            gate_tuner,
+            adapter,
+            latest_pumpportal_prices,
+        ),
+    )
     tasks = [
         asyncio.create_task(
             scan_loop(
@@ -2657,25 +2825,23 @@ async def _run_runtime_until_stopped(
                 single_trade_complete=single_trade_complete,
             ),
         ),
-        asyncio.create_task(
-            monitor_loop(
-                manager,
-                mark_provider,
-                db_path,
-                gate_tuner,
-                adapter,
-                latest_pumpportal_prices,
-            ),
-        ),
+        monitor_task,
         asyncio.create_task(snapshot_loop(manager, mark_provider, db_path)),
         asyncio.create_task(priority_fee_loop()),
+        asyncio.create_task(_monitor_heartbeat_watchdog(trigger_emergency)),
     ]
     if adapter.mode == "live":
         tasks.append(
             asyncio.create_task(
-                live_safety_loop(manager, adapter, wallet_balance_floor_sol),
+                live_safety_loop(
+                    manager,
+                    adapter,
+                    wallet_balance_floor_sol,
+                    on_failure=trigger_emergency,
+                ),
             ),
         )
+        tasks.append(asyncio.create_task(_circuit_breaker_watchdog(trigger_emergency)))
     async def held_position_mints() -> set[str]:
         held = {
             position.mint_address
@@ -2718,7 +2884,6 @@ async def _run_runtime_until_stopped(
         waiters = [stop_waiter, emergency_waiter]
         if single_trade_complete is not None:
             waiters.append(asyncio.create_task(single_trade_complete.wait()))
-        monitor_task = tasks[1]
         done, pending = await asyncio.wait(
             [*waiters, monitor_task],
             return_when=asyncio.FIRST_COMPLETED,
@@ -2772,14 +2937,30 @@ async def record_manual_freeze(db_path: Path) -> None:
 
 
 async def main() -> None:
-    _acquire_singleton_lock()
-    from dotenv import load_dotenv
-
-    load_dotenv()
     parser = argparse.ArgumentParser()
     parser.add_argument("--test", action="store_true", help="Run one cycle and exit (2-minute test)")
     parser.add_argument("--single-trade", action="store_true", help="Enter one trade, wait for its close, then exit")
+    parser.add_argument(
+        "--clear-halt",
+        action="store_true",
+        help="Manually clear the emergency halt marker without starting Strategy B",
+    )
     args = parser.parse_args()
+    _acquire_singleton_lock()
+    if args.clear_halt:
+        try:
+            STRATEGY_B_HALT_PATH.unlink()
+            log.warning("Strategy B emergency halt cleared manually")
+        except FileNotFoundError:
+            log.info("Strategy B emergency halt was already clear")
+        return
+    if STRATEGY_B_HALT_PATH.exists():
+        log.critical("Strategy B halted — manual restart required")
+        return
+
+    from dotenv import load_dotenv
+
+    load_dotenv()
 
     settings = load_settings()
     db_path = DB_PATH

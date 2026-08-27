@@ -200,12 +200,35 @@ class PositionManager:
                     9,
                 ),
                 "close_price_sol": close_price,
-                "peak_price_sol": peak_price_sol,
+                "peak_price_sol": (
+                    peak_price_sol if peak_price_sol is not None else position.peak_price_sol
+                ),
             }
         )
         self._cache[(closed.mint_address, closed.mode)] = closed
         await self._persist(closed)
         return closed
+
+    async def update_peak_price(
+        self,
+        mint: str,
+        peak_price_sol: float,
+        *,
+        mode: str | None = None,
+    ) -> Position | None:
+        """Persist the highest observed mark for an open position."""
+        if not _is_valid_price(peak_price_sol):
+            raise ValueError(f"Invalid peak price for position: {peak_price_sol}")
+        position = await self.get_position(mint, mode=mode)
+        if position is None:
+            return None
+        previous_peak = position.peak_price_sol
+        if previous_peak is not None and peak_price_sol < previous_peak:
+            return position
+        updated = position.model_copy(update={"peak_price_sol": peak_price_sol})
+        self._cache[(updated.mint_address, updated.mode)] = updated
+        await self._persist(updated)
+        return updated
 
     async def get_paper_positions(self, *, include_archived: bool = False) -> list[Position]:
         """Return all open positions with mode == 'paper'."""

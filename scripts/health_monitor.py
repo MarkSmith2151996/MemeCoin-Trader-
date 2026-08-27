@@ -18,15 +18,16 @@ import signal
 import subprocess
 import sys
 import time
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Callable
 from urllib.error import URLError
 from urllib.request import Request, urlopen
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 LOG_PATH = Path("/tmp/health_monitor.log")
 LOCK_PATH = Path("/tmp/health_monitor.lock")
+STRATEGY_B_HALT_PATH = Path("/tmp/strategy_b_halted")
 CHROME_CDP_URL = "http://172.21.32.1:19223/json/version"
 CHROME_DEBUG_PORT = 9262
 CHROME_PROFILE = r"D:\chrome-mt-profile"
@@ -75,6 +76,10 @@ class HealthMonitor:
 
     def run_cycle(self) -> bool:
         """Run every check. Return True when all components were healthy."""
+        if STRATEGY_B_HALT_PATH.exists():
+            self.log.warning("Strategy B halted — manual restart required")
+            return False
+
         healthy = True
 
         chrome = self.check_chrome()

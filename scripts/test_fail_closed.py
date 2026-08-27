@@ -90,6 +90,7 @@ async def _wait_forever(*_args: object, **_kwargs: object) -> None:
 async def verify_fail_closed() -> None:
     with tempfile.TemporaryDirectory(prefix="strategy-b-fail-closed-") as directory:
         db_path = Path(directory) / "trades.db"
+        halt_path = Path(directory) / "strategy_b_halted"
         await init_db(db_path)
         manager = PositionManager(db_path, load_settings(), strategy="B")
         await manager.open_position(
@@ -111,12 +112,14 @@ async def verify_fail_closed() -> None:
         original_monitor_loop = run_strategy_b.monitor_loop
         original_snapshot_loop = run_strategy_b.snapshot_loop
         original_priority_fee_loop = run_strategy_b.priority_fee_loop
+        original_halt_path = run_strategy_b.STRATEGY_B_HALT_PATH
         original_from_env = run_strategy_b.AlertManager.__dict__["from_env"]
         pumpportal_price.websockets.connect = mock_pumpportal.connect
         run_strategy_b.scan_loop = _wait_forever
         run_strategy_b.monitor_loop = _wait_forever
         run_strategy_b.snapshot_loop = _wait_forever
         run_strategy_b.priority_fee_loop = _wait_forever
+        run_strategy_b.STRATEGY_B_HALT_PATH = halt_path
         run_strategy_b.AlertManager.from_env = classmethod(lambda _cls: alerts)
         started_at = time.monotonic()
 
@@ -139,6 +142,7 @@ async def verify_fail_closed() -> None:
             run_strategy_b.monitor_loop = original_monitor_loop
             run_strategy_b.snapshot_loop = original_snapshot_loop
             run_strategy_b.priority_fee_loop = original_priority_fee_loop
+            run_strategy_b.STRATEGY_B_HALT_PATH = original_halt_path
             run_strategy_b.AlertManager.from_env = original_from_env
 
         assert mock_pumpportal.disconnected_at is not None
@@ -146,13 +150,12 @@ async def verify_fail_closed() -> None:
         assert time.monotonic() - started_at >= STALE_AFTER_S
         assert mock_pumpportal.connections >= 2
         assert await manager.get_all_open(mode="paper") == []
-        assert alerts.messages == [
-            (
-                "critical",
-                "Strategy B emergency close",
-                "Reason: PumpPortal stale 15s\nPositions: stale-mint=0.0001 (closed)",
-            ),
-        ]
+        assert len(alerts.messages) == 1
+        assert alerts.messages[0][:2] == ("critical", "Strategy B emergency close")
+        assert alerts.messages[0][2].startswith(
+            "Reason: PumpPortal stale 15s\nPositions: stale-mint=0.0001 (closed)\nHalt: ",
+        )
+        assert halt_path.exists()
         with sqlite3.connect(db_path) as connection:
             event = connection.execute(
                 "SELECT event_type, reason FROM runtime_events",
