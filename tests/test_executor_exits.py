@@ -85,6 +85,16 @@ class FakeAdapter:
         pass
 
 
+class FakeJupiterPriceProvider:
+    def __init__(self, prices: dict[str, float]) -> None:
+        self.prices = prices
+        self.calls: list[str] = []
+
+    async def get_current_price(self, mint_address: str) -> float | None:
+        self.calls.append(mint_address)
+        return self.prices.get(mint_address)
+
+
 def test_trailing_exit_uses_persisted_peak_and_arm_state(tmp_path: Path) -> None:
     async def run() -> None:
         position = {
@@ -110,5 +120,36 @@ def test_trailing_exit_uses_persisted_peak_and_arm_state(tmp_path: Path) -> None
         assert store.marks == [("position-1", 0.000102, True)]
         await executor.handle_price("mint", 0.000099)
         assert store.closed == [("position-1", 0.000099)]
+
+    asyncio.run(run())
+
+
+def test_quiet_position_uses_jupiter_mark_for_exit_evaluation(tmp_path: Path) -> None:
+    async def run() -> None:
+        position = {
+            "id": "position-quiet",
+            "mint_address": "quiet-mint",
+            "entry_price_sol": 0.0001,
+            "amount_sol": 0.01,
+            "token_amount": 100,
+            "peak_price_sol": 0.0001,
+            "trailing_armed": False,
+            "opened_at": datetime.now(UTC),
+        }
+        store = FakeStore(position)
+        mark_provider = FakeJupiterPriceProvider({"quiet-mint": 0.000102})
+        executor = StrategyExecutor(
+            store,
+            FakeAdapter(),
+            heartbeat_path=tmp_path / "heartbeat",
+            halt_path=tmp_path / "halt",
+            mark_provider=mark_provider,
+        )
+        await executor.start()
+        await executor.run_cycle()
+
+        assert mark_provider.calls == ["quiet-mint"]
+        assert store.marks == [("position-quiet", 0.000102, True)]
+        assert store.closed == []
 
     asyncio.run(run())

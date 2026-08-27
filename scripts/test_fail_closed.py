@@ -153,14 +153,14 @@ async def verify_fail_closed() -> None:
         assert len(alerts.messages) == 1
         assert alerts.messages[0][:2] == ("critical", "Strategy B emergency close")
         assert alerts.messages[0][2].startswith(
-            "Reason: PumpPortal stale 15s\nPositions: stale-mint=0.0001 (closed)\nHalt: ",
+            "Reason: PumpPortal global feed stale 15s\nPositions: stale-mint=0.0001 (closed)\nHalt: ",
         )
         assert halt_path.exists()
         with sqlite3.connect(db_path) as connection:
             event = connection.execute(
                 "SELECT event_type, reason FROM runtime_events",
             ).fetchone()
-        assert event == ("emergency_close_all", "PumpPortal stale 15s")
+        assert event == ("emergency_close_all", "PumpPortal global feed stale 15s")
 
 
 def main() -> None:

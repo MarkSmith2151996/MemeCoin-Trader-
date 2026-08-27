@@ -1,7 +1,8 @@
-"""PumpPortal token-trade price stream for live exit monitoring.
+"""PumpPortal price stream with global feed-health monitoring.
 
-The runtime retains stream marks in memory for high-frequency stop checks. A
-stale stream invokes its supplied fail-closed handler once per held mint.
+The runtime retains held-token trade marks for high-frequency stop checks. Feed
+health is separate: any PumpPortal message refreshes one global timestamp, so
+a quiet held token cannot be mistaken for a disconnected provider.
 """
 
 from __future__ import annotations
@@ -21,11 +22,11 @@ PUMPPORTAL_WS_URL = "wss://pumpportal.fun/api/data"
 
 PriceHandler = Callable[[str, float], Awaitable[None]]
 MintsProvider = Callable[[], Awaitable[set[str]]]
-StaleHandler = Callable[[str], Awaitable[None]]
+StaleHandler = Callable[[], Awaitable[None]]
 
 
 class PumpPortalPriceFeed:
-    """Keep PumpPortal subscriptions aligned with held mints and publish marks."""
+    """Keep held-token marks and global PumpPortal feed health independent."""
 
     def __init__(
         self,
@@ -45,13 +46,14 @@ class PumpPortalPriceFeed:
         self._refresh_interval_s = refresh_interval_s
         self._reconnect_delay_s = reconnect_delay_s
         self._stale_after_s = stale_after_s
-        self._last_price_at: dict[str, float] = {}
-        self._stale_notified: set[str] = set()
+        self._last_pumpportal_event_at = time.monotonic()
+        self._stale_notified = False
 
     async def run(self) -> None:
         """Reconnect indefinitely while retaining stale detection across reconnects."""
         log.info(
-            "PRICE_FEED: PumpPortal WebSocket starting; stale stream triggers fail-closed handler",
+            "PRICE_FEED: PumpPortal WebSocket starting; "
+            "global stale feed triggers fail-closed handler",
         )
         while True:
             try:
@@ -72,8 +74,7 @@ class PumpPortalPriceFeed:
         """Keep evaluating stream freshness while reconnect backoff is in progress."""
         deadline = time.monotonic() + self._reconnect_delay_s
         while True:
-            held = await self._held_mints()
-            await self._notify_stale_mints(held)
+            await self._notify_stale_feed()
             remaining = deadline - time.monotonic()
             if remaining <= 0:
                 return
@@ -81,6 +82,8 @@ class PumpPortalPriceFeed:
 
     async def _run_connection(self, websocket: object) -> None:
         subscribed: set[str] = set()
+        await websocket.send(json.dumps({"method": "subscribeNewToken"}))
+        await websocket.send(json.dumps({"method": "subscribeMigration"}))
         while True:
             held = await self._held_mints()
             additions = held - subscribed
@@ -90,52 +93,41 @@ class PumpPortalPriceFeed:
                     json.dumps({"method": "subscribeTokenTrade", "keys": sorted(additions)}),
                 )
                 subscribed.update(additions)
-                now = time.monotonic()
-                for mint in additions:
-                    self._last_price_at.setdefault(mint, now)
-                    self._stale_notified.discard(mint)
             if removals:
                 await websocket.send(
                     json.dumps({"method": "unsubscribeTokenTrade", "keys": sorted(removals)}),
                 )
                 subscribed.difference_update(removals)
-                for mint in removals:
-                    self._last_price_at.pop(mint, None)
-                    self._stale_notified.discard(mint)
 
             try:
                 raw = await asyncio.wait_for(websocket.recv(), timeout=self._refresh_interval_s)
             except TimeoutError:
-                await self._notify_stale_mints(subscribed)
+                await self._notify_stale_feed()
                 continue
+            self._last_pumpportal_event_at = time.monotonic()
+            self._stale_notified = False
             price = _parse_price_update(raw)
             if price is not None and price[0] in subscribed:
-                self._last_price_at[price[0]] = time.monotonic()
-                self._stale_notified.discard(price[0])
                 await self._on_price(*price)
-            await self._notify_stale_mints(subscribed)
+            await self._notify_stale_feed()
 
-    async def _notify_stale_mints(
-        self,
-        subscribed: set[str],
-    ) -> None:
-        if self._on_stale is None:
+    async def _notify_stale_feed(self) -> None:
+        """Fail closed only when PumpPortal has sent no message of any kind."""
+        if self._on_stale is None or self._stale_notified:
             return
         now = time.monotonic()
-        for mint in subscribed - self._stale_notified:
-            elapsed = now - self._last_price_at.get(mint, now)
-            if elapsed < self._stale_after_s:
-                continue
-            self._stale_notified.add(mint)
-            log.warning(
-                "PRICE_FEED: stale PumpPortal price mint=%s age=%.1fs; triggering fail-closed handler",
-                mint[:16],
-                elapsed,
-            )
-            try:
-                await self._on_stale(mint)
-            except Exception as exc:
-                log.error("PRICE_FEED: stale handler failed mint=%s: %s", mint[:16], exc)
+        elapsed = now - self._last_pumpportal_event_at
+        if elapsed < self._stale_after_s:
+            return
+        self._stale_notified = True
+        log.warning(
+            "PRICE_FEED: global PumpPortal feed stale age=%.1fs; triggering fail-closed handler",
+            elapsed,
+        )
+        try:
+            await self._on_stale()
+        except Exception as exc:
+            log.error("PRICE_FEED: global stale handler failed: %s", exc)
 
 
 def _parse_price_update(raw: object) -> tuple[str, float] | None:

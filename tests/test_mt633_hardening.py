@@ -190,9 +190,9 @@ def test_pumpportal_reconnects_after_disconnect(monkeypatch) -> None:
     asyncio.run(run())
 
 
-def test_pumpportal_stale_price_activates_one_jupiter_fallback() -> None:
+def test_pumpportal_global_stale_activates_one_fail_closed_handler() -> None:
     async def run() -> None:
-        stale_mints: list[str] = []
+        stale_activations = 0
         stale_activated = asyncio.Event()
 
         class SilentSocket:
@@ -212,8 +212,9 @@ def test_pumpportal_stale_price_activates_one_jupiter_fallback() -> None:
         async def on_price(_mint: str, _price: float) -> None:
             pass
 
-        async def on_stale(mint: str) -> None:
-            stale_mints.append(mint)
+        async def on_stale() -> None:
+            nonlocal stale_activations
+            stale_activations += 1
             stale_activated.set()
 
         socket = SilentSocket()
@@ -231,8 +232,51 @@ def test_pumpportal_stale_price_activates_one_jupiter_fallback() -> None:
         finally:
             task.cancel()
             await asyncio.gather(task, return_exceptions=True)
-        assert stale_mints == ["mint"]
-        assert socket.messages == ['{"method": "subscribeTokenTrade", "keys": ["mint"]}']
+        assert stale_activations == 1
+        assert socket.messages == [
+            '{"method": "subscribeNewToken"}',
+            '{"method": "subscribeMigration"}',
+            '{"method": "subscribeTokenTrade", "keys": ["mint"]}',
+        ]
+
+    asyncio.run(run())
+
+
+def test_pumpportal_unrelated_events_keep_quiet_held_mint_healthy() -> None:
+    async def run() -> None:
+        stale_activated = asyncio.Event()
+
+        class ActiveSocket:
+            async def send(self, _message: str) -> None:
+                pass
+
+            async def recv(self) -> str:
+                await asyncio.sleep(0.001)
+                return '{"event": "create", "mint": "unrelated-mint"}'
+
+        async def held_mints() -> set[str]:
+            return {"quiet-mint"}
+
+        async def on_price(_mint: str, _price: float) -> None:
+            raise AssertionError("unrelated event must not become a held-token price")
+
+        async def on_stale() -> None:
+            stale_activated.set()
+
+        feed = PumpPortalPriceFeed(
+            held_mints,
+            on_price,
+            on_stale,
+            refresh_interval_s=0.01,
+            stale_after_s=0.02,
+        )
+        task = asyncio.create_task(feed._run_connection(ActiveSocket()))
+        try:
+            await asyncio.sleep(0.06)
+        finally:
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+        assert not stale_activated.is_set()
 
     asyncio.run(run())
 
@@ -387,7 +431,7 @@ def test_pumpportal_stale_emergency_closes_paper_positions(monkeypatch, tmp_path
                 self.on_stale = on_stale
 
             async def run(self) -> None:
-                await self.on_stale("stale-mint")
+                await self.on_stale()
 
         class PaperAdapter:
             mode = "paper"
@@ -430,10 +474,10 @@ def test_pumpportal_stale_emergency_closes_paper_positions(monkeypatch, tmp_path
         assert len(alerts.messages) == 1
         assert alerts.messages[0][:2] == ("critical", "Strategy B emergency close")
         assert alerts.messages[0][2].startswith(
-            "Reason: PumpPortal stale 15s\nPositions: stale-mint=0.0001 (closed)\nHalt: ",
+            "Reason: PumpPortal global feed stale 15s\nPositions: stale-mint=0.0001 (closed)\nHalt: ",
         )
         halt = json.loads(halt_path.read_text())
-        assert halt["reason"] == "PumpPortal stale 15s"
+        assert halt["reason"] == "PumpPortal global feed stale 15s"
         assert halt["halted_at"]
 
         restart_attempts: list[object] = []
@@ -445,7 +489,7 @@ def test_pumpportal_stale_emergency_closes_paper_positions(monkeypatch, tmp_path
             event = connection.execute(
                 "SELECT event_type, reason FROM runtime_events",
             ).fetchone()
-        assert event == ("emergency_close_all", "PumpPortal stale 15s")
+        assert event == ("emergency_close_all", "PumpPortal global feed stale 15s")
 
     try:
         asyncio.run(run())

@@ -2863,9 +2863,8 @@ async def _run_runtime_until_stopped(
             only_mints={mint},
         )
 
-    async def on_pumpportal_stale(mint: str) -> None:
-        del mint
-        await trigger_emergency("PumpPortal stale 15s")
+    async def on_pumpportal_stale() -> None:
+        await trigger_emergency("PumpPortal global feed stale 15s")
 
     # The stream is a price source, not an execution capability. Keep it on in
     # paper mode too, so paper exits receive the same immediate stop checks.

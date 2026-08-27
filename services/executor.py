@@ -23,7 +23,9 @@ from services.adapters.paper import PaperExecutionAdapter
 from services.store import MemecoinStore
 from services.strategy import GateConfig, get_qualifying_candidates, load_gates
 from src.core.models import Side
+from src.execution.price_provider import JupiterPriceProvider, PriceProvider
 from src.execution.pumpportal_price import PumpPortalPriceFeed
+from src.monitoring.alerts import AlertManager
 
 log = logging.getLogger("memecoin.executor")
 
@@ -79,6 +81,8 @@ class StrategyExecutor:
         heartbeat_path: Path | None = None,
         heartbeat_timeout_seconds: float = 30.0,
         halt_path: Path | None = None,
+        mark_provider: PriceProvider | None = None,
+        alert_manager: Any | None = None,
     ) -> None:
         self._store = store
         self._adapter = adapter
@@ -88,7 +92,11 @@ class StrategyExecutor:
         self._heartbeat_path = heartbeat_path or Path("/tmp/memecoin-executor.heartbeat")
         self._heartbeat_timeout_seconds = heartbeat_timeout_seconds
         self._halt_path = halt_path or Path("/tmp/memecoin-executor-halted")
+        self._mark_provider = mark_provider or JupiterPriceProvider()
+        self._alerts = alert_manager or AlertManager.from_env()
         self._positions: dict[str, dict[str, Any]] = {}
+        self._last_pumpportal_price_at: dict[str, float] = {}
+        self._last_jupiter_fallback_at: dict[str, float] = {}
         self._gates: GateConfig | None = None
         self._exits: dict[str, float] = {}
         self._last_cycle_monotonic: float | None = None
@@ -122,7 +130,11 @@ class StrategyExecutor:
         feed_task: asyncio.Task[None] | None = None
         try:
             await self.start()
-            feed = PumpPortalPriceFeed(self._held_mints, self._on_price, self._on_price_stale)
+            feed = PumpPortalPriceFeed(
+                self._held_mints,
+                self._on_pumpportal_price,
+                self._on_feed_stale,
+            )
             feed_task = asyncio.create_task(feed.run(), name="memecoin-pumpportal-price-feed")
             while True:
                 self._raise_if_fatal(feed_task)
@@ -145,6 +157,12 @@ class StrategyExecutor:
                 await self._adapter.close()
             except Exception as exc:
                 log.error("adapter close failed: %s", exc)
+            close_mark_provider = getattr(self._mark_provider, "close", None)
+            if close_mark_provider is not None:
+                try:
+                    await close_mark_provider()
+                except Exception as exc:
+                    log.error("Jupiter mark provider close failed: %s", exc)
 
     async def run_cycle(self) -> None:
         """Evaluate the latest query result and enter only while capacity remains."""
@@ -158,6 +176,7 @@ class StrategyExecutor:
         if self._gates is None:
             raise RuntimeError("executor was not started")
         self._check_live_circuit_breaker()
+        await self._refresh_quiet_position_marks()
         if (
             self._mode == "live"
             and self._last_reconciliation_monotonic is not None
@@ -184,10 +203,16 @@ class StrategyExecutor:
     async def handle_price(self, mint_address: str, price_sol: float) -> None:
         """Evaluate one streamed mark; exposed for deterministic paper verification."""
 
-        await self._on_price(mint_address, price_sol)
+        await self._on_pumpportal_price(mint_address, price_sol)
 
     async def _held_mints(self) -> set[str]:
         return set(self._positions)
+
+    async def _on_pumpportal_price(self, mint_address: str, price_sol: float) -> None:
+        """Record a held-token PumpPortal mark before evaluating its exits."""
+        if mint_address in self._positions:
+            self._last_pumpportal_price_at[mint_address] = time.monotonic()
+        await self._on_price(mint_address, price_sol)
 
     async def _on_price(self, mint_address: str, price_sol: float) -> None:
         try:
@@ -214,8 +239,29 @@ class StrategyExecutor:
             self._fatal_reason = f"price monitor failure: {exc}"
             raise
 
-    async def _on_price_stale(self, mint_address: str) -> None:
-        self._fatal_reason = f"PumpPortal stale >15s for {mint_address}"
+    async def _on_feed_stale(self) -> None:
+        self._fatal_reason = "PumpPortal global feed stale >15s"
+
+    async def _refresh_quiet_position_marks(self) -> None:
+        """Use Jupiter marks when a held token has no recent PumpPortal trade."""
+        now = time.monotonic()
+        interval = max(self._cycle_seconds, 1.0)
+        quiet_mints = [
+            mint
+            for mint in self._positions
+            if now - self._last_pumpportal_price_at.get(mint, 0.0) >= interval
+            and now - self._last_jupiter_fallback_at.get(mint, 0.0) >= interval
+        ]
+        if not quiet_mints:
+            return
+
+        async def refresh(mint: str) -> None:
+            self._last_jupiter_fallback_at[mint] = now
+            price_sol = await self._mark_provider.get_current_price(mint)
+            if price_sol is not None:
+                await self._on_price(mint, price_sol)
+
+        await asyncio.gather(*(refresh(mint) for mint in quiet_mints))
 
     def _exit_reason(self, position: dict[str, Any], current_price: float) -> str | None:
         entry = float(position["entry_price_sol"])
@@ -302,6 +348,8 @@ class StrategyExecutor:
             realized_pnl_sol=realized_pnl,
         )
         self._positions.pop(mint, None)
+        self._last_pumpportal_price_at.pop(mint, None)
+        self._last_jupiter_fallback_at.pop(mint, None)
         await self._store.refresh_daily_stats(self._strategy)
         log.info("closed mint=%s reason=%s", mint[:16], reason)
 
@@ -367,7 +415,8 @@ class StrategyExecutor:
         self._emergency_started = True
         self._write_halt(reason)
         failures: dict[str, str] = {}
-        for position in list(self._positions.values()):
+        positions = list(self._positions.values())
+        for position in positions:
             mint = str(position["mint_address"])
             fallback = float(position.get("peak_price_sol") or position["entry_price_sol"])
             try:
@@ -383,6 +432,18 @@ class StrategyExecutor:
             )
         except Exception as exc:
             log.critical("failed to record emergency event: %s", exc)
+        details = "; ".join(
+            f"{mint[:16]}={'failed' if mint in failures else 'closed'}"
+            for mint in sorted(str(position["mint_address"]) for position in positions)
+        ) or "no open positions"
+        try:
+            await self._alerts.send(
+                "critical",
+                "Memecoin executor emergency close",
+                f"Reason: {reason}\nPositions: {details}\nHalt: {self._halt_path}",
+            )
+        except Exception as exc:
+            log.critical("emergency close alert failed: %s", exc)
 
     def _write_heartbeat(self) -> None:
         payload = json.dumps(
