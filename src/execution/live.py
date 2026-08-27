@@ -88,6 +88,9 @@ class LiveExecutionAdapter(ExecutionAdapter):
         """Buy ``amount_sol`` worth of ``mint_address`` through Jupiter."""
         if not prevalidated:
             await self.validate_direct_buy(mint_address, amount_sol)
+        pre_token_balance = await self._client.get_token_balance(mint_address)
+        if pre_token_balance is None:
+            raise RuntimeError("cannot verify pre-buy token balance")
 
         amount_lamports = int(amount_sol * LAMPORTS_PER_SOL)
         quote = await self._quote_or_raise(SOL_MINT, mint_address, amount_lamports, slippage_bps)
@@ -106,13 +109,18 @@ class LiveExecutionAdapter(ExecutionAdapter):
                 f"live buy failed ({result.confirmation_status}): {result.error or 'unknown'}",
             )
 
-        token_amount = result.out_amount / (10**quote.token_decimals)
+        post_token_balance = result.token_balance_after
+        if post_token_balance is None or post_token_balance <= pre_token_balance:
+            raise RuntimeError("confirmed live buy has no verifiable wallet token delta")
+        token_amount = post_token_balance - pre_token_balance
+        actual_amount_sol = result.in_amount / LAMPORTS_PER_SOL
+        actual_price_sol = actual_amount_sol / token_amount
         return Trade(
             mint_address=mint_address,
             side=Side.BUY,
-            amount_sol=amount_sol,
+            amount_sol=actual_amount_sol,
             token_amount=token_amount,
-            price_sol=result.price_sol or quote.price_sol,
+            price_sol=actual_price_sol,
             slippage_bps=slippage_bps,
             tx_signature=result.signature,
             mode=self.mode,
@@ -121,6 +129,9 @@ class LiveExecutionAdapter(ExecutionAdapter):
                 "provider": "jupiter",
                 "quote_in_amount": result.in_amount,
                 "quote_out_amount": result.out_amount,
+                "pre_token_balance": pre_token_balance,
+                "post_token_balance": post_token_balance,
+                "actual_fill": True,
                 "price_impact_pct": quote.price_impact_pct,
                 "fees_lamports": result.fees_lamports,
                 "confirmation_status": result.confirmation_status,
@@ -155,6 +166,9 @@ class LiveExecutionAdapter(ExecutionAdapter):
 
         quote = await self._quote_or_raise(mint_address, SOL_MINT, token_lamports, slippage_bps)
         await self._check_price_impact(mint_address, quote, self._max_exit_price_impact_pct)
+        pre_sol_balance = await self._client.get_sol_balance()
+        if pre_sol_balance is None:
+            raise RuntimeError("cannot verify pre-sell SOL balance")
 
         log.info(
             "LIVE SELL %s: %.8f tokens → %s SOL @ %.10f SOL impact=%.4f%%",
@@ -190,13 +204,16 @@ class LiveExecutionAdapter(ExecutionAdapter):
                 f"live sell failed ({result.confirmation_status}): {error}",
             )
 
-        sol_out = result.out_amount / LAMPORTS_PER_SOL
+        post_sol_balance = result.token_balance_after
+        if post_sol_balance is None or post_sol_balance <= pre_sol_balance:
+            raise RuntimeError("confirmed live sell has no verifiable wallet SOL delta")
+        sol_out = post_sol_balance - pre_sol_balance
         return Trade(
             mint_address=mint_address,
             side=Side.SELL,
             amount_sol=sol_out,
             token_amount=wallet_balance,
-            price_sol=result.price_sol or quote.price_sol,
+            price_sol=sol_out / wallet_balance,
             slippage_bps=slippage_bps,
             tx_signature=result.signature,
             mode=self.mode,
@@ -205,12 +222,14 @@ class LiveExecutionAdapter(ExecutionAdapter):
                 "provider": "jupiter",
                 "quote_in_amount": result.in_amount,
                 "quote_out_amount": result.out_amount,
+                "pre_sol_balance": pre_sol_balance,
+                "post_sol_balance": post_sol_balance,
+                "actual_fill": True,
                 "price_impact_pct": quote.price_impact_pct,
                 "fees_lamports": result.fees_lamports,
                 "confirmation_status": result.confirmation_status,
                 "slot": result.slot,
-                "sol_balance_after": result.token_balance_after,
-                "token_balance_after": result.token_balance_after,
+                "sol_balance_after": post_sol_balance,
             },
         )
 
@@ -435,7 +454,8 @@ class LiveExecutionAdapter(ExecutionAdapter):
             )
             await asyncio.sleep(self._balance_reconciliation_retry_s)
         raise RuntimeError(
-            f"cannot verify a positive wallet token balance for {mint_address[:16]}: {last_balance}",
+            "cannot verify a positive wallet token balance for "
+            f"{mint_address[:16]}: {last_balance}",
         )
 
     async def _log_swap_result(self, side: str, mint_address: str, result) -> None:

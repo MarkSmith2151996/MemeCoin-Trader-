@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import asyncio
+import fcntl
 import json
 import logging
+import math
 import os
 import sys
 import time
@@ -22,12 +24,17 @@ from services.adapters.live import build_live_adapter
 from services.adapters.paper import PaperExecutionAdapter
 from services.store import MemecoinStore
 from services.strategy import GateConfig, get_qualifying_candidates, load_gates
-from src.core.models import Side
-from src.execution.price_provider import JupiterPriceProvider, PriceProvider
+from src.core.config import Settings, load_settings
+from src.core.models import Side, Trade
+from src.execution.live_daily_caps import evaluate_daily_live_caps
+from src.execution.live_guardrails import evaluate_live_guardrails
+from src.execution.price_provider import JupiterPriceProvider, PriceProvider, PriceResult
 from src.execution.pumpportal_price import PumpPortalPriceFeed
 from src.monitoring.alerts import AlertManager
 
 log = logging.getLogger("memecoin.executor")
+EXECUTOR_LOCK_PATH = Path("/tmp/memecoin_executor.lock")
+_executor_lock_handle: Any | None = None
 
 
 class ExecutorStore(Protocol):
@@ -35,13 +42,30 @@ class ExecutorStore(Protocol):
 
     async def load_exit_config(self, strategy: str) -> dict[str, float]: ...
 
+    async def load_daily_live_state(self) -> Any: ...
+
     async def create_position(self, position: dict[str, Any], trade: dict[str, Any]) -> None: ...
+
+    def entry_transaction(self, mint_address: str) -> Any: ...
 
     async def update_position_mark(
         self,
         position_id: str,
         peak_price_sol: float,
         trailing_armed: bool,
+    ) -> None: ...
+
+    async def record_exit_evaluation(
+        self,
+        position_id: str,
+        mint_address: str,
+        *,
+        source: str,
+        mark_timestamp: object,
+        trigger_price_sol: float | None,
+        usable: bool,
+        diagnostic: str,
+        exit_reason: str | None,
     ) -> None: ...
 
     async def close_position(
@@ -97,6 +121,10 @@ class StrategyExecutor:
         self._positions: dict[str, dict[str, Any]] = {}
         self._last_pumpportal_price_at: dict[str, float] = {}
         self._last_jupiter_fallback_at: dict[str, float] = {}
+        self._last_valid_mark_at: dict[str, float] = {}
+        self._mark_sla_warned: set[str] = set()
+        self._mint_locks: dict[str, asyncio.Lock] = {}
+        self._price_tasks: set[asyncio.Task[None]] = set()
         self._gates: GateConfig | None = None
         self._exits: dict[str, float] = {}
         self._last_cycle_monotonic: float | None = None
@@ -106,6 +134,7 @@ class StrategyExecutor:
         )
         self._fatal_reason: str | None = None
         self._emergency_started = False
+        self._live_entry_alerted = False
 
     async def start(self) -> None:
         """Hydrate persisted open state before accepting any new entry."""
@@ -119,6 +148,8 @@ class StrategyExecutor:
         self._validate_exit_config()
         rows = await self._store.list_open_positions(self._strategy, self._mode)
         self._positions = {str(row["mint_address"]): dict(row) for row in rows}
+        started_at = time.monotonic()
+        self._last_valid_mark_at = {mint: started_at for mint in self._positions}
         await self._reconcile_startup()
         self._last_reconciliation_monotonic = time.monotonic()
         self._last_cycle_monotonic = time.monotonic()
@@ -139,7 +170,7 @@ class StrategyExecutor:
             while True:
                 self._raise_if_fatal(feed_task)
                 started = time.monotonic()
-                await asyncio.wait_for(self.run_cycle(), timeout=self._heartbeat_timeout_seconds)
+                await self.run_cycle()
                 self._last_cycle_monotonic = time.monotonic()
                 self._write_heartbeat()
                 await asyncio.sleep(max(0.0, self._cycle_seconds - (time.monotonic() - started)))
@@ -153,6 +184,8 @@ class StrategyExecutor:
             if feed_task is not None:
                 feed_task.cancel()
                 await asyncio.gather(feed_task, return_exceptions=True)
+            if self._price_tasks:
+                await asyncio.gather(*self._price_tasks, return_exceptions=True)
             try:
                 await self._adapter.close()
             except Exception as exc:
@@ -167,10 +200,6 @@ class StrategyExecutor:
     async def run_cycle(self) -> None:
         """Evaluate the latest query result and enter only while capacity remains."""
 
-        if self._last_cycle_monotonic is not None:
-            elapsed = time.monotonic() - self._last_cycle_monotonic
-            if elapsed > self._heartbeat_timeout_seconds:
-                raise FailClosed(f"executor heartbeat stale for {elapsed:.1f}s")
         if self._fatal_reason:
             raise FailClosed(self._fatal_reason)
         if self._gates is None:
@@ -183,8 +212,8 @@ class StrategyExecutor:
             and time.monotonic() - self._last_reconciliation_monotonic
             >= self._reconciliation_interval_seconds
         ):
-            await self._reconcile_startup()
-            self._last_reconciliation_monotonic = time.monotonic()
+            if await self._reconcile_startup():
+                self._last_reconciliation_monotonic = time.monotonic()
         candidates = await get_qualifying_candidates(
             self._store,
             self._strategy,
@@ -203,24 +232,70 @@ class StrategyExecutor:
     async def handle_price(self, mint_address: str, price_sol: float) -> None:
         """Evaluate one streamed mark; exposed for deterministic paper verification."""
 
-        await self._on_pumpportal_price(mint_address, price_sol)
+        await self._on_price(
+            mint_address,
+            price_sol,
+            source="pumpportal",
+            mark_timestamp=datetime.now(UTC),
+            diagnostic="stream_mark",
+        )
 
     async def _held_mints(self) -> set[str]:
         return set(self._positions)
 
     async def _on_pumpportal_price(self, mint_address: str, price_sol: float) -> None:
         """Record a held-token PumpPortal mark before evaluating its exits."""
-        if mint_address in self._positions:
-            self._last_pumpportal_price_at[mint_address] = time.monotonic()
-        await self._on_price(mint_address, price_sol)
+        if mint_address not in self._positions:
+            return
+        self._last_pumpportal_price_at[mint_address] = time.monotonic()
+        task = asyncio.create_task(
+            self._on_price(
+                mint_address,
+                price_sol,
+                source="pumpportal",
+                mark_timestamp=datetime.now(UTC),
+                diagnostic="stream_mark",
+            ),
+            name=f"memecoin-price-{mint_address}",
+        )
+        self._price_tasks.add(task)
+        task.add_done_callback(self._on_price_task_done)
 
-    async def _on_price(self, mint_address: str, price_sol: float) -> None:
+    async def _on_price(
+        self,
+        mint_address: str,
+        price_sol: float,
+        *,
+        source: str,
+        mark_timestamp: datetime,
+        diagnostic: str,
+    ) -> None:
+        async with self._lock_for(mint_address):
+            await self._on_price_locked(
+                mint_address,
+                price_sol,
+                source=source,
+                mark_timestamp=mark_timestamp,
+                diagnostic=diagnostic,
+            )
+
+    async def _on_price_locked(
+        self,
+        mint_address: str,
+        price_sol: float,
+        *,
+        source: str,
+        mark_timestamp: datetime,
+        diagnostic: str,
+    ) -> None:
         try:
             if price_sol <= 0:
                 raise ValueError(f"invalid non-positive price for {mint_address}")
             position = self._positions.get(mint_address)
             if position is None:
                 return
+            self._last_valid_mark_at[mint_address] = time.monotonic()
+            self._mark_sla_warned.discard(mint_address)
             entry = float(position["entry_price_sol"])
             previous_peak = max(float(position.get("peak_price_sol") or entry), entry)
             peak = max(previous_peak, price_sol)
@@ -233,8 +308,26 @@ class StrategyExecutor:
                 position["peak_price_sol"] = peak
                 position["trailing_armed"] = armed
             reason = self._exit_reason(position, price_sol)
+            await self._store.record_exit_evaluation(
+                str(position["id"]),
+                mint_address,
+                source=source,
+                mark_timestamp=mark_timestamp,
+                trigger_price_sol=price_sol,
+                usable=True,
+                diagnostic=diagnostic,
+                exit_reason=reason,
+            )
             if reason is not None:
-                await self._close_position(position, price_sol, reason)
+                await self._close_position(
+                    position,
+                    price_sol,
+                    reason,
+                    mark_source=source,
+                    mark_timestamp=mark_timestamp,
+                    mark_diagnostic=diagnostic,
+                    lock_held=True,
+                )
         except Exception as exc:
             self._fatal_reason = f"price monitor failure: {exc}"
             raise
@@ -257,11 +350,97 @@ class StrategyExecutor:
 
         async def refresh(mint: str) -> None:
             self._last_jupiter_fallback_at[mint] = now
-            price_sol = await self._mark_provider.get_current_price(mint)
+            mark = await self._get_mark(mint)
+            price_sol = _positive_float(mark.price_sol)
             if price_sol is not None:
-                await self._on_price(mint, price_sol)
+                await self._on_price(
+                    mint,
+                    price_sol,
+                    source=self._mark_provider.name,
+                    mark_timestamp=datetime.now(UTC),
+                    diagnostic=mark.reason,
+                )
+            else:
+                await self._on_mark_unavailable(
+                    mint,
+                    source=self._mark_provider.name,
+                    mark_timestamp=datetime.now(UTC),
+                    diagnostic=mark.reason,
+                )
 
         await asyncio.gather(*(refresh(mint) for mint in quiet_mints))
+
+    async def _on_mark_unavailable(
+        self,
+        mint_address: str,
+        *,
+        source: str,
+        mark_timestamp: datetime,
+        diagnostic: str,
+    ) -> None:
+        async with self._lock_for(mint_address):
+            await self._on_mark_unavailable_locked(
+                mint_address,
+                source=source,
+                mark_timestamp=mark_timestamp,
+                diagnostic=diagnostic,
+            )
+
+    async def _on_mark_unavailable_locked(
+        self,
+        mint_address: str,
+        *,
+        source: str,
+        mark_timestamp: datetime,
+        diagnostic: str,
+    ) -> None:
+        position = self._positions.get(mint_address)
+        if position is None:
+            return
+        opened_at = position.get("opened_at")
+        age_minutes = (
+            (datetime.now(UTC) - opened_at).total_seconds() / 60
+            if isinstance(opened_at, datetime)
+            else 0.0
+        )
+        reason: str | None = None
+        if age_minutes >= self._exits["time_stop_minutes"]:
+            reason = "time_stop"
+        else:
+            no_mark_seconds = time.monotonic() - self._last_valid_mark_at.get(
+                mint_address,
+                time.monotonic(),
+            )
+            if no_mark_seconds >= 120:
+                reason = "mark_sla_timeout"
+            elif no_mark_seconds >= 60 and mint_address not in self._mark_sla_warned:
+                self._mark_sla_warned.add(mint_address)
+                log.warning(
+                    "mark SLA warning mint=%s no valid mark for %.1fs",
+                    mint_address[:16],
+                    no_mark_seconds,
+                )
+
+        await self._store.record_exit_evaluation(
+            str(position["id"]),
+            mint_address,
+            source=source,
+            mark_timestamp=mark_timestamp,
+            trigger_price_sol=None,
+            usable=False,
+            diagnostic=diagnostic,
+            exit_reason=reason,
+        )
+        if reason is not None:
+            await self._close_position(
+                position,
+                float(position["entry_price_sol"]),
+                reason,
+                mark_source=source,
+                mark_timestamp=mark_timestamp,
+                mark_diagnostic=diagnostic,
+                lock_held=True,
+            )
 
     def _exit_reason(self, position: dict[str, Any], current_price: float) -> str | None:
         entry = float(position["entry_price_sol"])
@@ -283,63 +462,173 @@ class StrategyExecutor:
 
     async def _enter(self, candidate: dict[str, Any]) -> None:
         mint = str(candidate["mint_address"])
-        candidate_price = _positive_float(candidate.get("price_sol"))
-        if candidate_price is None:
-            raise FailClosed(f"qualifying candidate {mint} has no usable SOL price")
-        if isinstance(self._adapter, PaperExecutionAdapter):
-            self._adapter.set_price(mint, candidate_price)
+        async with self._lock_for(mint):
+            if mint in self._positions:
+                return
+            await self._enter_locked(candidate)
+
+    async def _enter_locked(self, candidate: dict[str, Any]) -> None:
+        mint = str(candidate["mint_address"])
+        slippage_bps = _entry_slippage_bps(candidate.get("pool_sol"))
+        if slippage_bps is None:
+            log.info("entry skipped mint=%s reason=pool_below_slippage_tier", mint[:16])
+            return
         amount_sol = float(os.getenv("POSITION_SIZE_SOL", "0.02"))
         if amount_sol <= 0:
             raise RuntimeError("POSITION_SIZE_SOL must be positive")
-        if (
-            self._mode == "live"
-            and candidate.get("pool_type") == "bonding"
-            and hasattr(self._adapter, "buy_bonding_curve")
-        ):
-            trade = await self._adapter.buy_bonding_curve(mint, amount_sol, 300)
-        else:
-            trade = await self._adapter.execute_swap(mint, Side.BUY, amount_sol, 300)
-        if (
-            trade.token_amount is None
-            or trade.token_amount <= 0
-            or _positive_float(trade.price_sol) is None
-        ):
-            raise FailClosed(f"entry for {mint} returned an unpriced or zero-token fill")
-        opened_at = datetime.now(UTC)
-        position = {
-            "id": str(uuid4()),
-            "mint_address": mint,
-            "entry_price_sol": float(trade.price_sol),
-            "amount_sol": amount_sol,
-            "token_amount": float(trade.token_amount),
-            "peak_price_sol": float(trade.price_sol),
-            "trailing_armed": False,
-            "mode": self._mode,
-            "strategy": self._strategy,
-            "opened_at": opened_at,
-            "candidate_id": candidate.get("id"),
-            "fill_quality": "simulated" if self._mode == "paper" else "confirmed",
-            "tx_signature": trade.tx_signature,
-        }
-        await self._store.create_position(position, _trade_record(trade))
-        self._positions[mint] = position
-        log.info("entered mint=%s position=%s", mint[:16], position["id"])
+        if self._mode == "live":
+            await self._check_live_entry_guardrails(amount_sol)
+        async with self._store.entry_transaction(mint) as entry:
+            if not entry.allowed:
+                log.info("entry skipped mint=%s reason=%s", mint[:16], entry.rejection_reason)
+                return
+
+            mark_timestamp: datetime | None = None
+            entry_mark: PriceResult | None = None
+            if isinstance(self._adapter, PaperExecutionAdapter):
+                entry_mark = await self._get_mark(mint)
+                mark_price = _positive_float(entry_mark.price_sol)
+                if mark_price is None:
+                    log.warning(
+                        "entry skipped mint=%s no usable Price V3 mark reason=%s",
+                        mint[:16],
+                        entry_mark.reason,
+                    )
+                    return
+                mark_timestamp = datetime.now(UTC)
+                self._adapter.set_price(mint, mark_price)
+
+            if (
+                self._mode == "live"
+                and candidate.get("pool_type") == "bonding"
+                and hasattr(self._adapter, "buy_bonding_curve")
+            ):
+                trade = await self._adapter.buy_bonding_curve(mint, amount_sol, slippage_bps)
+            else:
+                trade = await self._adapter.execute_swap(
+                    mint,
+                    Side.BUY,
+                    amount_sol,
+                    slippage_bps,
+                )
+            if (
+                trade.token_amount is None
+                or trade.token_amount <= 0
+                or _positive_float(trade.price_sol) is None
+            ):
+                raise FailClosed(f"entry for {mint} returned an unpriced or zero-token fill")
+            trade.metadata = {
+                **trade.metadata,
+                "discovery_price_sol": candidate.get("price_sol"),
+                "discovery_source": candidate.get("source"),
+                "entry_mark_source": self._mark_provider.name if entry_mark else "confirmed_fill",
+                "entry_mark_timestamp": mark_timestamp.isoformat() if mark_timestamp else None,
+                "entry_mark_diagnostic": entry_mark.reason if entry_mark else None,
+            }
+            opened_at = datetime.now(UTC)
+            position = {
+                "id": str(uuid4()),
+                "mint_address": mint,
+                "entry_price_sol": float(trade.price_sol),
+                "amount_sol": float(trade.amount_sol),
+                "token_amount": float(trade.token_amount),
+                "peak_price_sol": float(trade.price_sol),
+                "trailing_armed": False,
+                "mode": self._mode,
+                "strategy": self._strategy,
+                "opened_at": opened_at,
+                "candidate_id": candidate.get("id"),
+                "fill_quality": "simulated" if self._mode == "paper" else "confirmed",
+                "tx_signature": trade.tx_signature,
+            }
+            await entry.create_position(position, _trade_record(trade))
+            self._positions[mint] = position
+            self._last_valid_mark_at[mint] = time.monotonic()
+            log.info("entered mint=%s position=%s", mint[:16], position["id"])
+            if self._mode == "live" and not self._live_entry_alerted:
+                self._live_entry_alerted = True
+                log.critical("FIRST LIVE ENTRY session mint=%s position=%s", mint, position["id"])
+                try:
+                    await self._alerts.send(
+                        "critical",
+                        "First live entry",
+                        f"Mint: {mint}\nPosition: {position['id']}\nAmount: {trade.amount_sol} SOL",
+                    )
+                except Exception as exc:
+                    log.error("first live entry alert failed: %s", exc)
 
     async def _close_position(
         self,
         position: dict[str, Any],
         fallback_price_sol: float,
         reason: str,
+        *,
+        mark_source: str = "unknown",
+        mark_timestamp: datetime | None = None,
+        mark_diagnostic: str = "unknown",
+        lock_held: bool = False,
     ) -> None:
         mint = str(position["mint_address"])
+        if not lock_held:
+            async with self._lock_for(mint):
+                current = self._positions.get(mint)
+                if current is None or str(current["id"]) != str(position["id"]):
+                    return
+                await self._close_position(
+                    current,
+                    fallback_price_sol,
+                    reason,
+                    mark_source=mark_source,
+                    mark_timestamp=mark_timestamp,
+                    mark_diagnostic=mark_diagnostic,
+                    lock_held=True,
+                )
+                return
         token_amount = float(position["token_amount"])
-        if hasattr(self._adapter, "sell"):
+        trigger_timestamp = mark_timestamp or datetime.now(UTC)
+        if self._mode == "paper":
+            close_price = fallback_price_sol
+            trade = Trade(
+                mint_address=mint,
+                side=Side.SELL,
+                amount_sol=token_amount * close_price,
+                token_amount=token_amount,
+                price_sol=close_price,
+                slippage_bps=300,
+                mode="paper",
+                status="simulated",
+            )
+        elif hasattr(self._adapter, "sell"):
             trade = await self._adapter.sell(mint, token_amount, 300)
+            close_price = _positive_float(trade.price_sol)
+            if close_price is None:
+                raise FailClosed(f"live close for {mint} returned no actual fill price")
         else:
             trade = await self._adapter.execute_swap(mint, Side.SELL, token_amount, 300)
-        close_price = _positive_float(trade.price_sol) or fallback_price_sol
+            close_price = _positive_float(trade.price_sol)
+            if close_price is None:
+                raise FailClosed(f"live close for {mint} returned no actual fill price")
+        if self._mode == "live":
+            verify_cleared = getattr(self._adapter, "verify_token_balance_cleared", None)
+            if verify_cleared is None:
+                raise FailClosed("live adapter cannot verify post-sell token balance")
+            await verify_cleared(mint)
         trade.token_amount = token_amount
-        realized_pnl = token_amount * close_price - float(position["amount_sol"])
+        trade.metadata = {
+            **trade.metadata,
+            "close_reason": reason,
+            "trigger_price_sol": fallback_price_sol,
+            "mark_source": mark_source,
+            "mark_timestamp": trigger_timestamp.isoformat(),
+            "mark_diagnostic": mark_diagnostic,
+        }
+        amount_sol = float(position["amount_sol"])
+        entry_price = float(position["entry_price_sol"])
+        realized_pnl = (
+            amount_sol * ((close_price - entry_price) / entry_price)
+            if self._mode == "paper"
+            else float(trade.amount_sol) - amount_sol
+        )
         await self._store.close_position(
             position,
             _trade_record(trade),
@@ -350,12 +639,67 @@ class StrategyExecutor:
         self._positions.pop(mint, None)
         self._last_pumpportal_price_at.pop(mint, None)
         self._last_jupiter_fallback_at.pop(mint, None)
+        self._last_valid_mark_at.pop(mint, None)
+        self._mark_sla_warned.discard(mint)
         await self._store.refresh_daily_stats(self._strategy)
         log.info("closed mint=%s reason=%s", mint[:16], reason)
 
-    async def _reconcile_startup(self) -> None:
-        if self._mode != "live":
+    def _lock_for(self, mint_address: str) -> asyncio.Lock:
+        lock = self._mint_locks.get(mint_address)
+        if lock is None:
+            lock = asyncio.Lock()
+            self._mint_locks[mint_address] = lock
+        return lock
+
+    def _on_price_task_done(self, task: asyncio.Task[None]) -> None:
+        self._price_tasks.discard(task)
+        if task.cancelled():
             return
+        exception = task.exception()
+        if exception is not None:
+            self._fatal_reason = f"price task failure: {exception}"
+
+    async def _check_live_entry_guardrails(self, amount_sol: float) -> None:
+        settings = _live_settings()
+        guardrails = evaluate_live_guardrails(settings, requested_trade_sol=amount_sol)
+        if not guardrails.allowed:
+            raise FailClosed(f"live guardrails blocked entry: {', '.join(guardrails.diagnostics)}")
+        daily_state = await self._store.load_daily_live_state()
+        daily_caps = evaluate_daily_live_caps(
+            daily_state,
+            max_daily_trades=guardrails.max_daily_trades,
+            max_daily_loss_sol=guardrails.max_daily_loss_sol,
+            today=datetime.now(UTC).date(),
+        )
+        if not daily_caps.allowed:
+            raise FailClosed(f"live daily caps blocked entry: {', '.join(daily_caps.diagnostics)}")
+        balance_lookup = getattr(self._adapter, "get_sol_balance", None)
+        if balance_lookup is None:
+            raise FailClosed("live adapter cannot verify wallet SOL balance")
+        balance = await balance_lookup()
+        required = amount_sol + settings.live_guardrails.min_wallet_balance_sol
+        if balance is None or balance < required:
+            raise FailClosed(
+                f"live wallet balance insufficient: balance={balance} required={required}",
+            )
+
+    async def _get_mark(self, mint_address: str) -> PriceResult:
+        diagnostic_lookup = getattr(self._mark_provider, "get_price_with_diagnostic", None)
+        if diagnostic_lookup is not None:
+            return await diagnostic_lookup(mint_address)
+        price = await self._mark_provider.get_current_price(mint_address)
+        return PriceResult(price, "ok" if price is not None else "price_unavailable")
+
+    async def _reconcile_startup(self) -> bool:
+        if self._mode != "live":
+            return True
+        locked_mints = [mint for mint, lock in self._mint_locks.items() if lock.locked()]
+        if locked_mints:
+            log.info(
+                "live reconciliation deferred for in-flight mints: %s",
+                ", ".join(sorted(mint[:16] for mint in locked_mints)),
+            )
+            return False
         holdings_lookup = getattr(self._adapter, "get_wallet_holdings", None)
         if holdings_lookup is None:
             raise FailClosed("live adapter does not expose wallet holdings for reconciliation")
@@ -376,6 +720,7 @@ class StrategyExecutor:
             raise FailClosed(
                 f"startup reconciliation wallet-only holdings: {', '.join(sorted(wallet_only))}"
             )
+        return True
 
     def _check_live_circuit_breaker(self) -> None:
         if self._mode != "live":
@@ -465,7 +810,37 @@ def _positive_float(value: object) -> float | None:
         number = float(value)
     except (TypeError, ValueError):
         return None
-    return number if number > 0 else None
+    return number if math.isfinite(number) and number > 0 else None
+
+
+def _entry_slippage_bps(pool_sol: object) -> int | None:
+    pool = _positive_float(pool_sol)
+    if pool is None or pool < 5:
+        return None
+    return 100 if pool > 20 else 300
+
+
+def _live_settings() -> Settings:
+    settings = load_settings()
+    return settings.model_copy(
+        update={"execution": settings.execution.model_copy(update={"mode": "live"})},
+    )
+
+
+def _acquire_singleton_lock(lock_path: Path | None = None) -> None:
+    """Prevent concurrent V2 executors from sharing Hive and the wallet."""
+
+    global _executor_lock_handle
+    if _executor_lock_handle is not None:
+        return
+    handle = (lock_path or EXECUTOR_LOCK_PATH).open("a+")
+    try:
+        fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError:
+        handle.close()
+        log.fatal("FATAL: another memecoin executor instance is running")
+        raise SystemExit(42) from None
+    _executor_lock_handle = handle
 
 
 def _trade_record(trade: Any) -> dict[str, Any]:
@@ -487,14 +862,39 @@ def _trade_record(trade: Any) -> dict[str, Any]:
 async def _run() -> None:
     load_dotenv()
     mode = os.getenv("EXECUTION_MODE", "paper").lower()
-    if mode == "paper":
-        adapter: Any = PaperExecutionAdapter()
-    elif mode == "live":
-        adapter = build_live_adapter()
-    else:
-        raise RuntimeError(f"EXECUTION_MODE must be paper or live, got {mode!r}")
     store = await MemecoinStore.connect()
     try:
+        if mode == "paper":
+            adapter: Any = PaperExecutionAdapter()
+        elif mode == "live":
+            amount_sol = float(os.getenv("POSITION_SIZE_SOL", "0.02"))
+            settings = _live_settings()
+            guardrails = evaluate_live_guardrails(settings, requested_trade_sol=amount_sol)
+            if not guardrails.allowed:
+                raise RuntimeError(
+                    f"live startup guardrails failed: {', '.join(guardrails.diagnostics)}",
+                )
+            daily_caps = evaluate_daily_live_caps(
+                await store.load_daily_live_state(),
+                max_daily_trades=guardrails.max_daily_trades,
+                max_daily_loss_sol=guardrails.max_daily_loss_sol,
+                today=datetime.now(UTC).date(),
+            )
+            if not daily_caps.allowed:
+                raise RuntimeError(
+                    f"live startup daily caps failed: {', '.join(daily_caps.diagnostics)}",
+                )
+            adapter = build_live_adapter()
+            balance = await adapter.get_sol_balance()
+            required = amount_sol + settings.live_guardrails.min_wallet_balance_sol
+            if balance is None or balance < required:
+                await adapter.close()
+                raise RuntimeError(
+                    "live startup wallet balance insufficient: "
+                    f"balance={balance} required={required}",
+                )
+        else:
+            raise RuntimeError(f"EXECUTION_MODE must be paper or live, got {mode!r}")
         executor = StrategyExecutor(
             store,
             adapter,
@@ -507,6 +907,7 @@ async def _run() -> None:
 
 def main() -> None:
     logging.basicConfig(level=logging.INFO, format="%(asctime)sZ %(levelname)s %(message)s")
+    _acquire_singleton_lock()
     asyncio.run(_run())
 
 

@@ -16,8 +16,11 @@ CREATE TABLE IF NOT EXISTS memecoin.candidates (
     observed_at TIMESTAMPTZ NOT NULL,
     source TEXT,
     age_seconds REAL,
+    corrected_age_seconds REAL,
     mcap_usd REAL,
     volume_usd REAL,
+    buy_volume_usd REAL,
+    sell_volume_usd REAL,
     txn_buys INTEGER,
     txn_sells INTEGER,
     buy_sell_ratio REAL,
@@ -28,6 +31,11 @@ CREATE TABLE IF NOT EXISTS memecoin.candidates (
     pool_sol REAL,
     pool_type TEXT,
     creator_holdings_pct REAL,
+    mint_authority_revoked BOOLEAN,
+    freeze_authority_revoked BOOLEAN,
+    top_holder_pct REAL,
+    security_source TEXT,
+    security_checked_at TIMESTAMPTZ,
     unique_wallets INTEGER,
     price_change_5m REAL,
     price_change_1h REAL,
@@ -35,8 +43,21 @@ CREATE TABLE IF NOT EXISTS memecoin.candidates (
     raw_json JSONB
 );
 
+ALTER TABLE memecoin.candidates
+    ADD COLUMN IF NOT EXISTS corrected_age_seconds REAL,
+    ADD COLUMN IF NOT EXISTS buy_volume_usd REAL,
+    ADD COLUMN IF NOT EXISTS sell_volume_usd REAL,
+    ADD COLUMN IF NOT EXISTS mint_authority_revoked BOOLEAN,
+    ADD COLUMN IF NOT EXISTS freeze_authority_revoked BOOLEAN,
+    ADD COLUMN IF NOT EXISTS top_holder_pct REAL,
+    ADD COLUMN IF NOT EXISTS security_source TEXT,
+    ADD COLUMN IF NOT EXISTS security_checked_at TIMESTAMPTZ;
+
 CREATE INDEX IF NOT EXISTS candidates_observed_mint_idx
     ON memecoin.candidates (observed_at, mint_address);
+
+CREATE INDEX IF NOT EXISTS candidates_mint_observed_idx
+    ON memecoin.candidates (mint_address, observed_at DESC, id DESC);
 
 CREATE TABLE IF NOT EXISTS memecoin.positions (
     id UUID PRIMARY KEY,
@@ -68,6 +89,10 @@ CREATE INDEX IF NOT EXISTS positions_open_strategy_idx
     ON memecoin.positions (strategy, mode, opened_at)
     WHERE status = 'open';
 
+CREATE INDEX IF NOT EXISTS positions_recent_hard_stop_idx
+    ON memecoin.positions (mint_address, closed_at DESC)
+    WHERE status = 'closed' AND close_reason = 'hard_stop';
+
 ALTER TABLE memecoin.positions
     ALTER COLUMN realized_pnl_sol TYPE DOUBLE PRECISION,
     ALTER COLUMN adjusted_pnl_sol TYPE DOUBLE PRECISION;
@@ -89,6 +114,21 @@ CREATE TABLE IF NOT EXISTS memecoin.trades (
 
 CREATE INDEX IF NOT EXISTS trades_position_executed_idx
     ON memecoin.trades (position_id, executed_at);
+
+CREATE TABLE IF NOT EXISTS memecoin.position_mark_evaluations (
+    id BIGSERIAL PRIMARY KEY,
+    position_id UUID NOT NULL REFERENCES memecoin.positions(id),
+    mint_address TEXT NOT NULL,
+    evaluated_at TIMESTAMPTZ NOT NULL,
+    source TEXT NOT NULL,
+    trigger_price_sol DOUBLE PRECISION,
+    usable BOOLEAN NOT NULL,
+    diagnostic TEXT NOT NULL,
+    exit_reason TEXT
+);
+
+CREATE INDEX IF NOT EXISTS position_mark_evaluations_position_idx
+    ON memecoin.position_mark_evaluations (position_id, evaluated_at DESC);
 
 CREATE TABLE IF NOT EXISTS memecoin.gate_config (
     id SERIAL PRIMARY KEY,

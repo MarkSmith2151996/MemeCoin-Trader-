@@ -136,6 +136,7 @@ def test_direct_buy_falls_back_to_rpc_after_jito_rejection() -> None:
         calls = {"token_balance": 0, "jito": 0, "rpc_send": 0}
         mint_data = bytearray(82)
         mint_data[44] = 6
+        keypair = Keypair()
 
         def handler(request: httpx.Request) -> httpx.Response:
             if request.url.host == "mainnet.block-engine.jito.wtf":
@@ -189,14 +190,33 @@ def test_direct_buy_falls_back_to_rpc_after_jito_rejection() -> None:
                     },
                 )
             if method == "getTransaction":
-                return httpx.Response(200, json={"result": None})
+                return httpx.Response(
+                    200,
+                    json={
+                        "result": {
+                            "meta": {
+                                "preTokenBalances": [],
+                                "postTokenBalances": [
+                                    {
+                                        "mint": str(MINT),
+                                        "owner": str(keypair.pubkey()),
+                                        "uiTokenAmount": {"amount": "500"},
+                                    },
+                                ],
+                                "preBalances": [2_000_000],
+                                "postBalances": [995_000],
+                                "fee": 5_000,
+                            },
+                        },
+                    },
+                )
             raise AssertionError(method)
 
         client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
         jito = JitoBlockEngineClient(http_client=client)
         executor = DirectExecutor(
             rpc_url="https://rpc.example",
-            keypair=Keypair(),
+            keypair=keypair,
             http_client=client,
             jito_client=jito,
             use_jito=True,
@@ -208,7 +228,7 @@ def test_direct_buy_falls_back_to_rpc_after_jito_rejection() -> None:
             await executor.close()
             await client.aclose()
 
-        assert calls == {"token_balance": 2, "jito": 1, "rpc_send": 1}
+        assert calls == {"token_balance": 1, "jito": 1, "rpc_send": 1}
         assert trade.tx_signature == "rpc-signature"
         assert trade.token_amount == pytest.approx(0.0005)
         assert trade.metadata["jito"] is False

@@ -27,6 +27,7 @@ log = logging.getLogger("memecoin.data_collector")
 JUPITER_API_BASE = "https://api.jup.ag/tokens/v2"
 PUMPPORTAL_WS_URL = "wss://pumpportal.fun/api/data"
 WRAPPED_SOL_MINT = "So11111111111111111111111111111111111111112"
+AGE_OFFSET_SECONDS = 39.0
 JUPITER_ENDPOINTS = (
     ("jupiter_toporganicscore", "/toporganicscore/5m", {"limit": 100}),
     ("jupiter_recent", "/recent", {"limit": 30}),
@@ -83,12 +84,22 @@ def _strength_score(
     volume_usd: float | None,
     buys: int | None,
     sells: int | None,
+    buy_volume_usd: float | None,
+    sell_volume_usd: float | None,
 ) -> float | None:
-    if None in (age_seconds, mcap_usd, volume_usd, buys, sells) or mcap_usd <= 0:
+    if None in (
+        age_seconds,
+        mcap_usd,
+        volume_usd,
+        buys,
+        sells,
+        buy_volume_usd,
+        sell_volume_usd,
+    ) or mcap_usd <= 0:
         return None
-    buy_volume_ratio = buys / max(sells, 1)
+    buy_volume_ratio = buy_volume_usd / max(sell_volume_usd, 1.0)
     volume_mcap_ratio = volume_usd / mcap_usd
-    adjusted_transactions = (buys + sells) * 1.24
+    adjusted_transactions = int((buys + sells) * 1.24)
     score = (
         min(buy_volume_ratio / 2, 1) * 40
         + min(volume_mcap_ratio / 0.05, 1) * 30
@@ -116,6 +127,7 @@ def normalize_jupiter_token(
     age_seconds = max((observed - created).total_seconds(), 0.0) if created else None
     stats_1h = token.get("stats1h") if isinstance(token.get("stats1h"), dict) else {}
     stats_5m = token.get("stats5m") if isinstance(token.get("stats5m"), dict) else {}
+    audit = token.get("audit") if isinstance(token.get("audit"), dict) else {}
     buys = _integer(stats_1h.get("numBuys")) or 0
     sells = _integer(stats_1h.get("numSells")) or 0
     buy_volume = _finite_float(stats_1h.get("buyVolume")) or 0.0
@@ -127,13 +139,19 @@ def normalize_jupiter_token(
     pool_mcap = pool_sol * sol_price_usd * 4.4 if pool_sol and sol_price_usd else None
     mcap_usd = pool_mcap if pool_mcap and raw_mcap and raw_mcap > pool_mcap * 1.5 else raw_mcap
     price_usd = _finite_float(token.get("usdPrice"))
+    corrected_age_seconds = age_seconds + AGE_OFFSET_SECONDS if age_seconds is not None else None
+    mint_authority_revoked = audit.get("mintAuthorityDisabled")
+    freeze_authority_revoked = audit.get("freezeAuthorityDisabled")
     return {
         "mint_address": mint,
         "observed_at": observed,
         "source": source,
         "age_seconds": age_seconds,
+        "corrected_age_seconds": corrected_age_seconds,
         "mcap_usd": mcap_usd,
         "volume_usd": volume_usd,
+        "buy_volume_usd": buy_volume,
+        "sell_volume_usd": sell_volume,
         "txn_buys": buys,
         "txn_sells": sells,
         "buy_sell_ratio": buy_volume / max(sell_volume, 1.0),
@@ -143,16 +161,27 @@ def normalize_jupiter_token(
         "price_usd": price_usd,
         "pool_sol": pool_sol,
         "pool_type": _pool_type(token),
-        "creator_holdings_pct": None,
+        "creator_holdings_pct": _finite_float(audit.get("devBalancePercentage")),
+        "mint_authority_revoked": (
+            mint_authority_revoked if isinstance(mint_authority_revoked, bool) else None
+        ),
+        "freeze_authority_revoked": (
+            freeze_authority_revoked if isinstance(freeze_authority_revoked, bool) else None
+        ),
+        "top_holder_pct": _finite_float(audit.get("topHoldersPercentage")),
+        "security_source": "jupiter_audit",
+        "security_checked_at": observed,
         "unique_wallets": _integer(token.get("holderCount")),
         "price_change_5m": _finite_float(stats_5m.get("priceChange")),
         "price_change_1h": _finite_float(stats_1h.get("priceChange")),
         "strength_score": _strength_score(
-            age_seconds=age_seconds,
+            age_seconds=corrected_age_seconds,
             mcap_usd=mcap_usd,
             volume_usd=volume_usd,
             buys=buys,
             sells=sells,
+            buy_volume_usd=buy_volume,
+            sell_volume_usd=sell_volume,
         ),
         "raw_json": token,
     }
@@ -177,10 +206,13 @@ def normalize_pumpportal_token(
         "observed_at": observed,
         "source": "pumpportal",
         "age_seconds": 0.0,
+        "corrected_age_seconds": None,
         "mcap_usd": (_finite_float(payload.get("marketCapSol")) or 0.0) * sol_price_usd
         if sol_price_usd
         else None,
         "volume_usd": None,
+        "buy_volume_usd": None,
+        "sell_volume_usd": None,
         "txn_buys": None,
         "txn_sells": None,
         "buy_sell_ratio": None,
@@ -191,6 +223,11 @@ def normalize_pumpportal_token(
         "pool_sol": pool_sol,
         "pool_type": "bonding",
         "creator_holdings_pct": None,
+        "mint_authority_revoked": None,
+        "freeze_authority_revoked": None,
+        "top_holder_pct": None,
+        "security_source": None,
+        "security_checked_at": None,
         "unique_wallets": None,
         "price_change_5m": None,
         "price_change_1h": None,

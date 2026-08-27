@@ -73,8 +73,11 @@ class FakeSwapClient:
                 attempts=1,
                 error="swap rejected by test",
             )
-        if quote.input_mint != SOL_MINT:
+        if quote.input_mint == SOL_MINT:
+            self.token_balance += quote.out_amount / (10**quote.token_decimals)
+        else:
             self.token_balance = 0.0
+            self.sol_balance += quote.out_amount / 1_000_000_000
         return JupiterSwapResult(
             ok=True,
             signature="sig-abc",
@@ -87,7 +90,9 @@ class FakeSwapClient:
             confirmation_status="confirmed",
             slot=77,
             attempts=1,
-            token_balance_after=self.token_balance,
+            token_balance_after=(
+                self.token_balance if quote.output_mint != SOL_MINT else self.sol_balance
+            ),
         )
 
     async def get_sol_balance(self) -> float | None:
@@ -221,7 +226,7 @@ def test_sell_happy_path_records_fill() -> None:
     assert client.swap_calls[0].output_mint == SOL_MINT
     # 1M token lamports in -> 1M lamports out -> 0.001 SOL
     assert trade.amount_sol == pytest.approx(0.001)
-    assert trade.metadata["token_balance_after"] == 0.0
+    assert trade.metadata["sol_balance_after"] == pytest.approx(5.001)
 
 
 def test_sell_retries_stale_balance_until_wallet_is_clear() -> None:
@@ -236,7 +241,7 @@ def test_sell_retries_stale_balance_until_wallet_is_clear() -> None:
 
     trade = asyncio.run(adapter.sell(TOKEN_MINT, 100.0))
 
-    assert trade.metadata["token_balance_after"] == 0.0
+    assert trade.metadata["sol_balance_after"] == pytest.approx(5.001)
 
 
 def test_post_sell_verification_rejects_remaining_wallet_balance(tmp_path) -> None:

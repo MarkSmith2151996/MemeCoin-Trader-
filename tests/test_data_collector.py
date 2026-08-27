@@ -4,7 +4,11 @@ from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
 
-from services.data_collector import normalize_jupiter_token, normalize_pumpportal_token
+from services.data_collector import (
+    _strength_score,
+    normalize_jupiter_token,
+    normalize_pumpportal_token,
+)
 
 
 def test_jupiter_token_becomes_complete_candidate_record() -> None:
@@ -16,6 +20,12 @@ def test_jupiter_token_becomes_complete_candidate_record() -> None:
         "liquidity": 2_000,
         "usdPrice": 0.001,
         "holderCount": 42,
+        "audit": {
+            "mintAuthorityDisabled": True,
+            "freezeAuthorityDisabled": True,
+            "topHoldersPercentage": 37.5,
+            "devBalancePercentage": 0,
+        },
         "firstPool": {
             "id": "mintpump",
             "createdAt": (observed_at - timedelta(minutes=2)).isoformat(),
@@ -35,9 +45,14 @@ def test_jupiter_token_becomes_complete_candidate_record() -> None:
     assert candidate["source"] == "jupiter_recent"
     assert candidate["pool_type"] == "bonding"
     assert candidate["age_seconds"] == 120
+    assert candidate["corrected_age_seconds"] == 159
     assert candidate["pool_sol"] == 10
     assert candidate["price_sol"] == 0.000005
-    assert candidate["strength_score"] is not None
+    assert candidate["strength_score"] == 88.0
+    assert candidate["mint_authority_revoked"] is True
+    assert candidate["freeze_authority_revoked"] is True
+    assert candidate["top_holder_pct"] == 37.5
+    assert candidate["creator_holdings_pct"] == 0
     assert candidate["raw_json"] is token
 
 
@@ -53,3 +68,27 @@ def test_pumpportal_new_token_is_preserved_when_gate_data_is_missing() -> None:
     assert candidate["pool_sol"] == 7
     assert candidate["volume_usd"] is None
     assert candidate["strength_score"] is None
+
+
+def test_strength_score_uses_dollar_volume_ratio_not_transaction_ratio() -> None:
+    sell_heavy_dollars = _strength_score(
+        age_seconds=120,
+        mcap_usd=10_000,
+        volume_usd=1_000,
+        buys=100,
+        sells=1,
+        buy_volume_usd=100,
+        sell_volume_usd=900,
+    )
+    buy_heavy_dollars = _strength_score(
+        age_seconds=120,
+        mcap_usd=10_000,
+        volume_usd=1_000,
+        buys=1,
+        sells=100,
+        buy_volume_usd=900,
+        sell_volume_usd=100,
+    )
+
+    assert sell_heavy_dollars == 50.2
+    assert buy_heavy_dollars == 88.0

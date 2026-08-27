@@ -4,10 +4,14 @@ from __future__ import annotations
 
 import json
 import os
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 from typing import Any
 from uuid import uuid4
 
 import asyncpg
+
+from src.execution.live_daily_caps import DailyLiveState
 
 
 def database_dsn() -> str:
@@ -60,8 +64,11 @@ class MemecoinStore:
             "observed_at",
             "source",
             "age_seconds",
+            "corrected_age_seconds",
             "mcap_usd",
             "volume_usd",
+            "buy_volume_usd",
+            "sell_volume_usd",
             "txn_buys",
             "txn_sells",
             "buy_sell_ratio",
@@ -72,6 +79,11 @@ class MemecoinStore:
             "pool_sol",
             "pool_type",
             "creator_holdings_pct",
+            "mint_authority_revoked",
+            "freeze_authority_revoked",
+            "top_holder_pct",
+            "security_source",
+            "security_checked_at",
             "unique_wallets",
             "price_change_5m",
             "price_change_1h",
@@ -110,6 +122,36 @@ class MemecoinStore:
         )
         return {str(row["param_name"]): float(row["param_value"]) for row in rows}
 
+    async def load_daily_live_state(self) -> DailyLiveState:
+        row = (
+            await self.fetch(
+                """
+                SELECT
+                    (NOW() AT TIME ZONE 'UTC')::date AS day,
+                    COUNT(*) FILTER (
+                        WHERE mode = 'live'
+                          AND opened_at >= DATE_TRUNC(
+                              'day', NOW() AT TIME ZONE 'UTC'
+                          ) AT TIME ZONE 'UTC'
+                    )::integer AS submitted_trade_count,
+                    COALESCE(-SUM(realized_pnl_sol) FILTER (
+                        WHERE mode = 'live'
+                          AND status = 'closed'
+                          AND realized_pnl_sol < 0
+                          AND closed_at >= DATE_TRUNC(
+                              'day', NOW() AT TIME ZONE 'UTC'
+                          ) AT TIME ZONE 'UTC'
+                    ), 0)::double precision AS realized_loss_sol
+                FROM memecoin.positions
+                """
+            )
+        )[0]
+        return DailyLiveState(
+            day=row["day"],
+            submitted_trade_count=int(row["submitted_trade_count"]),
+            realized_loss_sol=float(row["realized_loss_sol"]),
+        )
+
     async def create_position(
         self,
         position: dict[str, Any],
@@ -143,6 +185,37 @@ class MemecoinStore:
                 )
                 await self._insert_trade(connection, trade, position["id"])
 
+    @asynccontextmanager
+    async def entry_transaction(self, mint_address: str) -> AsyncIterator[EntryTransaction]:
+        """Serialize same-mint entry/close decisions through position creation."""
+
+        async with self._pool.acquire() as connection:
+            async with connection.transaction():
+                await connection.execute(
+                    "SELECT pg_advisory_xact_lock(hashtextextended($1, 0))",
+                    mint_address,
+                )
+                rejection = await connection.fetchval(
+                    """
+                    SELECT CASE
+                        WHEN EXISTS (
+                            SELECT 1 FROM memecoin.positions
+                            WHERE mint_address = $1 AND status = 'open'
+                        ) THEN 'already_open'
+                        WHEN EXISTS (
+                            SELECT 1 FROM memecoin.positions
+                            WHERE mint_address = $1
+                              AND status = 'closed'
+                              AND close_reason = 'hard_stop'
+                              AND closed_at > NOW() - INTERVAL '24 hours'
+                        ) THEN 'recent_hard_stop'
+                        ELSE NULL
+                    END
+                    """,
+                    mint_address,
+                )
+                yield EntryTransaction(self, connection, str(rejection) if rejection else None)
+
     async def update_position_mark(
         self,
         position_id: str,
@@ -162,6 +235,36 @@ class MemecoinStore:
                 trailing_armed,
             )
 
+    async def record_exit_evaluation(
+        self,
+        position_id: str,
+        mint_address: str,
+        *,
+        source: str,
+        mark_timestamp: object,
+        trigger_price_sol: float | None,
+        usable: bool,
+        diagnostic: str,
+        exit_reason: str | None,
+    ) -> None:
+        async with self._pool.acquire() as connection:
+            await connection.execute(
+                """
+                INSERT INTO memecoin.position_mark_evaluations (
+                    position_id, mint_address, evaluated_at, source,
+                    trigger_price_sol, usable, diagnostic, exit_reason
+                ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+                """,
+                position_id,
+                mint_address,
+                mark_timestamp,
+                source,
+                trigger_price_sol,
+                usable,
+                diagnostic,
+                exit_reason,
+            )
+
     async def close_position(
         self,
         position: dict[str, Any],
@@ -173,20 +276,27 @@ class MemecoinStore:
     ) -> None:
         async with self._pool.acquire() as connection:
             async with connection.transaction():
-                await self._insert_trade(connection, trade, str(position["id"]))
                 await connection.execute(
+                    "SELECT pg_advisory_xact_lock(hashtextextended($1, 0))",
+                    str(position["mint_address"]),
+                )
+                closed_id = await connection.fetchval(
                     """
                     UPDATE memecoin.positions
                     SET status = 'closed', closed_at = NOW(), close_reason = $2,
                         close_price_sol = $3, realized_pnl_sol = $4,
                         adjusted_pnl_sol = $4
                     WHERE id = $1 AND status = 'open'
+                    RETURNING id
                     """,
                     position["id"],
                     close_reason,
                     close_price_sol,
                     realized_pnl_sol,
                 )
+                if closed_id is None:
+                    raise RuntimeError(f"position {position['id']} is no longer open")
+                await self._insert_trade(connection, trade, str(position["id"]))
 
     async def record_runtime_event(
         self,
@@ -236,3 +346,52 @@ class MemecoinStore:
             trade["executed_at"],
             trade.get("metadata") or {},
         )
+
+
+class EntryTransaction:
+    """One guarded entry transaction held until its BUY row is durable."""
+
+    def __init__(
+        self,
+        store: MemecoinStore,
+        connection: asyncpg.Connection,
+        rejection_reason: str | None,
+    ) -> None:
+        self._store = store
+        self._connection = connection
+        self.rejection_reason = rejection_reason
+
+    @property
+    def allowed(self) -> bool:
+        return self.rejection_reason is None
+
+    async def create_position(
+        self,
+        position: dict[str, Any],
+        trade: dict[str, Any],
+    ) -> None:
+        await self._connection.execute(
+            """
+            INSERT INTO memecoin.positions (
+                id, mint_address, entry_price_sol, amount_sol, token_amount,
+                peak_price_sol, trailing_armed, status, mode, strategy, opened_at,
+                candidate_id, fill_quality, tx_signature
+            ) VALUES (
+                $1, $2, $3, $4, $5, $6, $7, 'open', $8, $9, $10, $11, $12, $13
+            )
+            """,
+            position["id"],
+            position["mint_address"],
+            position["entry_price_sol"],
+            position["amount_sol"],
+            position["token_amount"],
+            position["peak_price_sol"],
+            position["trailing_armed"],
+            position["mode"],
+            position["strategy"],
+            position["opened_at"],
+            position.get("candidate_id"),
+            position.get("fill_quality"),
+            position.get("tx_signature"),
+        )
+        await self._store._insert_trade(self._connection, trade, str(position["id"]))

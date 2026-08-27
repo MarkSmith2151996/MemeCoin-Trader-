@@ -13,6 +13,7 @@ ExecStart=/usr/bin/python3 services/executor.py
 Restart=on-failure
 RestartPreventExitStatus=42
 RestartSec=10
+TimeoutStopSec=180
 
 [Install]
 WantedBy=multi-user.target

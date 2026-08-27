@@ -132,18 +132,22 @@ class DirectExecutor(ExecutionAdapter):
         )
         fill = await self._get_transaction_fill(signature, mint_address)
         actual_tokens = fill.token_delta if fill and fill.token_delta > 0 else None
+        actual_sol = -fill.sol_delta if fill and fill.sol_delta < 0 else None
         if actual_tokens is None:
             post_token_balance = await self._token_balance_raw(mint_address)
             if pre_token_balance is not None and post_token_balance is not None:
                 actual_tokens = max(0, post_token_balance - pre_token_balance)
-        raw_tokens = actual_tokens or token_amount
+        if not actual_tokens or not actual_sol:
+            raise RuntimeError("confirmed direct buy fill could not be reconciled")
+        raw_tokens = actual_tokens
         decimals = account.token_decimals
         token_units = raw_tokens / 10**decimals
-        price_sol = amount_sol / token_units if token_units else None
+        actual_amount_sol = actual_sol / LAMPORTS_PER_SOL
+        price_sol = actual_amount_sol / token_units if token_units else None
         return Trade(
             mint_address=mint_address,
             side=Side.BUY,
-            amount_sol=amount_sol,
+            amount_sol=actual_amount_sol,
             token_amount=token_units,
             price_sol=price_sol,
             slippage_bps=resolved_slippage_bps,
@@ -156,6 +160,8 @@ class DirectExecutor(ExecutionAdapter):
                 "minimum_tokens_raw": token_amount,
                 "max_sol_cost_lamports": max_sol_cost,
                 "actual_tokens_raw": actual_tokens,
+                "actual_sol_lamports": actual_sol,
+                "actual_fill": True,
                 "jito": used_jito,
                 "jito_tip_lamports": self._jito_tip_lamports if used_jito else 0,
                 "transaction_size_bytes": transaction_size,
