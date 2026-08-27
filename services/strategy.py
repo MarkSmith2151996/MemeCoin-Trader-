@@ -82,7 +82,7 @@ async def get_qualifying_candidates(
         """
         SELECT DISTINCT ON (c.mint_address) c.*
         FROM memecoin.candidates AS c
-        WHERE c.observed_at >= $1 - ($2 * INTERVAL '1 second')
+        WHERE c.observed_at >= $1::timestamptz - ($2::double precision * INTERVAL '1 second')
           AND c.mcap_usd >= $3
           AND c.age_seconds >= $4
           AND c.age_seconds <= $5

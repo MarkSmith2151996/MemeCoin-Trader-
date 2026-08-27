@@ -53,8 +53,8 @@ CREATE TABLE IF NOT EXISTS memecoin.positions (
     closed_at TIMESTAMPTZ,
     close_reason TEXT,
     close_price_sol REAL,
-    realized_pnl_sol REAL,
-    adjusted_pnl_sol REAL,
+    realized_pnl_sol DOUBLE PRECISION,
+    adjusted_pnl_sol DOUBLE PRECISION,
     candidate_id INTEGER REFERENCES memecoin.candidates(id),
     fill_quality TEXT,
     tx_signature TEXT
@@ -67,6 +67,10 @@ CREATE UNIQUE INDEX IF NOT EXISTS positions_one_open_mint_mode_idx
 CREATE INDEX IF NOT EXISTS positions_open_strategy_idx
     ON memecoin.positions (strategy, mode, opened_at)
     WHERE status = 'open';
+
+ALTER TABLE memecoin.positions
+    ALTER COLUMN realized_pnl_sol TYPE DOUBLE PRECISION,
+    ALTER COLUMN adjusted_pnl_sol TYPE DOUBLE PRECISION;
 
 CREATE TABLE IF NOT EXISTS memecoin.trades (
     id UUID PRIMARY KEY,
@@ -156,6 +160,7 @@ $$;
 
 GRANT USAGE ON SCHEMA memecoin TO claude_reader, memecoin_writer;
 GRANT SELECT ON ALL TABLES IN SCHEMA memecoin TO claude_reader;
+GRANT SELECT ON ALL TABLES IN SCHEMA memecoin TO memecoin_writer;
 GRANT INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA memecoin TO memecoin_writer;
 GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA memecoin TO memecoin_writer;
 GRANT EXECUTE ON FUNCTION memecoin.refresh_daily_stats(TEXT) TO memecoin_writer;
@@ -163,6 +168,8 @@ GRANT memecoin_writer TO custodian;
 
 ALTER DEFAULT PRIVILEGES IN SCHEMA memecoin
     GRANT SELECT ON TABLES TO claude_reader;
+ALTER DEFAULT PRIVILEGES IN SCHEMA memecoin
+    GRANT SELECT ON TABLES TO memecoin_writer;
 ALTER DEFAULT PRIVILEGES IN SCHEMA memecoin
     GRANT INSERT, UPDATE, DELETE ON TABLES TO memecoin_writer;
 ALTER DEFAULT PRIVILEGES IN SCHEMA memecoin

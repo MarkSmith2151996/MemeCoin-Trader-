@@ -47,15 +47,30 @@ def _float(value: object, default: float | None = None) -> float | None:
         return default
 
 
+def _strip_nuls(value: Any) -> Any:
+    """Make nested JSON values valid for PostgreSQL JSONB."""
+
+    if isinstance(value, str):
+        return value.replace("\x00", "")
+    if isinstance(value, list):
+        return [_strip_nuls(item) for item in value]
+    if isinstance(value, dict):
+        return {
+            str(key).replace("\x00", ""): _strip_nuls(item)
+            for key, item in value.items()
+        }
+    return value
+
+
 def _json(value: object, default: dict[str, Any] | None = None) -> dict[str, Any]:
     if isinstance(value, dict):
-        return value
+        return _strip_nuls(value)
     if isinstance(value, str):
         try:
             parsed = json.loads(value)
         except json.JSONDecodeError:
             return default or {}
-        return parsed if isinstance(parsed, dict) else default or {}
+        return _strip_nuls(parsed) if isinstance(parsed, dict) else default or {}
     return default or {}
 
 
@@ -95,11 +110,7 @@ async def migrate(sqlite_path: Path, dsn: str, *, apply_schema: bool) -> dict[st
         sqlite = sqlite3.connect(sqlite_path)
         sqlite.row_factory = sqlite3.Row
         try:
-            candidate_ids, candidate_by_position, candidate_count = await _migrate_candidates(
-                sqlite,
-                connection,
-            )
-            del candidate_ids
+            candidate_by_position, candidate_count = await _migrate_candidates(sqlite, connection)
             position_ids, position_count = await _migrate_positions(
                 sqlite,
                 connection,
@@ -117,10 +128,26 @@ async def migrate(sqlite_path: Path, dsn: str, *, apply_schema: bool) -> dict[st
 async def _migrate_candidates(
     sqlite: sqlite3.Connection,
     connection: asyncpg.Connection,
-) -> tuple[dict[int, int], dict[str, int], int]:
-    candidate_ids: dict[int, int] = {}
+) -> tuple[dict[str, int], int]:
     candidate_by_position: dict[str, int] = {}
     count = 0
+    insert_query = """
+        INSERT INTO memecoin.candidates (
+            mint_address, observed_at, source, age_seconds, mcap_usd, volume_usd,
+            txn_buys, txn_sells, buy_sell_ratio, liquidity_usd, fdv_usd, price_usd,
+            creator_holdings_pct, price_change_5m, price_change_1h, raw_json
+        ) VALUES (
+            $1, $2, 'sqlite_candidate_log', $3, $4, $5, $6, $7, $8, $9, $10,
+            $11, $12, $13, $14, $15
+        )
+    """
+    batch: list[tuple[object, ...]] = []
+
+    async def flush() -> None:
+        if batch:
+            await connection.executemany(insert_query, batch)
+            batch.clear()
+
     for row in sqlite.execute("SELECT * FROM candidate_log ORDER BY id"):
         raw = {
             "ticker": _column(row, "ticker"),
@@ -131,17 +158,7 @@ async def _migrate_candidates(
             "profile": _column(row, "profile"),
             "sqlite_candidate_id": _column(row, "id"),
         }
-        candidate_id = await connection.fetchval(
-            """
-            INSERT INTO memecoin.candidates (
-                mint_address, observed_at, source, age_seconds, mcap_usd, volume_usd,
-                txn_buys, txn_sells, buy_sell_ratio, liquidity_usd, fdv_usd, price_usd,
-                creator_holdings_pct, price_change_5m, price_change_1h, raw_json
-            ) VALUES (
-                $1, $2, 'sqlite_candidate_log', $3, $4, $5, $6, $7, $8, $9, $10,
-                $11, $12, $13, $14, $15
-            ) RETURNING id
-            """,
+        values = (
             str(_column(row, "mint_address", "")),
             _datetime(_column(row, "scan_time")),
             (_float(_column(row, "age_minutes")) or 0) * 60,
@@ -156,15 +173,20 @@ async def _migrate_candidates(
             _float(_column(row, "dev_holdings_pct")),
             _float(_column(row, "price_change_5m")),
             _float(_column(row, "price_change_1h")),
-            raw,
+            _strip_nuls(raw),
         )
-        legacy_id = int(_column(row, "id", 0))
-        candidate_ids[legacy_id] = int(candidate_id)
         position_id = _column(row, "position_id")
         if position_id:
+            await flush()
+            candidate_id = await connection.fetchval(f"{insert_query} RETURNING id", *values)
             candidate_by_position[str(position_id)] = int(candidate_id)
+        else:
+            batch.append(values)
+            if len(batch) >= 1000:
+                await flush()
         count += 1
-    return candidate_ids, candidate_by_position, count
+    await flush()
+    return candidate_by_position, count
 
 
 async def _migrate_positions(
@@ -241,8 +263,6 @@ async def _migrate_trades(
         mode = str(_column(row, "mode", "paper") or "paper")
         legacy_trade_id = str(_column(row, "id"))
         position_id = entry_positions.get(legacy_trade_id) or positions_by_mint.get((mint, mode))
-        if position_id is None:
-            continue
         await connection.execute(
             """
             INSERT INTO memecoin.trades (

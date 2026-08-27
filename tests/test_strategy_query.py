@@ -43,6 +43,7 @@ def test_strategy_query_uses_database_gates_and_bound_values() -> None:
         assert "memecoin.candidates" in query
         assert "memecoin.gate_config" not in query
         assert "NOT EXISTS" in query
+        assert "$1::timestamptz" in query
         assert args[0] == now
         assert args[2:11] == (5100.0, 22.0, 1320.0, 500.0, 0.5, 5.0, 5.0, 40.0, 0.0)
         assert args[11:13] == ([2], [0, 19, 20, 21])
