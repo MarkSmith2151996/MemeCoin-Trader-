@@ -698,7 +698,7 @@ def test_confirmed_live_sell_cleanup_does_not_block_monitor(tmp_path: Path) -> N
     asyncio.run(run())
 
 
-def test_kill_script_and_watchdog_share_killswitch_contract() -> None:
+def test_kill_script_remains_while_legacy_watchdog_is_removed() -> None:
     root = Path(__file__).resolve().parents[1]
     assert "/tmp/memecoin_killswitch" in (root / "scripts" / "kill_loop.sh").read_text()
-    assert "/tmp/memecoin_killswitch" in Path("/home/dev/watchdog_memecoin.sh").read_text()
+    assert not Path("/home/dev/watchdog_memecoin.sh").exists()

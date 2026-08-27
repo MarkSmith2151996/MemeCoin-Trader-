@@ -1,0 +1,18 @@
+[Unit]
+Description=Memecoin Strategy Executor
+After=network.target memecoin-data.service
+StartLimitBurst=3
+StartLimitIntervalSec=300
+
+[Service]
+Type=simple
+User=dev
+WorkingDirectory=/home/dev/projects/memecoin-trader
+EnvironmentFile=/home/dev/projects/memecoin-trader/.env
+ExecStart=/usr/bin/python3 services/executor.py
+Restart=on-failure
+RestartPreventExitStatus=42
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target

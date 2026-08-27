@@ -1,0 +1,17 @@
+[Unit]
+Description=Memecoin Data Collector
+After=network.target
+StartLimitBurst=5
+StartLimitIntervalSec=300
+
+[Service]
+Type=simple
+User=dev
+WorkingDirectory=/home/dev/projects/memecoin-trader
+EnvironmentFile=/home/dev/projects/memecoin-trader/.env
+ExecStart=/usr/bin/python3 services/data_collector.py
+Restart=on-failure
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target
