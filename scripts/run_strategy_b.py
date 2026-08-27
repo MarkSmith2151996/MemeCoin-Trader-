@@ -87,6 +87,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import fcntl
 import json
 import logging
 import os
@@ -292,6 +293,8 @@ HOLDER_TIERS = [
 ]
 
 DB_PATH = Path("data/trades.db")
+STRATEGY_B_LOCK_PATH = Path("/tmp/strategy_b.lock")
+_strategy_b_lock_handle = None
 
 # MT-589: single-writer logging. The watchdog starts this script with
 # `> /tmp/strategy_b.log 2>&1`, so an extra FileHandler on the same path made
@@ -312,6 +315,22 @@ _runtime_handler.setFormatter(
 logging.basicConfig(level=logging.INFO, handlers=[_runtime_handler])
 log = logging.getLogger("strategy_b")
 logging.getLogger("httpx").setLevel(logging.WARNING)
+
+
+def _acquire_singleton_lock(lock_path: Path | None = None) -> None:
+    """Prevent two Strategy B processes from sharing a wallet and database."""
+    global _strategy_b_lock_handle
+    if _strategy_b_lock_handle is not None:
+        return
+
+    handle = (lock_path or STRATEGY_B_LOCK_PATH).open("a+")
+    try:
+        fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError:
+        handle.close()
+        log.fatal("FATAL: another Strategy B instance is running — exiting")
+        sys.exit(1)
+    _strategy_b_lock_handle = handle
 
 try:
     from src.signals.whale_tracker import (  # noqa: F401 — kept for MT-524 re-enable
@@ -2753,6 +2772,7 @@ async def record_manual_freeze(db_path: Path) -> None:
 
 
 async def main() -> None:
+    _acquire_singleton_lock()
     from dotenv import load_dotenv
 
     load_dotenv()
