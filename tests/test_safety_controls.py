@@ -170,6 +170,7 @@ class FakeHiveStore:
 
     async def close_position(self, position, trade, **values) -> None:
         self.closed.append({"position": position, "trade": trade, **values})
+        self.positions.remove(position)
 
 
 class FakeAlerts:
@@ -632,5 +633,38 @@ def test_v2_kill_switch_alerts_and_leaves_failed_positions_open(tmp_path) -> Non
         assert store.closed == []
         assert alerts.messages[0][1] == "V2 kill switch incomplete"
         assert TOKEN_MINT[:16] in alerts.messages[0][2]
+
+    asyncio.run(run())
+
+
+def test_v2_kill_switch_retries_failed_position_after_env_flips_to_paper(tmp_path) -> None:
+    async def run() -> None:
+        env = tmp_path / ".env"
+        env.write_text("EXECUTION_MODE=live\n")
+        position = {
+            "id": "position-a",
+            "mint_address": TOKEN_MINT,
+            "token_amount": 1000.0,
+            "amount_sol": 0.05,
+        }
+        store = FakeHiveStore([position])
+        adapter = FakeV2SellAdapter(fail_mints={TOKEN_MINT})
+        kill_switch = V2KillSwitch(
+            store=store,
+            adapter=adapter,
+            env_path=env,
+            breaker=CircuitBreaker(flag_path=tmp_path / "breaker.json"),
+            halt_path=tmp_path / "halt",
+        )
+
+        first = await kill_switch.run()
+        adapter.fail_mints.clear()
+        second = await kill_switch.run()
+
+        assert first.failed == 1
+        assert second.mode_before == "paper"
+        assert second.sold == 1
+        assert store.positions == []
+        assert len(adapter.calls) == 2
 
     asyncio.run(run())

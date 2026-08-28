@@ -444,6 +444,7 @@ def test_execute_swap_retries_on_expiry_then_confirms() -> None:
     assert result.ok is True
     assert result.attempts == 2
     assert result.signature == "sig-2"
+    assert result.balance_before_last_attempt == pytest.approx(1.0)
     assert send_calls["n"] == 2
 
 

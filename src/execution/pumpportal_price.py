@@ -23,6 +23,7 @@ PUMPPORTAL_WS_URL = "wss://pumpportal.fun/api/data"
 PriceHandler = Callable[[str, float], Awaitable[None]]
 MintsProvider = Callable[[], Awaitable[set[str]]]
 StaleHandler = Callable[[], Awaitable[None]]
+RecoveredHandler = Callable[[], Awaitable[None]]
 
 
 class PumpPortalPriceFeed:
@@ -33,6 +34,7 @@ class PumpPortalPriceFeed:
         held_mints: MintsProvider,
         on_price: PriceHandler,
         on_stale: StaleHandler | None = None,
+        on_recovered: RecoveredHandler | None = None,
         *,
         url: str = PUMPPORTAL_WS_URL,
         refresh_interval_s: float = 1.0,
@@ -42,6 +44,7 @@ class PumpPortalPriceFeed:
         self._held_mints = held_mints
         self._on_price = on_price
         self._on_stale = on_stale
+        self._on_recovered = on_recovered
         self._url = url
         self._refresh_interval_s = refresh_interval_s
         self._reconnect_delay_s = reconnect_delay_s
@@ -105,7 +108,13 @@ class PumpPortalPriceFeed:
                 await self._notify_stale_feed()
                 continue
             self._last_pumpportal_event_at = time.monotonic()
+            was_stale = self._stale_notified
             self._stale_notified = False
+            if was_stale and self._on_recovered is not None:
+                try:
+                    await self._on_recovered()
+                except Exception as exc:
+                    log.error("PRICE_FEED: recovery handler failed: %s", exc)
             price = _parse_price_update(raw)
             if price is not None and price[0] in subscribed:
                 await self._on_price(*price)

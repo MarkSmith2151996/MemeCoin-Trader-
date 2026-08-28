@@ -78,12 +78,19 @@ CREATE TABLE IF NOT EXISTS memecoin.positions (
     adjusted_pnl_sol DOUBLE PRECISION,
     candidate_id INTEGER REFERENCES memecoin.candidates(id),
     fill_quality TEXT,
-    tx_signature TEXT
+    tx_signature TEXT,
+    quarantined_at TIMESTAMPTZ,
+    quarantine_reason TEXT
 );
 
+ALTER TABLE memecoin.positions
+    ADD COLUMN IF NOT EXISTS quarantined_at TIMESTAMPTZ,
+    ADD COLUMN IF NOT EXISTS quarantine_reason TEXT;
+
+DROP INDEX IF EXISTS memecoin.positions_one_open_mint_mode_idx;
 CREATE UNIQUE INDEX IF NOT EXISTS positions_one_open_mint_mode_idx
     ON memecoin.positions (mint_address, mode)
-    WHERE status = 'open';
+    WHERE status IN ('open', 'quarantined');
 
 CREATE INDEX IF NOT EXISTS positions_open_strategy_idx
     ON memecoin.positions (strategy, mode, opened_at)

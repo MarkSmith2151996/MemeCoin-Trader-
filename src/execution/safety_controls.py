@@ -403,6 +403,8 @@ class V2KillSwitch:
 
     The permanent breaker and halt marker are written before the first sell so
     the running executor stops entries even if a liquidation submission fails.
+    It is gated on unsettled live state rather than ``EXECUTION_MODE`` so a
+    partial prior run can be repeated after it has set the environment to paper.
     Each position is closed in Hive only after the live adapter confirms the
     wallet no longer holds the token.
     """
@@ -427,15 +429,25 @@ class V2KillSwitch:
         self._slippage_bps = slippage_bps
 
     async def run(self) -> KillSwitchSummary:
-        """Liquidate every open live Hive position and leave entries disabled."""
+        """Liquidate unsettled Hive positions and leave future entries disabled."""
 
         mode_before = read_execution_mode(self._env_path)
-        if mode_before != "live":
-            raise KillSwitchNotArmedError(
-                f"kill switch is live-mode only — EXECUTION_MODE is '{mode_before}'",
-            )
         if getattr(self._adapter, "mode", None) != "live":
             raise RuntimeError("kill switch requires a live execution adapter")
+
+        positions = list(await self._store.list_open_live_positions())
+        holdings_lookup = getattr(self._adapter, "get_wallet_holdings", None)
+        holdings = await holdings_lookup() if holdings_lookup is not None else None
+        if not positions and not holdings:
+            return KillSwitchSummary(
+                mode_before=mode_before,
+                mode_after=mode_before,
+                breaker_tripped=self._breaker.is_tripped(),
+                positions_found=0,
+                sold=0,
+                failed=0,
+                details=("No unsettled live Hive rows or wallet token holdings found.",),
+            )
 
         # These latches must take effect before any external liquidation call.
         set_env_value(self._env_path, "LIVE_KILL_SWITCH", "true")
@@ -446,10 +458,16 @@ class V2KillSwitch:
         )
         self._write_halt("kill switch triggered")
 
-        positions = await self._store.list_open_live_positions()
         sold = 0
         failed = 0
         details: list[str] = []
+        tracked_mints = {str(position["mint_address"]) for position in positions}
+        for mint, amount in sorted((holdings or {}).items()):
+            if amount > 0 and mint not in tracked_mints:
+                failed += 1
+                details.append(
+                    f"FAIL {mint[:16]}: wallet holding has no unsettled live Hive row",
+                )
         for position in positions:
             mint = str(position["mint_address"])
             token_amount = float(position.get("token_amount") or 0)
@@ -480,6 +498,9 @@ class V2KillSwitch:
                     close_reason="kill_switch",
                     realized_pnl_sol=realized_pnl,
                 )
+                refresh_daily_stats = getattr(self._store, "refresh_daily_stats", None)
+                if refresh_daily_stats is not None:
+                    await refresh_daily_stats(str(position.get("strategy") or "BT"))
                 sold += 1
                 details.append(f"OK {mint[:16]} sig={getattr(trade, 'tx_signature', None) or '-'}")
                 log.info("V2 KILL SWITCH SELL OK mint=%s", mint[:16])

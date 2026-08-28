@@ -30,6 +30,7 @@ from src.core.models import Side, SwapQuote, Trade
 from src.execution.base import ExecutionAdapter
 from src.execution.price_provider import PriceProvider
 from src.execution.safety_controls import CircuitBreaker
+from src.execution.token_dust import RAW_TOKEN_DUST_TOLERANCE
 
 log = logging.getLogger("live_execution")
 
@@ -109,10 +110,16 @@ class LiveExecutionAdapter(ExecutionAdapter):
                 f"live buy failed ({result.confirmation_status}): {result.error or 'unknown'}",
             )
 
+        balance_before_last_attempt = result.balance_before_last_attempt
+        effective_pre_token_balance = (
+            balance_before_last_attempt
+            if balance_before_last_attempt is not None
+            else pre_token_balance
+        )
         post_token_balance = result.token_balance_after
-        if post_token_balance is None or post_token_balance <= pre_token_balance:
+        if post_token_balance is None or post_token_balance <= effective_pre_token_balance:
             raise RuntimeError("confirmed live buy has no verifiable wallet token delta")
-        token_amount = post_token_balance - pre_token_balance
+        token_amount = post_token_balance - effective_pre_token_balance
         actual_amount_sol = result.in_amount / LAMPORTS_PER_SOL
         actual_price_sol = actual_amount_sol / token_amount
         return Trade(
@@ -130,6 +137,7 @@ class LiveExecutionAdapter(ExecutionAdapter):
                 "quote_in_amount": result.in_amount,
                 "quote_out_amount": result.out_amount,
                 "pre_token_balance": pre_token_balance,
+                "pre_token_balance_last_attempt": effective_pre_token_balance,
                 "post_token_balance": post_token_balance,
                 "actual_fill": True,
                 "price_impact_pct": quote.price_impact_pct,
@@ -242,6 +250,11 @@ class LiveExecutionAdapter(ExecutionAdapter):
         """Return all positive SPL-token balances without attempting a swap."""
         self._ensure_open()
         return await self._client.get_wallet_holdings()
+
+    async def get_token_accounts(self):
+        """Return raw wallet token-account balances for live reconciliation."""
+        self._ensure_open()
+        return await self._client.get_token_accounts()
 
     async def get_sol_balance(self) -> float | None:
         """Return the wallet SOL balance without attempting a swap."""
@@ -406,7 +419,7 @@ class LiveExecutionAdapter(ExecutionAdapter):
 
     async def _verify_token_balance_cleared(self, mint_address: str, decimals: int) -> float:
         """Require a confirmed sell to leave no spendable balance for its mint."""
-        dust = 1 / 10**decimals
+        dust = RAW_TOKEN_DUST_TOLERANCE / 10**decimals
         last_balance: float | None = None
         deadline = asyncio.get_running_loop().time() + self._balance_reconciliation_timeout_s
         attempt = 0
@@ -436,7 +449,7 @@ class LiveExecutionAdapter(ExecutionAdapter):
 
     async def _wait_for_positive_token_balance(self, mint_address: str, decimals: int) -> float:
         """Allow the RPC token-account indexer time to expose a fresh buy fill."""
-        dust = 1 / 10**decimals
+        dust = RAW_TOKEN_DUST_TOLERANCE / 10**decimals
         last_balance: float | None = None
         deadline = asyncio.get_running_loop().time() + self._balance_reconciliation_timeout_s
         attempt = 0

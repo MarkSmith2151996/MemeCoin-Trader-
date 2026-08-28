@@ -331,7 +331,7 @@ def test_second_v2_executor_process_is_rejected(tmp_path: Path) -> None:
         holder.terminate()
         holder.wait(timeout=5)
 
-    assert second.returncode == 42
+    assert second.returncode == 43
     assert "another memecoin executor instance is running" in second.stderr
 
 

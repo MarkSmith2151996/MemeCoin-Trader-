@@ -114,12 +114,23 @@ class MemecoinStore:
         )
 
     async def list_open_live_positions(self) -> list[dict[str, Any]]:
-        """Return every open live position for emergency/operator liquidation."""
+        """Return every unsettled live position for operator liquidation."""
 
         return await self.fetch(
             """
             SELECT * FROM memecoin.positions
-            WHERE status = 'open' AND mode = 'live'
+            WHERE status IN ('open', 'quarantined') AND mode = 'live'
+            ORDER BY opened_at
+            """
+        )
+
+    async def list_quarantined_live_positions(self) -> list[dict[str, Any]]:
+        """Return retained live mints that must stay blocked from re-entry."""
+
+        return await self.fetch(
+            """
+            SELECT * FROM memecoin.positions
+            WHERE status = 'quarantined' AND mode = 'live'
             ORDER BY opened_at
             """
         )
@@ -213,7 +224,8 @@ class MemecoinStore:
                     SELECT CASE
                         WHEN EXISTS (
                             SELECT 1 FROM memecoin.positions
-                            WHERE mint_address = $1 AND status = 'open'
+                            WHERE mint_address = $1
+                              AND status IN ('open', 'quarantined')
                         ) THEN 'already_open'
                         WHEN EXISTS (
                             SELECT 1 FROM memecoin.positions
@@ -247,6 +259,28 @@ class MemecoinStore:
                 peak_price_sol,
                 trailing_armed,
             )
+
+    async def quarantine_position(self, position: dict[str, Any], reason: str) -> None:
+        """Retain an unsellable live position without consuming an active slot."""
+
+        async with self._pool.acquire() as connection:
+            async with connection.transaction():
+                await connection.execute(
+                    "SELECT pg_advisory_xact_lock(hashtextextended($1, 0))",
+                    str(position["mint_address"]),
+                )
+                quarantined_id = await connection.fetchval(
+                    """
+                    UPDATE memecoin.positions
+                    SET status = 'quarantined', quarantined_at = NOW(), quarantine_reason = $2
+                    WHERE id = $1 AND status = 'open'
+                    RETURNING id
+                    """,
+                    position["id"],
+                    reason,
+                )
+                if quarantined_id is None:
+                    raise RuntimeError(f"position {position['id']} is no longer open")
 
     async def record_exit_evaluation(
         self,
@@ -301,7 +335,7 @@ class MemecoinStore:
                         adjusted_pnl_sol = $4,
                         peak_price_sol = GREATEST(COALESCE(peak_price_sol, 0), $5),
                         trailing_armed = trailing_armed OR $6
-                    WHERE id = $1 AND status = 'open'
+                    WHERE id = $1 AND status IN ('open', 'quarantined')
                     RETURNING id
                     """,
                     position["id"],

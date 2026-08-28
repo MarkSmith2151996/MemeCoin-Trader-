@@ -142,6 +142,9 @@ class PumpFunExecutionRouter(ExecutionAdapter):
     async def get_wallet_holdings(self) -> dict[str, float] | None:
         return await self._jupiter.get_wallet_holdings()
 
+    async def get_token_accounts(self):
+        return await self._jupiter.get_token_accounts()
+
     async def get_sol_balance(self) -> float | None:
         return await self._jupiter.get_sol_balance()
 

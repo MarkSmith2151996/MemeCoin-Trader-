@@ -31,6 +31,7 @@ from src.execution.live_daily_caps import evaluate_daily_live_caps
 from src.execution.live_guardrails import evaluate_live_guardrails
 from src.execution.price_provider import JupiterPriceProvider, PriceProvider, PriceResult
 from src.execution.pumpportal_price import PumpPortalPriceFeed
+from src.execution.token_dust import RAW_TOKEN_DUST_TOLERANCE, WALLET_ONLY_DUST_VALUE_SOL
 from src.monitoring.alerts import AlertManager
 
 log = logging.getLogger("memecoin.executor")
@@ -40,6 +41,9 @@ MONITOR_INTERVAL_SECONDS = 0.1
 JUPITER_FALLBACK_RPS = 7.0
 JUPITER_FALLBACK_INTERVAL_SECONDS = 1 / JUPITER_FALLBACK_RPS
 MIN_JUPITER_POSITION_INTERVAL_SECONDS = 0.25
+FEED_STALE_GRACE_SECONDS = 90.0
+LIVE_EXIT_SLIPPAGE_BPS = (300, 500, 1000)
+LIVE_EXIT_RETRY_BACKOFF_SECONDS = 0.25
 
 
 class ExecutorStore(Protocol):
@@ -83,6 +87,10 @@ class ExecutorStore(Protocol):
         realized_pnl_sol: float,
     ) -> None: ...
 
+    async def quarantine_position(self, position: dict[str, Any], reason: str) -> None: ...
+
+    async def list_quarantined_live_positions(self) -> list[dict[str, Any]]: ...
+
     async def record_runtime_event(
         self,
         event_type: str,
@@ -95,6 +103,10 @@ class ExecutorStore(Protocol):
 
 class FailClosed(RuntimeError):
     """Signals that the process must close positions and exit with status 42."""
+
+
+class OrphanedLiveStateFailClosed(FailClosed):
+    """Refuse paper startup without closing unrelated paper positions."""
 
 
 class StrategyExecutor:
@@ -113,6 +125,7 @@ class StrategyExecutor:
         mark_provider: PriceProvider | None = None,
         alert_manager: Any | None = None,
         entry_arming_check: Callable[[], Awaitable[tuple[str, ...]]] | None = None,
+        paper_live_state_check: Callable[[], Awaitable[tuple[str, ...]]] | None = None,
     ) -> None:
         self._store = store
         self._adapter = adapter
@@ -125,6 +138,7 @@ class StrategyExecutor:
         self._mark_provider = mark_provider or JupiterPriceProvider()
         self._alerts = alert_manager or AlertManager.from_env()
         self._entry_arming_check = entry_arming_check
+        self._paper_live_state_check = paper_live_state_check
         self._monitor_only = False
         self._monitor_only_reasons: tuple[str, ...] = ()
         self._positions: dict[str, dict[str, Any]] = {}
@@ -146,6 +160,9 @@ class StrategyExecutor:
         self._fatal_reason: str | None = None
         self._emergency_started = False
         self._live_entry_alerted = False
+        self._feed_stale_since: float | None = None
+        self._fallback_attempted_since_stale: set[str] = set()
+        self._fallback_marked_since_stale: set[str] = set()
 
     async def start(self) -> None:
         """Hydrate persisted open state before deciding whether entries are armed."""
@@ -159,6 +176,21 @@ class StrategyExecutor:
         self._validate_exit_config()
         rows = await self._store.list_open_positions(self._strategy, self._mode)
         self._positions = {str(row["mint_address"]): dict(row) for row in rows}
+        if self._mode == "paper" and self._paper_live_state_check is not None:
+            reasons = await self._paper_live_state_check()
+            if reasons:
+                message = "; ".join(reasons)
+                if _env_flag("MEMECOIN_ALLOW_ORPHANED_LIVE_STATE"):
+                    log.critical("paper startup override accepted despite live state: %s", message)
+                else:
+                    await self._send_alert(
+                        "critical",
+                        "Paper executor refused: unresolved live state",
+                        message,
+                    )
+                    raise OrphanedLiveStateFailClosed(
+                        "paper startup refused while live Hive/wallet state remains: " + message,
+                    )
         started_at = time.monotonic()
         self._last_valid_mark_at = {mint: started_at for mint in self._positions}
         await self._reconcile_startup()
@@ -193,6 +225,7 @@ class StrategyExecutor:
                 self._held_mints,
                 self._on_pumpportal_price,
                 self._on_feed_stale,
+                self._on_feed_recovered,
             )
             feed_task = asyncio.create_task(feed.run(), name="memecoin-pumpportal-price-feed")
             monitor_task = asyncio.create_task(
@@ -211,6 +244,11 @@ class StrategyExecutor:
         except asyncio.CancelledError:
             await self._emergency_close_all("executor cancelled")
             raise
+        except OrphanedLiveStateFailClosed as exc:
+            # This is a preflight refusal, not a runtime event. In particular,
+            # do not close the paper positions just hydrated for this process.
+            log.critical("%s", exc)
+            raise SystemExit(42) from exc
         except Exception as exc:
             await self._emergency_close_all(str(exc))
             raise SystemExit(42) from exc
@@ -236,6 +274,9 @@ class StrategyExecutor:
 
         if self._fatal_reason:
             raise FailClosed(self._fatal_reason)
+        self._check_feed_stale_grace()
+        if self._fatal_reason:
+            raise FailClosed(self._fatal_reason)
         if self._gates is None:
             raise RuntimeError("executor was not started")
         if self._check_live_circuit_breaker():
@@ -249,6 +290,10 @@ class StrategyExecutor:
             if await self._reconcile_startup():
                 self._last_reconciliation_monotonic = time.monotonic()
         if self._monitor_only:
+            return
+        if self._feed_stale_since is not None:
+            # Existing positions remain monitored from the fallback marks, but
+            # a stale entry feed must not open more exposure during its grace.
             return
         candidates = await get_qualifying_candidates(
             self._store,
@@ -294,7 +339,34 @@ class StrategyExecutor:
         )
 
     async def _on_feed_stale(self) -> None:
-        self._fatal_reason = "PumpPortal global feed stale >15s"
+        if self._feed_stale_since is not None:
+            return
+        self._feed_stale_since = time.monotonic()
+        self._fallback_attempted_since_stale.clear()
+        self._fallback_marked_since_stale.clear()
+        log.warning(
+            "PumpPortal global feed stale; using Jupiter fallback marks for %.0fs",
+            FEED_STALE_GRACE_SECONDS,
+        )
+        await self._send_alert(
+            "warning",
+            "PumpPortal feed stale: Jupiter fallback active",
+            f"Held positions will use Jupiter marks for up to {int(FEED_STALE_GRACE_SECONDS)}s.",
+        )
+
+    async def _on_feed_recovered(self) -> None:
+        if self._feed_stale_since is None:
+            return
+        elapsed = time.monotonic() - self._feed_stale_since
+        self._feed_stale_since = None
+        self._fallback_attempted_since_stale.clear()
+        self._fallback_marked_since_stale.clear()
+        log.info("PumpPortal global feed recovered after %.1fs", elapsed)
+        await self._send_alert(
+            "info",
+            "PumpPortal feed recovered",
+            f"Fallback mark grace ended after {elapsed:.1f}s.",
+        )
 
     def _cache_mark(
         self,
@@ -362,6 +434,10 @@ class StrategyExecutor:
             mark_timestamp=datetime.now(UTC),
             diagnostic=mark.reason,
         )
+        if self._feed_stale_since is not None:
+            self._fallback_attempted_since_stale.add(mint)
+            if _positive_float(mark.price_sol) is not None:
+                self._fallback_marked_since_stale.add(mint)
 
     async def _monitor_positions_once(self) -> None:
         """Perform cached comparisons and persist changed trailing state at most once/sec."""
@@ -419,7 +495,7 @@ class StrategyExecutor:
             diagnostic=diagnostic,
             exit_reason=reason,
         )
-        await self._close_position(
+        await self._close_from_monitor(
             position,
             current_price,
             reason,
@@ -473,7 +549,7 @@ class StrategyExecutor:
             diagnostic=diagnostic,
             exit_reason=reason,
         )
-        await self._close_position(
+        await self._close_from_monitor(
             position,
             float(position["entry_price_sol"]),
             reason,
@@ -619,6 +695,7 @@ class StrategyExecutor:
         mark_timestamp: datetime | None = None,
         mark_diagnostic: str = "unknown",
         lock_held: bool = False,
+        slippage_bps: int = 300,
     ) -> None:
         mint = str(position["mint_address"])
         if not lock_held:
@@ -634,6 +711,7 @@ class StrategyExecutor:
                     mark_timestamp=mark_timestamp,
                     mark_diagnostic=mark_diagnostic,
                     lock_held=True,
+                    slippage_bps=slippage_bps,
                 )
                 return
         token_amount = float(position["token_amount"])
@@ -651,12 +729,12 @@ class StrategyExecutor:
                 status="simulated",
             )
         elif hasattr(self._adapter, "sell"):
-            trade = await self._adapter.sell(mint, token_amount, 300)
+            trade = await self._adapter.sell(mint, token_amount, slippage_bps)
             close_price = _positive_float(trade.price_sol)
             if close_price is None:
                 raise FailClosed(f"live close for {mint} returned no actual fill price")
         else:
-            trade = await self._adapter.execute_swap(mint, Side.SELL, token_amount, 300)
+            trade = await self._adapter.execute_swap(mint, Side.SELL, token_amount, slippage_bps)
             close_price = _positive_float(trade.price_sol)
             if close_price is None:
                 raise FailClosed(f"live close for {mint} returned no actual fill price")
@@ -688,15 +766,94 @@ class StrategyExecutor:
             close_reason=reason,
             realized_pnl_sol=realized_pnl,
         )
+        self._remove_position(mint, str(position["id"]))
+        await self._store.refresh_daily_stats(self._strategy)
+        log.info("closed mint=%s reason=%s", mint[:16], reason)
+
+    async def _close_from_monitor(
+        self,
+        position: dict[str, Any],
+        fallback_price_sol: float,
+        reason: str,
+        *,
+        mark_source: str,
+        mark_timestamp: datetime,
+        mark_diagnostic: str,
+        lock_held: bool,
+    ) -> None:
+        """Keep an expected single-token exit failure inside the monitor loop."""
+
+        if self._mode != "live":
+            await self._close_position(
+                position,
+                fallback_price_sol,
+                reason,
+                mark_source=mark_source,
+                mark_timestamp=mark_timestamp,
+                mark_diagnostic=mark_diagnostic,
+                lock_held=lock_held,
+            )
+            return
+
+        mint = str(position["mint_address"])
+        errors: list[str] = []
+        for attempt, slippage_bps in enumerate(LIVE_EXIT_SLIPPAGE_BPS, start=1):
+            try:
+                await self._close_position(
+                    position,
+                    fallback_price_sol,
+                    reason,
+                    mark_source=mark_source,
+                    mark_timestamp=mark_timestamp,
+                    mark_diagnostic=mark_diagnostic,
+                    lock_held=lock_held,
+                    slippage_bps=slippage_bps,
+                )
+                return
+            except Exception as exc:
+                errors.append(f"{slippage_bps}bps: {exc}")
+                log.warning(
+                    "live exit attempt failed mint=%s attempt=%d/%d slippage=%dbps: %s",
+                    mint[:16],
+                    attempt,
+                    len(LIVE_EXIT_SLIPPAGE_BPS),
+                    slippage_bps,
+                    exc,
+                )
+                if attempt < len(LIVE_EXIT_SLIPPAGE_BPS):
+                    await asyncio.sleep(LIVE_EXIT_RETRY_BACKOFF_SECONDS)
+
+        quarantine_reason = f"{reason} sell exhausted retries: {'; '.join(errors)}"
+        await self._store.quarantine_position(position, quarantine_reason)
+        await self._store.record_runtime_event(
+            "position_quarantined",
+            quarantine_reason,
+            {
+                "position_id": str(position["id"]),
+                "mint_address": mint,
+                "exit_reason": reason,
+                "slippage_attempts_bps": list(LIVE_EXIT_SLIPPAGE_BPS),
+            },
+        )
+        self._remove_position(mint, str(position["id"]))
+        await self._send_alert(
+            "critical",
+            "Live position quarantined after sell failures",
+            f"Mint: {mint}\nExit reason: {reason}\nAttempts: {'; '.join(errors)}",
+        )
+        log.critical("quarantined live position mint=%s after exit failures", mint[:16])
+
+    def _remove_position(self, mint: str, position_id: str) -> None:
+        current = self._positions.get(mint)
+        if current is not None and str(current.get("id")) != position_id:
+            return
         self._positions.pop(mint, None)
         self._cached_marks.pop(mint, None)
         self._last_pumpportal_price_at.pop(mint, None)
         self._last_jupiter_fallback_at.pop(mint, None)
         self._last_valid_mark_at.pop(mint, None)
-        self._last_position_mark_write_at.pop(str(position["id"]), None)
+        self._last_position_mark_write_at.pop(position_id, None)
         self._mark_sla_warned.discard(mint)
-        await self._store.refresh_daily_stats(self._strategy)
-        log.info("closed mint=%s reason=%s", mint[:16], reason)
 
     def _lock_for(self, mint_address: str) -> asyncio.Lock:
         lock = self._mint_locks.get(mint_address)
@@ -770,21 +927,97 @@ class StrategyExecutor:
         holdings = await holdings_lookup()
         if holdings is None:
             raise FailClosed("live wallet holdings are unavailable for reconciliation")
+        raw_balances = await self._raw_wallet_balances()
         expected = {
             mint: float(position["token_amount"]) for mint, position in self._positions.items()
         }
         for mint, amount in expected.items():
             actual = float(holdings.get(mint, 0.0))
-            if actual <= 0 or abs(actual - amount) > max(amount * 0.001, 1e-9):
-                raise FailClosed(f"startup reconciliation mismatch for {mint}")
-        wallet_only = {
-            mint for mint, amount in holdings.items() if amount > 0 and mint not in expected
-        }
-        if wallet_only:
-            raise FailClosed(
-                f"startup reconciliation wallet-only holdings: {', '.join(sorted(wallet_only))}"
+            raw_amount, decimals = raw_balances.get(mint, (None, None))
+            raw_tolerance = (
+                RAW_TOKEN_DUST_TOLERANCE / 10**decimals
+                if decimals is not None
+                else 1e-9
             )
+            tolerance = max(amount * 0.001, raw_tolerance)
+            if actual <= tolerance or abs(actual - amount) > tolerance:
+                raise FailClosed(f"startup reconciliation mismatch for {mint}")
+        quarantined_lookup = getattr(self._store, "list_quarantined_live_positions", None)
+        quarantined = (
+            {
+                str(row["mint_address"])
+                for row in await quarantined_lookup()
+            }
+            if quarantined_lookup is not None
+            else set()
+        )
+        wallet_only = {
+            mint
+            for mint, amount in holdings.items()
+            if amount > 0 and mint not in expected and mint not in quarantined
+        }
+        unexpected: list[str] = []
+        for mint in sorted(wallet_only):
+            amount = float(holdings[mint])
+            raw_amount, _decimals = raw_balances.get(mint, (None, None))
+            estimated_value = await self._wallet_holding_value_sol(mint, amount)
+            if (
+                raw_amount is not None
+                and raw_amount <= RAW_TOKEN_DUST_TOLERANCE
+                and estimated_value is not None
+                and estimated_value <= WALLET_ONLY_DUST_VALUE_SOL
+            ):
+                log.info(
+                    "reconciliation ignored wallet dust mint=%s raw=%d value_sol=%.9f",
+                    mint[:16],
+                    raw_amount,
+                    estimated_value,
+                )
+                continue
+            value_text = "unknown" if estimated_value is None else f"{estimated_value:.9f} SOL"
+            raw_text = "unknown" if raw_amount is None else str(raw_amount)
+            unexpected.append(f"{mint[:16]} raw={raw_text} value={value_text}")
+        if unexpected:
+            reason = "wallet-only live holdings require operator review: " + "; ".join(unexpected)
+            await self._store.record_runtime_event(
+                "wallet_only_holdings_monitor_only",
+                reason,
+                {"holdings": unexpected},
+            )
+            self._set_monitor_only((reason,))
+            await self._send_alert("critical", "Live wallet-only holdings", reason)
         return True
+
+    async def _raw_wallet_balances(self) -> dict[str, tuple[int | None, int | None]]:
+        accounts_lookup = getattr(self._adapter, "get_token_accounts", None)
+        if accounts_lookup is None:
+            return {}
+        accounts = await accounts_lookup()
+        if accounts is None:
+            return {}
+        balances: dict[str, tuple[int | None, int | None]] = {}
+        for account in accounts:
+            mint = _account_value(account, "mint")
+            raw_amount = _account_value(account, "raw_amount")
+            decimals = _account_value(account, "decimals")
+            if not isinstance(mint, str):
+                continue
+            try:
+                raw = int(raw_amount)
+                precision = int(decimals)
+            except (TypeError, ValueError):
+                continue
+            previous_raw, previous_precision = balances.get(mint, (0, precision))
+            if previous_precision != precision:
+                balances[mint] = (None, None)
+            elif previous_raw is not None:
+                balances[mint] = (previous_raw + raw, precision)
+        return balances
+
+    async def _wallet_holding_value_sol(self, mint: str, amount: float) -> float | None:
+        mark = await self._get_mark(mint)
+        price = _positive_float(mark.price_sol)
+        return amount * price if price is not None else None
 
     def _check_live_circuit_breaker(self) -> bool:
         if self._mode != "live":
@@ -878,6 +1111,29 @@ class StrategyExecutor:
                     f"{task.get_name()} stopped: {exception or 'unexpected completion'}"
                 )
 
+    def _check_feed_stale_grace(self) -> None:
+        if self._feed_stale_since is None or not self._positions:
+            return
+        held_mints = set(self._positions)
+        elapsed = time.monotonic() - self._feed_stale_since
+        if (
+            held_mints <= self._fallback_attempted_since_stale
+            and not self._fallback_marked_since_stale
+        ):
+            self._fatal_reason = (
+                "PumpPortal feed stale and Jupiter fallback produced no held-token marks"
+            )
+        elif elapsed >= FEED_STALE_GRACE_SECONDS:
+            self._fatal_reason = (
+                f"PumpPortal global feed remained stale for {int(FEED_STALE_GRACE_SECONDS)}s"
+            )
+
+    async def _send_alert(self, level: str, title: str, message: str) -> None:
+        try:
+            await self._alerts.send(level, title, message)
+        except Exception as exc:
+            log.error("alert failed title=%s: %s", title, exc)
+
     def _validate_exit_config(self) -> None:
         required = {
             "trailing_stop_pct",
@@ -953,6 +1209,16 @@ def _positive_float(value: object) -> float | None:
     return number if math.isfinite(number) and number > 0 else None
 
 
+def _env_flag(name: str) -> bool:
+    return os.getenv(name, "").strip().lower() in {"1", "true", "yes"}
+
+
+def _account_value(account: object, name: str) -> object:
+    if isinstance(account, dict):
+        return account.get(name)
+    return getattr(account, name, None)
+
+
 def _entry_slippage_bps(pool_sol: object) -> int | None:
     pool = _positive_float(pool_sol)
     if pool is None or pool < 5:
@@ -993,6 +1259,86 @@ async def _live_entry_block_reasons(store: ExecutorStore, adapter: Any) -> tuple
     return ()
 
 
+async def _paper_live_state_block_reasons(
+    store: ExecutorStore,
+    wallet_adapter: Any | None,
+) -> tuple[str, ...]:
+    """Detect leftover live state before a paper-mode executor can look healthy."""
+
+    rows = await store.list_open_live_positions()
+    reasons = [
+        f"{len(rows)} unsettled live Hive position(s): "
+        + ", ".join(str(row["mint_address"])[:16] for row in rows)
+    ] if rows else []
+    if wallet_adapter is None:
+        if not rows:
+            log.warning("paper startup could not inspect the live wallet: no live probe available")
+        return tuple(reasons)
+
+    holdings_lookup = getattr(wallet_adapter, "get_wallet_holdings", None)
+    if holdings_lookup is None:
+        log.warning("paper startup could not inspect the live wallet: probe has no holdings API")
+        return tuple(reasons)
+    try:
+        holdings = await holdings_lookup()
+    except Exception as exc:
+        log.warning("paper startup could not inspect the live wallet: %s", exc)
+        return tuple(reasons)
+    if holdings is None:
+        log.warning("paper startup could not inspect the live wallet: holdings unavailable")
+        return tuple(reasons)
+
+    raw_balances: dict[str, tuple[int | None, int | None]] = {}
+    accounts_lookup = getattr(wallet_adapter, "get_token_accounts", None)
+    if accounts_lookup is not None:
+        try:
+            accounts = await accounts_lookup()
+        except Exception as exc:
+            log.warning("paper startup could not read raw wallet token balances: %s", exc)
+            accounts = None
+        if accounts is not None:
+            for account in accounts:
+                mint = _account_value(account, "mint")
+                raw_amount = _account_value(account, "raw_amount")
+                decimals = _account_value(account, "decimals")
+                if not isinstance(mint, str):
+                    continue
+                try:
+                    raw = int(raw_amount)
+                    precision = int(decimals)
+                except (TypeError, ValueError):
+                    continue
+                previous_raw, previous_precision = raw_balances.get(mint, (0, precision))
+                if previous_precision != precision:
+                    raw_balances[mint] = (None, None)
+                elif previous_raw is not None:
+                    raw_balances[mint] = (previous_raw + raw, precision)
+
+    price_lookup = getattr(wallet_adapter, "get_current_price", None)
+    for mint, amount in sorted(holdings.items()):
+        if amount <= 0:
+            continue
+        raw_amount, _decimals = raw_balances.get(mint, (None, None))
+        price: float | None = None
+        if price_lookup is not None:
+            try:
+                price = _positive_float(await price_lookup(mint))
+            except Exception as exc:
+                log.warning("paper startup could not price wallet mint=%s: %s", mint[:16], exc)
+        estimated_value = float(amount) * price if price is not None else None
+        if (
+            raw_amount is not None
+            and raw_amount <= RAW_TOKEN_DUST_TOLERANCE
+            and estimated_value is not None
+            and estimated_value <= WALLET_ONLY_DUST_VALUE_SOL
+        ):
+            continue
+        value_text = "unknown" if estimated_value is None else f"{estimated_value:.9f} SOL"
+        raw_text = "unknown" if raw_amount is None else str(raw_amount)
+        reasons.append(f"wallet holding {mint[:16]} raw={raw_text} value={value_text}")
+    return tuple(reasons)
+
+
 def _acquire_singleton_lock(lock_path: Path | None = None) -> None:
     """Prevent concurrent V2 executors from sharing Hive and the wallet."""
 
@@ -1005,7 +1351,8 @@ def _acquire_singleton_lock(lock_path: Path | None = None) -> None:
     except BlockingIOError:
         handle.close()
         log.fatal("FATAL: another memecoin executor instance is running")
-        raise SystemExit(42) from None
+        # Lock contention is retryable; exit 42 is reserved for a real emergency halt.
+        raise SystemExit(43) from None
     _executor_lock_handle = handle
 
 
@@ -1029,12 +1376,21 @@ async def _run() -> None:
     load_dotenv()
     mode = os.getenv("EXECUTION_MODE", "paper").lower()
     store = await MemecoinStore.connect()
+    wallet_probe: Any | None = None
     try:
         if mode == "paper":
             adapter: Any = PaperExecutionAdapter()
             entry_arming_check = None
+            try:
+                wallet_probe = build_live_adapter()
+            except Exception as exc:
+                log.warning("paper startup live-wallet probe unavailable: %s", exc)
+
+            async def paper_live_state_check() -> tuple[str, ...]:
+                return await _paper_live_state_block_reasons(store, wallet_probe)
         elif mode == "live":
             adapter = build_live_adapter()
+            paper_live_state_check = None
 
             async def entry_arming_check() -> tuple[str, ...]:
                 return await _live_entry_block_reasons(store, adapter)
@@ -1045,9 +1401,12 @@ async def _run() -> None:
             adapter,
             cycle_seconds=float(os.getenv("MEMECOIN_EXECUTOR_CYCLE_SECONDS", "1")),
             entry_arming_check=entry_arming_check,
+            paper_live_state_check=paper_live_state_check,
         )
         await executor.run()
     finally:
+        if wallet_probe is not None:
+            await wallet_probe.close()
         await store.close()
 
 

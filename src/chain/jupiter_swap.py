@@ -114,6 +114,7 @@ class JupiterSwapResult:
     error: str | None = None
     diagnostics: tuple[str, ...] = ()
     token_balance_after: float | None = None
+    balance_before_last_attempt: float | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -321,6 +322,7 @@ class JupiterSwapClient:
         last_error: str | None = None
         diagnostics: list[str] = []
         attempts = 0
+        balance_before_last_attempt: float | None = None
 
         while attempts <= self._max_retries:
             attempts += 1
@@ -339,9 +341,17 @@ class JupiterSwapClient:
                 break
 
             if result.ok:
-                return replace(result, attempts=attempts)
+                return replace(
+                    result,
+                    attempts=attempts,
+                    balance_before_last_attempt=balance_before_last_attempt,
+                )
             if result.confirmation_status == "failed":
-                return replace(result, attempts=attempts)
+                return replace(
+                    result,
+                    attempts=attempts,
+                    balance_before_last_attempt=balance_before_last_attempt,
+                )
             if result.confirmation_status == "unknown":
                 # A submitted transaction may still land. Never replace it
                 # until RPC proves the prior blockhash expired.
@@ -367,6 +377,7 @@ class JupiterSwapClient:
                         attempts=attempts,
                         error=None,
                         token_balance_after=balance,
+                        balance_before_last_attempt=balance_before_last_attempt,
                     )
                 if latest is not None and latest.status == "failed":
                     return replace(
@@ -374,7 +385,17 @@ class JupiterSwapClient:
                         confirmation_status="failed",
                         attempts=attempts,
                         error=latest.error,
+                        balance_before_last_attempt=balance_before_last_attempt,
                     )
+
+            # Expiry is proven above. Refresh the output balance immediately
+            # before a fresh submission so the adapter computes its fill from
+            # the retry's actual pre-swap wallet state.
+            balance_before_last_attempt = await self._reconcile_balance(
+                quote.output_mint,
+                quote.token_decimals,
+            )
+            diagnostics.append("retry_pre_balance_refreshed")
 
             log.warning(
                 "LIVE swap %s expired — rebuilding with fresh blockhash "

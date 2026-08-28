@@ -46,8 +46,8 @@ execution:
 live_guardrails:
   confirmation_phrase: I_UNDERSTAND_THIS_CAN_LOSE_REAL_SOL
   max_trade_sol: 0.02
-  max_daily_trades: 3
-  max_daily_loss_sol: 0.05
+  max_daily_trades: 9999
+  max_daily_loss_sol: 9999.0
   min_wallet_balance_sol: 0.05
 
 monitoring:

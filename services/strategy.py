@@ -136,7 +136,8 @@ async def get_qualifying_candidates(
           AND NOT EXISTS (
               SELECT 1
               FROM memecoin.positions AS p
-              WHERE p.mint_address = c.mint_address AND p.status = 'open'
+               WHERE p.mint_address = c.mint_address
+                 AND p.status IN ('open', 'quarantined')
           )
           AND c.mint_address NOT IN (
               SELECT p.mint_address
