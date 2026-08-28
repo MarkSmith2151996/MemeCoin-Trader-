@@ -83,7 +83,7 @@ def _armed_env(settings):
         "LIVE_CONFIRMATION_PHRASE": settings.live_guardrails.confirmation_phrase,
         "LIVE_KILL_SWITCH": "false",
         "PRIMARY_RPC_URL": "https://primary.example",
-        "MAX_LIVE_TRADE_SOL": "0.01",
+        "MAX_LIVE_TRADE_SOL": str(settings.live_guardrails.max_trade_sol),
         "MAX_LIVE_DAILY_TRADES": "3",
         "MAX_LIVE_DAILY_LOSS_SOL": "0.05",
         "MIN_LIVE_WALLET_BALANCE_SOL": "0.05",

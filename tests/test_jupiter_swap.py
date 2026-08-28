@@ -354,6 +354,8 @@ def test_execute_swap_confirmed_happy_path() -> None:
                                 "confirmationStatus": "confirmed"}]},
                 },
             )
+        if method == "getBlockHeight":
+            return httpx.Response(200, json={"jsonrpc": "2.0", "id": 1, "result": 12346})
         if method == "getTokenAccountsByOwner":
             return httpx.Response(
                 200,
@@ -419,6 +421,8 @@ def test_execute_swap_retries_on_expiry_then_confirms() -> None:
                                 "confirmationStatus": "confirmed"}]},
                 },
             )
+        if method == "getBlockHeight":
+            return httpx.Response(200, json={"jsonrpc": "2.0", "id": 1, "result": 12346})
         if method == "getTokenAccountsByOwner":
             return httpx.Response(
                 200,
@@ -471,6 +475,8 @@ def test_execute_swap_gives_up_after_max_retries() -> None:
                 200,
                 json={"jsonrpc": "2.0", "id": 1, "result": {"value": [None]}},
             )
+        if method == "getBlockHeight":
+            return httpx.Response(200, json={"jsonrpc": "2.0", "id": 1, "result": 12346})
         if method == "getTokenAccountsByOwner":
             return httpx.Response(200, json={"jsonrpc": "2.0", "id": 1, "result": {"value": []}})
         raise AssertionError(f"unexpected RPC method {method}")
@@ -486,6 +492,48 @@ def test_execute_swap_gives_up_after_max_retries() -> None:
     assert send_calls["n"] == 3  # initial + 2 retries
     assert "attempt_1" in result.diagnostics
     assert "attempt_3" in result.diagnostics
+
+
+def test_execute_swap_timeout_without_proven_expiry_does_not_resubmit() -> None:
+    keypair = _make_keypair()
+    tx_b64 = _signed_tx_b64(keypair)
+    send_calls = {"n": 0}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/swap/v1/quote":
+            return httpx.Response(200, json=_quote_response())
+        if request.url.path == "/swap/v1/swap":
+            return httpx.Response(
+                200,
+                json={"swapTransaction": tx_b64, "lastValidBlockHeight": 12345},
+            )
+        payload = json.loads(request.content)
+        method = payload["method"]
+        if method == "getTokenSupply":
+            return httpx.Response(200, json=RPC_DECIMALS_BODY)
+        if method == "sendTransaction":
+            send_calls["n"] += 1
+            return httpx.Response(200, json={"jsonrpc": "2.0", "id": 1, "result": "sig-pending"})
+        if method == "getSignatureStatuses":
+            return httpx.Response(
+                200,
+                json={"jsonrpc": "2.0", "id": 1, "result": {"value": [None]}},
+            )
+        if method == "getBlockHeight":
+            return httpx.Response(200, json={"jsonrpc": "2.0", "id": 1, "result": 12345})
+        if method == "getTokenAccountsByOwner":
+            return httpx.Response(200, json={"jsonrpc": "2.0", "id": 1, "result": {"value": []}})
+        raise AssertionError(f"unexpected RPC method {method}")
+
+    client = _make_client(handler, keypair=keypair)
+    quote = asyncio.run(client.get_quote(WSOL_MINT, TOKEN_MINT, 50_000_000))
+    assert quote is not None
+    result = asyncio.run(client.execute_swap(quote))
+
+    assert result.ok is False
+    assert result.confirmation_status == "unknown"
+    assert result.signature == "sig-pending"
+    assert send_calls["n"] == 1
 
 
 def test_execute_swap_failed_transaction_returns_error() -> None:

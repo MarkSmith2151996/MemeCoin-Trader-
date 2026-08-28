@@ -17,9 +17,11 @@ from src.execution.live_daily_caps import DailyLiveState
 def database_dsn() -> str:
     """Return the explicit Hive connection string required by V2 services."""
 
-    dsn = os.getenv("MEMECOIN_POSTGRES_DSN")
+    dsn = os.getenv("MEMECOIN_POSTGRES_DSN") or os.getenv("DATABASE_URL")
     if not dsn:
-        raise RuntimeError("MEMECOIN_POSTGRES_DSN is required for Memecoin Trader V2")
+        raise RuntimeError(
+            "MEMECOIN_POSTGRES_DSN or DATABASE_URL is required for Memecoin Trader V2",
+        )
     return dsn
 
 
@@ -109,6 +111,17 @@ class MemecoinStore:
             """,
             strategy,
             mode,
+        )
+
+    async def list_open_live_positions(self) -> list[dict[str, Any]]:
+        """Return every open live position for emergency/operator liquidation."""
+
+        return await self.fetch(
+            """
+            SELECT * FROM memecoin.positions
+            WHERE status = 'open' AND mode = 'live'
+            ORDER BY opened_at
+            """
         )
 
     async def load_exit_config(self, strategy: str) -> dict[str, float]:

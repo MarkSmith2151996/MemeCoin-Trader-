@@ -45,10 +45,15 @@ load_dotenv()
 DEFAULT_RPC_URL = "https://api.mainnet-beta.solana.com"
 DEFAULT_JITO_TIP_LAMPORTS = 1_000_000
 MAX_TRANSACTION_SIZE_BYTES = 1_232
+MAX_DIRECT_BUY_PRICE_IMPACT_PCT = 5.0
 log = logging.getLogger("direct_executor")
 
 # The direct adapter's Trade return type is the existing persisted trade model.
 TradeResult = Trade
+
+
+class DirectPriceImpactExceeded(RuntimeError):
+    """Signals that an active Pump curve should be routed through Jupiter instead."""
 
 
 class DirectExecutor(ExecutionAdapter):
@@ -111,6 +116,22 @@ class DirectExecutor(ExecutionAdapter):
             raise RuntimeError(sanitize_provider_error(exc)) from None
         self._ensure_tradeable_curve(account.state.complete, account.state.is_sol_paired)
 
+        price_impact_pct = _direct_buy_price_impact_pct(
+            amount_lamports,
+            account.state.virtual_sol_reserves,
+        )
+        if price_impact_pct > MAX_DIRECT_BUY_PRICE_IMPACT_PCT:
+            log.warning(
+                "DIRECT BUY IMPACT GUARD mint=%s impact=%.4f%% limit=%.2f%%; routing to Jupiter",
+                mint_address[:16],
+                price_impact_pct,
+                MAX_DIRECT_BUY_PRICE_IMPACT_PCT,
+            )
+            raise DirectPriceImpactExceeded(
+                f"direct Pump price impact {price_impact_pct:.2f}% exceeds "
+                f"{MAX_DIRECT_BUY_PRICE_IMPACT_PCT:.2f}%",
+            )
+
         expected_tokens = calculate_buy_amount(
             amount_lamports,
             account.state.virtual_sol_reserves,
@@ -157,6 +178,7 @@ class DirectExecutor(ExecutionAdapter):
             metadata={
                 "provider": "pumpfun_direct_v2",
                 "expected_tokens_raw": expected_tokens,
+                "price_impact_pct": price_impact_pct / 100,
                 "minimum_tokens_raw": token_amount,
                 "max_sol_cost_lamports": max_sol_cost,
                 "actual_tokens_raw": actual_tokens,
@@ -531,3 +553,12 @@ def _sol_to_lamports(amount_sol: float) -> int:
     if lamports <= 0:
         raise ValueError("amount_sol must be positive")
     return lamports
+
+
+def _direct_buy_price_impact_pct(amount_lamports: int, virtual_sol_reserves: int) -> float:
+    """Return constant-product buy impact versus the curve's pre-trade spot price."""
+
+    if amount_lamports <= 0 or virtual_sol_reserves <= 0:
+        raise ValueError("direct buy requires positive SOL input and virtual SOL reserves")
+    # For x*y=k, execution price / spot price = (reserve + input) / reserve.
+    return amount_lamports / virtual_sol_reserves * 100

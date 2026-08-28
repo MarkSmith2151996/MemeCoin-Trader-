@@ -20,9 +20,11 @@ from src.core.database import init_db
 from src.core.models import Position, PositionStatus, Side, Signal, SignalSource, SignalType, Trade
 from src.execution.live import LiveExecutionAdapter
 from src.execution.safety_controls import (
+    MANUAL_RESET_CONFIRMATION,
     CircuitBreaker,
     KillSwitch,
     KillSwitchNotArmedError,
+    V2KillSwitch,
     read_execution_mode,
     set_execution_mode,
 )
@@ -148,6 +150,36 @@ class FakePaperSellAdapter(FakeSellAdapter):
     mode = "paper"
 
 
+class FakeV2SellAdapter(FakeSellAdapter):
+    def __init__(self, *, fail_mints: set[str] | None = None) -> None:
+        super().__init__(fail_mints=fail_mints)
+        self.cleared: list[str] = []
+
+    async def verify_token_balance_cleared(self, mint_address: str) -> float:
+        self.cleared.append(mint_address)
+        return 0.0
+
+
+class FakeHiveStore:
+    def __init__(self, positions: list[dict[str, object]]) -> None:
+        self.positions = positions
+        self.closed: list[dict[str, object]] = []
+
+    async def list_open_live_positions(self) -> list[dict[str, object]]:
+        return self.positions
+
+    async def close_position(self, position, trade, **values) -> None:
+        self.closed.append({"position": position, "trade": trade, **values})
+
+
+class FakeAlerts:
+    def __init__(self) -> None:
+        self.messages: list[tuple[str, str, str]] = []
+
+    async def send(self, level: str, title: str, message: str) -> None:
+        self.messages.append((level, title, message))
+
+
 def _live_trade(mint: str, token_amount: float = 1000.0) -> Trade:
     return Trade(
         mint_address=mint,
@@ -224,20 +256,17 @@ def test_breaker_refreshes_cooldown_when_another_error_occurs(tmp_path) -> None:
     assert second["last_error_at"] >= first["last_error_at"]
 
 
-def test_breaker_auto_resets_after_quiet_cooldown(tmp_path, caplog) -> None:
+def test_breaker_remains_tripped_after_elapsed_cooldown(tmp_path) -> None:
     flag = tmp_path / "cb.json"
-    breaker = CircuitBreaker(flag_path=flag, cooldown_seconds=60)
+    breaker = CircuitBreaker(flag_path=flag)
     breaker.trip(mint=TOKEN_MINT, error="boom")
     payload = json.loads(flag.read_text())
     payload["tripped_at"] = "2020-01-01T00:00:00+00:00"
     payload["last_error_at"] = "2020-01-01T00:00:00+00:00"
     flag.write_text(json.dumps(payload))
 
-    with caplog.at_level(logging.WARNING, logger="safety_controls"):
-        assert breaker.is_tripped() is False
-
-    assert not flag.exists()
-    assert any("CIRCUIT BREAKER AUTO-RESET" in record.message for record in caplog.records)
+    assert breaker.is_tripped() is True
+    assert flag.exists()
 
 
 def test_breaker_reset_clears_flag(tmp_path) -> None:
@@ -245,17 +274,20 @@ def test_breaker_reset_clears_flag(tmp_path) -> None:
     breaker.trip(mint=TOKEN_MINT, error="boom")
     assert breaker.is_tripped() is True
 
-    before = breaker.reset()
+    with pytest.raises(ValueError, match="MANUAL_RESET"):
+        breaker.reset(confirm="no")
+    before = breaker.reset(confirm=MANUAL_RESET_CONFIRMATION)
     assert before.tripped is True
     assert breaker.is_tripped() is False
     assert not (tmp_path / "cb.json").exists()
 
 
-def test_breaker_corrupt_flag_treated_as_clear(tmp_path) -> None:
+def test_breaker_corrupt_flag_trips_in_live_mode(tmp_path) -> None:
     flag = tmp_path / "cb.json"
     flag.write_text("not json {{{")
     breaker = CircuitBreaker(flag_path=flag)
-    assert breaker.is_tripped() is False
+    assert breaker.is_tripped() is True
+    assert breaker.status().reason == "breaker_state_corrupt"
 
 
 def test_breaker_unreadable_flag_trips_in_live_mode(tmp_path, monkeypatch) -> None:
@@ -517,3 +549,88 @@ def test_kill_switch_closes_positions_and_records_trades(tmp_path) -> None:
     assert persisted.status == PositionStatus.CLOSED
     assert persisted.mode == "live"
     assert persisted.close_price_sol == pytest.approx(0.0002)
+
+
+def test_v2_kill_switch_closes_every_open_live_hive_position(tmp_path) -> None:
+    async def run() -> None:
+        env = tmp_path / ".env"
+        env.write_text("EXECUTION_MODE=live\nLIVE_KILL_SWITCH=false\n")
+        positions = [
+            {
+                "id": "position-a",
+                "mint_address": TOKEN_MINT,
+                "token_amount": 1000.0,
+                "amount_sol": 0.05,
+                "strategy": "BT",
+            },
+            {
+                "id": "position-b",
+                "mint_address": SECOND_MINT,
+                "token_amount": 2000.0,
+                "amount_sol": 0.05,
+                "strategy": "other-live-strategy",
+            },
+        ]
+        store = FakeHiveStore(positions)
+        adapter = FakeV2SellAdapter()
+        breaker = CircuitBreaker(flag_path=tmp_path / "breaker.json")
+        kill_switch = V2KillSwitch(
+            store=store,
+            adapter=adapter,
+            env_path=env,
+            breaker=breaker,
+            halt_path=tmp_path / "halt",
+        )
+
+        summary = await kill_switch.run()
+
+        assert summary.positions_found == 2
+        assert summary.sold == 2
+        assert summary.failed == 0
+        assert [entry["position"]["mint_address"] for entry in store.closed] == [
+            TOKEN_MINT,
+            SECOND_MINT,
+        ]
+        assert adapter.cleared == [TOKEN_MINT, SECOND_MINT]
+        assert all(entry["close_reason"] == "kill_switch" for entry in store.closed)
+        assert "EXECUTION_MODE=paper" in env.read_text()
+        assert "LIVE_KILL_SWITCH=true" in env.read_text()
+        assert breaker.status().reason == "kill_switch"
+        assert (tmp_path / "halt").exists()
+
+    asyncio.run(run())
+
+
+def test_v2_kill_switch_alerts_and_leaves_failed_positions_open(tmp_path) -> None:
+    async def run() -> None:
+        env = tmp_path / ".env"
+        env.write_text("EXECUTION_MODE=live\n")
+        store = FakeHiveStore(
+            [
+                {
+                    "id": "position-a",
+                    "mint_address": TOKEN_MINT,
+                    "token_amount": 1000.0,
+                    "amount_sol": 0.05,
+                },
+            ],
+        )
+        alerts = FakeAlerts()
+        kill_switch = V2KillSwitch(
+            store=store,
+            adapter=FakeV2SellAdapter(fail_mints={TOKEN_MINT}),
+            env_path=env,
+            breaker=CircuitBreaker(flag_path=tmp_path / "breaker.json"),
+            halt_path=tmp_path / "halt",
+            alert_manager=alerts,
+        )
+
+        summary = await kill_switch.run()
+
+        assert summary.sold == 0
+        assert summary.failed == 1
+        assert store.closed == []
+        assert alerts.messages[0][1] == "V2 kill switch incomplete"
+        assert TOKEN_MINT[:16] in alerts.messages[0][2]
+
+    asyncio.run(run())

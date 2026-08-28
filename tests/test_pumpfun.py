@@ -32,7 +32,7 @@ from src.chain.pumpfun_tx import (
     build_buy_instructions,
     build_sell_instruction,
 )
-from src.execution.direct import DirectExecutor, _token_delta
+from src.execution.direct import DirectExecutor, _direct_buy_price_impact_pct, _token_delta
 
 MINT = Pubkey.from_string("CU7nUQaJ4beyYjC3xAUrh5RiSjw14fhU6oWTwRBse8gj")
 CREATOR = Pubkey.from_string("5wyFsNExysbXf2hTtcn8Tqd3urs9Nv85Zx1zNdAfTMmX")
@@ -80,6 +80,7 @@ def test_constant_product_quotes_and_slippage() -> None:
     assert calculate_sell_amount(1_000, 1_000, 10_000) == 91
     assert minimum_output(10_000, 100) == 9_900
     assert maximum_input(10_000, 100) == 10_100
+    assert _direct_buy_price_impact_pct(50, 1_000) == pytest.approx(5.0)
 
 
 def test_v2_buy_and_sell_instructions_match_current_layout() -> None:
@@ -223,7 +224,7 @@ def test_direct_buy_falls_back_to_rpc_after_jito_rejection() -> None:
             poll_interval_s=0.001,
         )
         try:
-            trade = await executor.buy(str(MINT), 0.001)
+            trade = await executor.buy(str(MINT), 0.000000001)
         finally:
             await executor.close()
             await client.aclose()

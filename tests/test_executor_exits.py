@@ -116,6 +116,35 @@ class FakeAdapter:
         pass
 
 
+class FakeLiveMonitorAdapter(FakeAdapter):
+    mode = "live"
+
+    def __init__(self) -> None:
+        self.sells = 0
+
+    async def get_wallet_holdings(self) -> dict[str, float]:
+        return {"live-mint": 100.0}
+
+    def circuit_breaker_tripped(self) -> bool:
+        return False
+
+    async def sell(self, mint: str, token_amount: float, slippage_bps: int) -> Trade:
+        self.sells += 1
+        return Trade(
+            mint_address=mint,
+            side=Side.SELL,
+            amount_sol=0.009,
+            token_amount=token_amount,
+            price_sol=0.00009,
+            slippage_bps=slippage_bps,
+            mode="live",
+            status="confirmed",
+        )
+
+    async def verify_token_balance_cleared(self, _mint: str) -> float:
+        return 0.0
+
+
 class FakeJupiterPriceProvider:
     name = "jupiter"
 
@@ -150,7 +179,7 @@ def test_trailing_exit_uses_persisted_peak_and_arm_state(tmp_path: Path) -> None
         await executor.start()
         await executor.handle_price("mint", 0.000102)
 
-        assert store.marks == []
+        assert store.marks == [("position-1", 0.000102, True)]
         assert executor._positions["mint"]["peak_price_sol"] == 0.000102
         assert executor._positions["mint"]["trailing_armed"] is True
         await executor.handle_price("mint", 0.000099)
@@ -321,6 +350,7 @@ def test_quiet_position_uses_jupiter_mark_for_exit_evaluation(tmp_path: Path) ->
 
         assert mark_provider.calls == ["quiet-mint"]
         assert executor._positions["quiet-mint"]["peak_price_sol"] == 0.000102
+        assert store.marks == [("position-quiet", 0.000102, True)]
         assert store.evaluations == []
         assert store.closed == []
 
@@ -354,5 +384,41 @@ def test_paper_take_profit_uses_configured_level_not_crashed_price(tmp_path: Pat
         assert closed["close_price_sol"] == pytest.approx(0.00025)
         assert closed["realized_pnl_sol"] == pytest.approx(0.03)
         assert closed["trade"]["amount_sol"] == pytest.approx(0.05)
+
+    asyncio.run(run())
+
+
+def test_live_monitor_only_mode_hydrates_and_closes_open_position(tmp_path: Path) -> None:
+    async def run() -> None:
+        position = {
+            "id": "live-position",
+            "mint_address": "live-mint",
+            "entry_price_sol": 0.0001,
+            "amount_sol": 0.01,
+            "token_amount": 100,
+            "peak_price_sol": 0.0001,
+            "trailing_armed": False,
+            "opened_at": datetime.now(UTC),
+        }
+        store = FakeStore(position)
+        adapter = FakeLiveMonitorAdapter()
+
+        async def blocked_entries() -> tuple[str, ...]:
+            return ("live_trading_env_not_enabled",)
+
+        executor = StrategyExecutor(
+            store,
+            adapter,
+            heartbeat_path=tmp_path / "heartbeat",
+            halt_path=tmp_path / "halt",
+            entry_arming_check=blocked_entries,
+        )
+        await executor.start()
+        await executor.run_cycle()
+        await executor.handle_price("live-mint", 0.00009)
+
+        assert executor._monitor_only is True
+        assert adapter.sells == 1
+        assert store.closed[0]["close_reason"] == "hard_stop"
 
     asyncio.run(run())

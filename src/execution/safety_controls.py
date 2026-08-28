@@ -22,12 +22,14 @@ import tempfile
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import Any
 
 log = logging.getLogger("safety_controls")
 
 KILL_SWITCH_SLIPPAGE_BPS = 500
-DEFAULT_BREAKER_PATH = Path("data/circuit_breaker.json")
-DEFAULT_BREAKER_COOLDOWN_SECONDS = 30 * 60
+REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
+DEFAULT_BREAKER_PATH = REPOSITORY_ROOT / "data" / "circuit_breaker.json"
+MANUAL_RESET_CONFIRMATION = "MANUAL_RESET"
 
 
 @dataclass(frozen=True, slots=True)
@@ -62,32 +64,20 @@ def _atomic_write(path: Path, content: str) -> None:
 class CircuitBreaker:
     """File-backed sell-failure trip flag shared across processes.
 
-    The flag lives in ``data/circuit_breaker.json`` so the Strategy B process
-    and the standalone kill switch / reset scripts observe the same state.
-    Missing and corrupt state is treated as clear. An unreadable existing flag
-    is treated as tripped in live mode, because its state is unknown.
+    The flag uses an absolute repository path so the V2 executor and standalone
+    operator scripts always observe the same state. Missing state is clear;
+    unreadable or corrupt existing state is tripped in live mode because its
+    state is unknown. A trip remains latched until an explicit manual reset.
     """
 
     def __init__(
         self,
         *,
         flag_path: str | Path = DEFAULT_BREAKER_PATH,
-        cooldown_seconds: int | None = None,
         execution_mode: str = "live",
     ) -> None:
         self._path = Path(flag_path)
         self._execution_mode = execution_mode.strip().lower()
-        if cooldown_seconds is None:
-            try:
-                cooldown_seconds = int(
-                    os.getenv(
-                        "CIRCUIT_BREAKER_COOLDOWN_SECONDS",
-                        str(DEFAULT_BREAKER_COOLDOWN_SECONDS),
-                    ),
-                )
-            except ValueError:
-                cooldown_seconds = DEFAULT_BREAKER_COOLDOWN_SECONDS
-        self._cooldown_seconds = max(0, cooldown_seconds)
 
     def _read_state(self) -> BreakerState:
         try:
@@ -98,13 +88,19 @@ class CircuitBreaker:
             if self._execution_mode == "live":
                 log.error("CIRCUIT BREAKER flag %s unreadable — treating as tripped", self._path)
                 return BreakerState(tripped=True, reason="breaker_state_unreadable", error=str(exc))
-            log.warning("CIRCUIT BREAKER flag %s unreadable — paper mode treats it as clear", self._path)
+            log.warning(
+                "CIRCUIT BREAKER flag %s unreadable — paper mode treats it as clear",
+                self._path,
+            )
             return BreakerState(tripped=False)
         try:
             data = json.loads(raw)
         except (json.JSONDecodeError, TypeError):
-            log.error("CIRCUIT BREAKER flag %s corrupt — treating as clear", self._path)
-            return BreakerState(tripped=False)
+            log.error("CIRCUIT BREAKER flag %s corrupt — treating as tripped", self._path)
+            return BreakerState(
+                tripped=self._execution_mode == "live",
+                reason="breaker_state_corrupt" if self._execution_mode == "live" else None,
+            )
         return BreakerState(
             tripped=bool(data.get("tripped", False)),
             reason=data.get("reason"),
@@ -127,44 +123,8 @@ class CircuitBreaker:
             "last_error_at": state.last_error_at,
         }
 
-    def _auto_reset_if_due(self, state: BreakerState) -> bool:
-        if not state.tripped or self._cooldown_seconds <= 0:
-            return False
-        timestamp = state.last_error_at or state.tripped_at
-        if not timestamp:
-            return False
-        try:
-            last_error_at = datetime.fromisoformat(timestamp.replace("Z", "+00:00"))
-        except ValueError:
-            return False
-        if last_error_at.tzinfo is None:
-            last_error_at = last_error_at.replace(tzinfo=UTC)
-        # Status checks are non-blocking. The runtime's normal 100ms polling
-        # observes elapsed time instead of sleeping through the cooldown.
-        elapsed = (datetime.now(UTC) - last_error_at).total_seconds()
-        if elapsed < self._cooldown_seconds:
-            return False
-        try:
-            self._path.unlink()
-        except FileNotFoundError:
-            pass
-        except OSError as exc:
-            log.error("CIRCUIT BREAKER auto-reset failed: %s", exc)
-            return False
-        log.warning(
-            "CIRCUIT BREAKER AUTO-RESET after %ds without a new error "
-            "(reason=%s mint=%s)",
-            self._cooldown_seconds,
-            state.reason or "?",
-            state.mint or "-",
-        )
-        return True
-
     def status(self) -> BreakerState:
-        state = self._read_state()
-        if self._auto_reset_if_due(state):
-            return BreakerState(tripped=False)
-        return state
+        return self._read_state()
 
     def is_tripped(self) -> bool:
         return self.status().tripped
@@ -205,8 +165,14 @@ class CircuitBreaker:
         )
         return state
 
-    def reset(self) -> BreakerState:
-        """Clear the trip flag. Returns the pre-reset state."""
+    def reset(self, *, confirm: str) -> BreakerState:
+        """Clear the trip flag only after an explicit manual confirmation."""
+
+        if confirm != MANUAL_RESET_CONFIRMATION:
+            raise ValueError(
+                "circuit breaker reset requires "
+                f"confirm={MANUAL_RESET_CONFIRMATION!r}",
+            )
         state = self.status()
         try:
             self._path.unlink()
@@ -273,6 +239,36 @@ def set_execution_mode(env_path: str | Path, mode: str) -> None:
     except OSError as exc:
         raise RuntimeError(f"cannot write {path}: {exc}") from exc
     log.info("EXECUTION_MODE set to %s in %s", mode, path)
+
+
+def set_env_value(env_path: str | Path, name: str, value: str) -> None:
+    """Set one environment-file key while preserving all unrelated entries."""
+
+    path = Path(env_path)
+    if path.is_file():
+        try:
+            lines = path.read_text(encoding="utf-8").splitlines()
+        except OSError as exc:
+            raise RuntimeError(f"cannot read {path}: {exc}") from exc
+    else:
+        lines = []
+    prefix = f"{name}="
+    replaced = False
+    out: list[str] = []
+    for line in lines:
+        stripped = line.strip()
+        if stripped.startswith(prefix) and not stripped.startswith("#"):
+            out.append(f"{name}={value}")
+            replaced = True
+        else:
+            out.append(line)
+    if not replaced:
+        out.append(f"{name}={value}")
+    try:
+        _atomic_write(path, "\n".join(out) + "\n")
+    except OSError as exc:
+        raise RuntimeError(f"cannot write {path}: {exc}") from exc
+    log.info("%s set in %s", name, path)
 
 
 # ── Kill switch ──────────────────────────────────────────────────────
@@ -400,3 +396,141 @@ class KillSwitch:
             mode_before, "paper", len(positions), sold, failed,
         )
         return summary
+
+
+class V2KillSwitch:
+    """Hive-backed live liquidation path for the V2 executor.
+
+    The permanent breaker and halt marker are written before the first sell so
+    the running executor stops entries even if a liquidation submission fails.
+    Each position is closed in Hive only after the live adapter confirms the
+    wallet no longer holds the token.
+    """
+
+    def __init__(
+        self,
+        *,
+        store: Any,
+        adapter: Any,
+        env_path: str | Path = ".env",
+        breaker: CircuitBreaker | None = None,
+        halt_path: str | Path = "/tmp/memecoin-executor-halted",
+        alert_manager: Any | None = None,
+        slippage_bps: int = KILL_SWITCH_SLIPPAGE_BPS,
+    ) -> None:
+        self._store = store
+        self._adapter = adapter
+        self._env_path = Path(env_path)
+        self._breaker = breaker if breaker is not None else CircuitBreaker()
+        self._halt_path = Path(halt_path)
+        self._alerts = alert_manager
+        self._slippage_bps = slippage_bps
+
+    async def run(self) -> KillSwitchSummary:
+        """Liquidate every open live Hive position and leave entries disabled."""
+
+        mode_before = read_execution_mode(self._env_path)
+        if mode_before != "live":
+            raise KillSwitchNotArmedError(
+                f"kill switch is live-mode only — EXECUTION_MODE is '{mode_before}'",
+            )
+        if getattr(self._adapter, "mode", None) != "live":
+            raise RuntimeError("kill switch requires a live execution adapter")
+
+        # These latches must take effect before any external liquidation call.
+        set_env_value(self._env_path, "LIVE_KILL_SWITCH", "true")
+        set_execution_mode(self._env_path, "paper")
+        self._breaker.trip(
+            error="kill switch triggered — live trading halted",
+            reason="kill_switch",
+        )
+        self._write_halt("kill switch triggered")
+
+        positions = await self._store.list_open_live_positions()
+        sold = 0
+        failed = 0
+        details: list[str] = []
+        for position in positions:
+            mint = str(position["mint_address"])
+            token_amount = float(position.get("token_amount") or 0)
+            if token_amount <= 0:
+                failed += 1
+                details.append(f"FAIL {mint[:16]}: no persisted token amount")
+                continue
+            try:
+                trade = await self._adapter.sell(mint, token_amount, self._slippage_bps)
+                verify_cleared = getattr(self._adapter, "verify_token_balance_cleared", None)
+                if verify_cleared is None:
+                    raise RuntimeError("live adapter cannot verify post-sell token balance")
+                await verify_cleared(mint)
+                close_price = float(getattr(trade, "price_sol", 0) or 0)
+                if close_price <= 0:
+                    raise RuntimeError("live sell returned no actual fill price")
+                amount_sol = float(position["amount_sol"])
+                realized_pnl = float(getattr(trade, "amount_sol", 0)) - amount_sol
+                trade.metadata = {
+                    **dict(getattr(trade, "metadata", {})),
+                    "close_reason": "kill_switch",
+                    "kill_switch": True,
+                }
+                await self._store.close_position(
+                    position,
+                    _trade_record(trade),
+                    close_price_sol=close_price,
+                    close_reason="kill_switch",
+                    realized_pnl_sol=realized_pnl,
+                )
+                sold += 1
+                details.append(f"OK {mint[:16]} sig={getattr(trade, 'tx_signature', None) or '-'}")
+                log.info("V2 KILL SWITCH SELL OK mint=%s", mint[:16])
+            except Exception as exc:  # Keep liquidating the remaining positions.
+                failed += 1
+                details.append(f"FAIL {mint[:16]}: {exc}")
+                log.critical("V2 KILL SWITCH SELL FAILED mint=%s: %s", mint[:16], exc)
+
+        if failed and self._alerts is not None:
+            try:
+                await self._alerts.send(
+                    "critical",
+                    "V2 kill switch incomplete",
+                    "Remaining positions: " + "; ".join(
+                        detail for detail in details if detail.startswith("FAIL ")
+                    ),
+                )
+            except Exception as exc:
+                log.critical("V2 kill switch alert failed: %s", exc)
+
+        return KillSwitchSummary(
+            mode_before=mode_before,
+            mode_after="paper",
+            breaker_tripped=True,
+            positions_found=len(positions),
+            sold=sold,
+            failed=failed,
+            details=tuple(details),
+        )
+
+    def _write_halt(self, reason: str) -> None:
+        payload = json.dumps({"halted_at": datetime.now(UTC).isoformat(), "reason": reason})
+        try:
+            _atomic_write(self._halt_path, payload + "\n")
+        except OSError as exc:
+            log.critical("V2 kill switch could not write halt marker %s: %s", self._halt_path, exc)
+
+
+def _trade_record(trade: Any) -> dict[str, object]:
+    """Normalize a live fill for the V2 Hive trades table without importing services."""
+
+    return {
+        "id": str(trade.id),
+        "mint_address": str(trade.mint_address),
+        "side": str(trade.side).lower(),
+        "amount_sol": float(trade.amount_sol),
+        "token_amount": float(trade.token_amount) if trade.token_amount is not None else None,
+        "price_sol": float(trade.price_sol) if trade.price_sol is not None else None,
+        "slippage_bps": int(trade.slippage_bps),
+        "tx_signature": trade.tx_signature,
+        "mode": str(trade.mode),
+        "executed_at": trade.executed_at,
+        "metadata": dict(trade.metadata),
+    }

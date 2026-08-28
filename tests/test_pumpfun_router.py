@@ -4,6 +4,7 @@ import asyncio
 
 from src.chain.pumpfun import CurveCompleteError
 from src.core.models import Side, Trade
+from src.execution.direct import DirectPriceImpactExceeded
 from src.execution.pumpfun_router import PumpFunExecutionRouter
 
 
@@ -14,7 +15,14 @@ class _FakeJupiter:
     async def validate_direct_buy(self, mint: str, amount: float) -> None:
         self.calls.append("validate")
 
-    async def buy(self, mint: str, amount: float, slippage: int, *, prevalidated: bool = False) -> Trade:
+    async def buy(
+        self,
+        mint: str,
+        amount: float,
+        slippage: int,
+        *,
+        prevalidated: bool = False,
+    ) -> Trade:
         assert prevalidated is True
         self.calls.append("buy")
         return Trade(
@@ -47,9 +55,10 @@ class _FakeJupiter:
 
 
 class _FakeDirect:
-    def __init__(self, active: bool, completes: bool = False) -> None:
+    def __init__(self, active: bool, completes: bool = False, impact_blocked: bool = False) -> None:
         self.active = active
         self.completes = completes
+        self.impact_blocked = impact_blocked
         self.calls: list[str] = []
 
     async def has_active_curve(self, mint: str) -> bool:
@@ -60,6 +69,8 @@ class _FakeDirect:
         self.calls.append(side.value)
         if self.completes:
             raise CurveCompleteError("completed")
+        if self.impact_blocked:
+            raise DirectPriceImpactExceeded("direct Pump price impact 6.00% exceeds 5.00%")
         return Trade(
             mint_address=mint,
             side=side,
@@ -101,6 +112,21 @@ def test_unavailable_or_completed_curve_falls_back_to_jupiter() -> None:
         trade = await completed.buy_bonding_curve("mint", 0.02, 300)
         assert trade.metadata["execution_path"] == "jupiter"
         assert jupiter.calls == ["validate", "buy"]
+
+    asyncio.run(run())
+
+
+def test_direct_price_impact_guard_falls_back_to_jupiter() -> None:
+    async def run() -> None:
+        jupiter = _FakeJupiter()
+        direct = _FakeDirect(active=True, impact_blocked=True)
+        router = PumpFunExecutionRouter(jupiter, direct)  # type: ignore[arg-type]
+
+        trade = await router.buy_bonding_curve("mint", 0.02, 300)
+
+        assert direct.calls == ["check", "BUY"]
+        assert jupiter.calls == ["validate", "buy"]
+        assert trade.metadata["execution_path"] == "jupiter"
 
     asyncio.run(run())
 

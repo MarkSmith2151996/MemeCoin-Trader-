@@ -7,7 +7,7 @@ import logging
 from src.chain.pumpfun import CurveCompleteError
 from src.core.models import Side, SwapQuote, Trade
 from src.execution.base import ExecutionAdapter
-from src.execution.direct import DirectExecutor
+from src.execution.direct import DirectExecutor, DirectPriceImpactExceeded
 from src.execution.live import LiveExecutionAdapter
 
 log = logging.getLogger("pumpfun_router")
@@ -48,6 +48,14 @@ class PumpFunExecutionRouter(ExecutionAdapter):
             except CurveCompleteError:
                 # The curve completed after the preflight read; no transaction was sent.
                 log.info("LIVE BUY [jupiter] mint=%s direct_curve_completed", mint_address[:16])
+            except DirectPriceImpactExceeded as exc:
+                # The direct curve would move more than 5%; Jupiter may find a
+                # safer route and still applies its own 5% quote-impact gate.
+                log.info(
+                    "LIVE BUY [jupiter] mint=%s direct_impact_guard=%s",
+                    mint_address[:16],
+                    exc,
+                )
         else:
             log.info("LIVE BUY [jupiter] mint=%s direct_curve_unavailable", mint_address[:16])
         return self._tag(

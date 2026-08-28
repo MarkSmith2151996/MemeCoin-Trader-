@@ -342,9 +342,39 @@ class JupiterSwapClient:
                 return replace(result, attempts=attempts)
             if result.confirmation_status == "failed":
                 return replace(result, attempts=attempts)
+            if result.confirmation_status == "unknown":
+                # A submitted transaction may still land. Never replace it
+                # until RPC proves the prior blockhash expired.
+                return replace(result, attempts=attempts)
             last_error = result.error
             if attempts > self._max_retries:
                 break
+
+            # The status poll that timed out can race a late confirmation. A
+            # fresh status check immediately before resubmission is mandatory.
+            if result.signature is not None:
+                latest = await self._signature_status(result.signature)
+                if latest is not None and latest.status == "confirmed":
+                    balance = await self._reconcile_balance(
+                        quote.output_mint,
+                        quote.token_decimals,
+                    )
+                    return replace(
+                        result,
+                        ok=True,
+                        confirmation_status="confirmed",
+                        slot=latest.slot,
+                        attempts=attempts,
+                        error=None,
+                        token_balance_after=balance,
+                    )
+                if latest is not None and latest.status == "failed":
+                    return replace(
+                        result,
+                        confirmation_status="failed",
+                        attempts=attempts,
+                        error=latest.error,
+                    )
 
             log.warning(
                 "LIVE swap %s expired — rebuilding with fresh blockhash "
@@ -431,6 +461,7 @@ class JupiterSwapClient:
                 token_balance_after=balance,
             )
 
+        balance = await self._reconcile_balance(quote.output_mint, quote.token_decimals)
         return JupiterSwapResult(
             ok=False,
             signature=signature,
@@ -440,11 +471,12 @@ class JupiterSwapClient:
             out_amount=quote.out_amount,
             price_sol=quote.price_sol,
             fees_lamports=fees,
-            confirmation_status="expired",
+            confirmation_status=confirmation.status,
             slot=None,
             attempts=1,
-            error=confirmation.error or "blockhash expired before confirmation",
+            error=confirmation.error or f"transaction {confirmation.status} before confirmation",
             diagnostics=tuple(diagnostics),
+            token_balance_after=balance,
         )
 
     async def _request_sized_swap_transaction(
@@ -763,14 +795,30 @@ class JupiterSwapClient:
         signature: str,
         last_valid_block_height: int | None,
     ) -> _Confirmation:
-        """Poll ``getSignatureStatuses`` up to ``confirm_timeout_s``."""
+        """Poll a signature and retry only after proven blockhash expiry."""
         deadline = time.monotonic() + self._confirm_timeout_s
         while True:
             status = await self._signature_status(signature)
             if status is not None:
                 return status
             if time.monotonic() >= deadline:
-                return _Confirmation(status="expired", slot=None, error=None)
+                # Recheck at the boundary before classifying the submission.
+                status = await self._signature_status(signature)
+                if status is not None:
+                    return status
+                if last_valid_block_height is not None:
+                    block_height = await self._current_block_height()
+                    if block_height is not None and block_height > last_valid_block_height:
+                        return _Confirmation(
+                            status="expired",
+                            slot=None,
+                            error="blockhash expired before confirmation",
+                        )
+                return _Confirmation(
+                    status="unknown",
+                    slot=None,
+                    error="confirmation timed out before blockhash expiry was proven",
+                )
             await asyncio.sleep(self._poll_interval_s)
 
     async def _signature_status(self, signature: str) -> _Confirmation | None:
@@ -802,6 +850,18 @@ class JupiterSwapClient:
         if entry.get("confirmationStatus") in ("confirmed", "finalized"):
             return _Confirmation(status="confirmed", slot=entry.get("slot"), error=None)
         return None
+
+    async def _current_block_height(self) -> int | None:
+        """Return the current block height, or ``None`` when expiry is unknown."""
+
+        payload = {"jsonrpc": "2.0", "id": 1, "method": "getBlockHeight", "params": []}
+        try:
+            response = await self._rpc_post(payload)
+            response.raise_for_status()
+            return int(response.json()["result"])
+        except (httpx.HTTPError, ValueError, KeyError, TypeError) as exc:
+            log.warning("LIVE getBlockHeight failed while checking expiry: %s", exc)
+            return None
 
     async def _reconcile_balance(self, mint: str, token_decimals: int) -> float | None:
         """Read the wallet balance of ``mint`` to verify the fill landed."""

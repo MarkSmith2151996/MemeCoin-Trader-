@@ -6,6 +6,7 @@ import asyncio
 import inspect
 import subprocess
 import sys
+from contextlib import asynccontextmanager
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -61,6 +62,70 @@ class LiveAdapter:
         if not self.clear:
             raise RuntimeError("tokens remain")
         return 0.0
+
+
+class LiveEntryAdapter(LiveAdapter):
+    def __init__(self, *, recovery_sell_fails: bool = False) -> None:
+        super().__init__()
+        self.buys = 0
+        self.recovery_sell_fails = recovery_sell_fails
+        self.breaker_trips: list[dict] = []
+
+    async def execute_swap(self, mint: str, side: Side, amount: float, slippage_bps: int) -> Trade:
+        assert side == Side.BUY
+        self.buys += 1
+        return Trade(
+            mint_address=mint,
+            side=side,
+            amount_sol=amount,
+            token_amount=200.0,
+            price_sol=0.0001,
+            slippage_bps=slippage_bps,
+            tx_signature="buy-signature",
+            mode="live",
+            status="confirmed",
+        )
+
+    async def sell(self, mint: str, token_amount: float, slippage_bps: int) -> Trade:
+        self.sells += 1
+        if self.recovery_sell_fails:
+            raise RuntimeError("recovery sell failed")
+        return Trade(
+            mint_address=mint,
+            side=Side.SELL,
+            amount_sol=0.004,
+            token_amount=token_amount,
+            price_sol=0.00002,
+            slippage_bps=slippage_bps,
+            tx_signature="recovery-signature",
+            mode="live",
+            status="confirmed",
+        )
+
+    def trip_circuit_breaker(self, **kwargs) -> None:
+        self.breaker_trips.append(kwargs)
+
+
+class FailingHiveEntry:
+    allowed = True
+    rejection_reason = None
+
+    async def create_position(self, _position, _trade) -> None:
+        raise RuntimeError("Hive write unavailable")
+
+
+class FailingHiveStore(DailyStateStore):
+    @asynccontextmanager
+    async def entry_transaction(self, _mint: str):
+        yield FailingHiveEntry()
+
+
+class FakeAlerts:
+    def __init__(self) -> None:
+        self.messages: list[tuple[str, str, str]] = []
+
+    async def send(self, level: str, title: str, message: str) -> None:
+        self.messages.append((level, title, message))
 
 
 def _arm_live_env(monkeypatch) -> None:
@@ -175,6 +240,62 @@ def test_live_close_keeps_position_open_when_wallet_does_not_clear(tmp_path: Pat
         assert adapter.verify_calls == 1
         assert store.closed == []
         assert "live-mint" in executor._positions
+
+    asyncio.run(run())
+
+
+def test_live_entry_db_failure_sells_back_without_creating_position(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    async def run() -> None:
+        _arm_live_env(monkeypatch)
+        monkeypatch.setenv("POSITION_SIZE_SOL", "0.005")
+        store = FailingHiveStore(DailyLiveState(datetime.now(UTC).date(), 0, 0.0))
+        adapter = LiveEntryAdapter()
+        executor = StrategyExecutor(
+            store,
+            adapter,
+            heartbeat_path=tmp_path / "heartbeat",
+            halt_path=tmp_path / "halt",
+        )
+
+        await executor._enter(
+            {"id": 1, "mint_address": "orphan-mint", "pool_sol": 10, "pool_type": "graduated"},
+        )
+
+        assert adapter.buys == 1
+        assert adapter.sells == 1
+        assert adapter.verify_calls == 1
+        assert executor._positions == {}
+        assert not (tmp_path / "halt").exists()
+
+    asyncio.run(run())
+
+
+def test_live_entry_db_failure_halts_when_sell_back_fails(monkeypatch, tmp_path: Path) -> None:
+    async def run() -> None:
+        _arm_live_env(monkeypatch)
+        monkeypatch.setenv("POSITION_SIZE_SOL", "0.005")
+        store = FailingHiveStore(DailyLiveState(datetime.now(UTC).date(), 0, 0.0))
+        adapter = LiveEntryAdapter(recovery_sell_fails=True)
+        alerts = FakeAlerts()
+        executor = StrategyExecutor(
+            store,
+            adapter,
+            heartbeat_path=tmp_path / "heartbeat",
+            halt_path=tmp_path / "halt",
+            alert_manager=alerts,
+        )
+
+        with pytest.raises(FailClosed, match="sell-back failed"):
+            await executor._enter(
+                {"id": 1, "mint_address": "orphan-mint", "pool_sol": 10, "pool_type": "graduated"},
+            )
+
+        assert (tmp_path / "halt").exists()
+        assert adapter.breaker_trips[0]["reason"] == "database_failure"
+        assert alerts.messages[0][1] == "Live buy persistence recovery failed"
 
     asyncio.run(run())
 

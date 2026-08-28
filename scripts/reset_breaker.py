@@ -5,8 +5,8 @@ The breaker trips automatically when a live sell fails. Until it is reset,
 new live buys are blocked. Use this only after investigating the failed sell.
 
 Run:
-    python3 scripts/reset_breaker.py          # show state, no changes
-    python3 scripts/reset_breaker.py --reset  # clear the trip flag
+    python3 scripts/reset_breaker.py
+    python3 scripts/reset_breaker.py --confirm MANUAL_RESET
 """
 
 from __future__ import annotations
@@ -19,18 +19,17 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from src.execution.safety_controls import CircuitBreaker  # noqa: E402
+from src.execution.safety_controls import (  # noqa: E402
+    MANUAL_RESET_CONFIRMATION,
+    CircuitBreaker,
+)
 
 BREAKER_PATH = ROOT / "data" / "circuit_breaker.json"
 
 
 def main() -> int:
     parser = argparse.ArgumentParser(description="Inspect or reset the circuit breaker flag")
-    parser.add_argument(
-        "--reset",
-        action="store_true",
-        help="Clear the trip flag after investigating the failed sell",
-    )
+    parser.add_argument("--confirm", help="Must equal MANUAL_RESET to clear the trip flag")
     args = parser.parse_args()
 
     breaker = CircuitBreaker(flag_path=BREAKER_PATH)
@@ -38,7 +37,7 @@ def main() -> int:
 
     if not state.tripped:
         print(f"Circuit breaker: CLEAR ({BREAKER_PATH})")
-        if args.reset:
+        if args.confirm:
             print("Nothing to reset.")
         return 0
 
@@ -49,12 +48,15 @@ def main() -> int:
     print(f"  error:       {state.error or '-'}")
     print(f"  tripped at:  {state.tripped_at or '-'}")
 
-    if not args.reset:
+    if args.confirm != MANUAL_RESET_CONFIRMATION:
         print()
-        print("New live buys are blocked. Run with --reset after investigating the failed sell.")
-        return 0
+        print(
+            "New live buys are blocked. Clear only after investigating with "
+            "--confirm MANUAL_RESET."
+        )
+        return 2
 
-    breaker.reset()
+    breaker.reset(confirm=args.confirm)
     print()
     print("Circuit breaker RESET — new live buys are enabled again.")
     return 0

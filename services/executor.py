@@ -10,6 +10,7 @@ import math
 import os
 import sys
 import time
+from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Protocol
@@ -111,6 +112,7 @@ class StrategyExecutor:
         halt_path: Path | None = None,
         mark_provider: PriceProvider | None = None,
         alert_manager: Any | None = None,
+        entry_arming_check: Callable[[], Awaitable[tuple[str, ...]]] | None = None,
     ) -> None:
         self._store = store
         self._adapter = adapter
@@ -122,12 +124,16 @@ class StrategyExecutor:
         self._halt_path = halt_path or Path("/tmp/memecoin-executor-halted")
         self._mark_provider = mark_provider or JupiterPriceProvider()
         self._alerts = alert_manager or AlertManager.from_env()
+        self._entry_arming_check = entry_arming_check
+        self._monitor_only = False
+        self._monitor_only_reasons: tuple[str, ...] = ()
         self._positions: dict[str, dict[str, Any]] = {}
         self._cached_marks: dict[str, tuple[float | None, str, datetime, str]] = {}
         self._last_pumpportal_price_at: dict[str, float] = {}
         self._last_jupiter_fallback_at: dict[str, float] = {}
         self._last_jupiter_request_at = 0.0
         self._last_valid_mark_at: dict[str, float] = {}
+        self._last_position_mark_write_at: dict[str, float] = {}
         self._mark_sla_warned: set[str] = set()
         self._mint_locks: dict[str, asyncio.Lock] = {}
         self._gates: GateConfig | None = None
@@ -142,7 +148,7 @@ class StrategyExecutor:
         self._live_entry_alerted = False
 
     async def start(self) -> None:
-        """Hydrate persisted open state before accepting any new entry."""
+        """Hydrate persisted open state before deciding whether entries are armed."""
 
         if self._halt_path.exists():
             raise FailClosed(
@@ -156,9 +162,24 @@ class StrategyExecutor:
         started_at = time.monotonic()
         self._last_valid_mark_at = {mint: started_at for mint in self._positions}
         await self._reconcile_startup()
+        if self._mode == "live" and self._entry_arming_check is not None:
+            reasons = await self._entry_arming_check()
+            if reasons:
+                self._set_monitor_only(reasons)
         self._last_reconciliation_monotonic = time.monotonic()
         self._last_cycle_monotonic = time.monotonic()
         self._write_heartbeat()
+        if self._mode == "live":
+            try:
+                mode_message = (
+                    "New entries blocked; monitoring "
+                    f"{len(self._positions)} open positions."
+                    if self._monitor_only
+                    else f"Entries armed; monitoring {len(self._positions)} open positions."
+                )
+                await self._alerts.send("info", "Live executor startup", mode_message)
+            except Exception as exc:
+                log.error("live executor startup alert failed: %s", exc)
 
     async def run(self) -> None:
         """Run until a failure requires permanent manual intervention."""
@@ -217,7 +238,8 @@ class StrategyExecutor:
             raise FailClosed(self._fatal_reason)
         if self._gates is None:
             raise RuntimeError("executor was not started")
-        self._check_live_circuit_breaker()
+        if self._check_live_circuit_breaker():
+            self._set_monitor_only(("live circuit breaker is tripped",))
         if (
             self._mode == "live"
             and self._last_reconciliation_monotonic is not None
@@ -226,6 +248,8 @@ class StrategyExecutor:
         ):
             if await self._reconcile_startup():
                 self._last_reconciliation_monotonic = time.monotonic()
+        if self._monitor_only:
+            return
         candidates = await get_qualifying_candidates(
             self._store,
             self._strategy,
@@ -340,7 +364,7 @@ class StrategyExecutor:
         )
 
     async def _monitor_positions_once(self) -> None:
-        """Perform only in-memory comparisons until an exit is triggered."""
+        """Perform cached comparisons and persist changed trailing state at most once/sec."""
 
         for mint in list(self._positions):
             async with self._lock_for(mint):
@@ -372,11 +396,16 @@ class StrategyExecutor:
         current_price, source, mark_timestamp, diagnostic = cached
         entry = float(position["entry_price_sol"])
         previous_peak = max(float(position.get("peak_price_sol") or entry), entry)
+        previous_armed = bool(position.get("trailing_armed"))
         peak = max(previous_peak, current_price)
         arm_ratio = 1 + self._exits["trailing_arm_pct"] / 100
-        armed = bool(position.get("trailing_armed")) or peak / entry >= arm_ratio - 1e-12
+        armed = previous_armed or peak / entry >= arm_ratio - 1e-12
         position["peak_price_sol"] = peak
         position["trailing_armed"] = armed
+        state_changed = peak > previous_peak or armed != previous_armed
+        if state_changed and self._should_persist_mark(position):
+            await self._store.update_position_mark(str(position["id"]), peak, armed)
+            self._last_position_mark_write_at[str(position["id"])] = time.monotonic()
         reason = self._exit_reason(position, current_price)
         if reason is None:
             return
@@ -490,84 +519,95 @@ class StrategyExecutor:
             raise RuntimeError("POSITION_SIZE_SOL must be positive")
         if self._mode == "live":
             await self._check_live_entry_guardrails(amount_sol)
-        async with self._store.entry_transaction(mint) as entry:
-            if not entry.allowed:
-                log.info("entry skipped mint=%s reason=%s", mint[:16], entry.rejection_reason)
-                return
-
-            mark_timestamp: datetime | None = None
-            entry_mark: PriceResult | None = None
-            if isinstance(self._adapter, PaperExecutionAdapter):
-                entry_mark = await self._get_mark(mint)
-                mark_price = _positive_float(entry_mark.price_sol)
-                if mark_price is None:
-                    log.warning(
-                        "entry skipped mint=%s no usable Price V3 mark reason=%s",
-                        mint[:16],
-                        entry_mark.reason,
-                    )
+        trade: Any | None = None
+        position: dict[str, Any] | None = None
+        try:
+            async with self._store.entry_transaction(mint) as entry:
+                if not entry.allowed:
+                    log.info("entry skipped mint=%s reason=%s", mint[:16], entry.rejection_reason)
                     return
-                mark_timestamp = datetime.now(UTC)
-                self._adapter.set_price(mint, mark_price)
 
-            if (
-                self._mode == "live"
-                and candidate.get("pool_type") == "bonding"
-                and hasattr(self._adapter, "buy_bonding_curve")
-            ):
-                trade = await self._adapter.buy_bonding_curve(mint, amount_sol, slippage_bps)
-            else:
-                trade = await self._adapter.execute_swap(
-                    mint,
-                    Side.BUY,
-                    amount_sol,
-                    slippage_bps,
-                )
-            if (
-                trade.token_amount is None
-                or trade.token_amount <= 0
-                or _positive_float(trade.price_sol) is None
-            ):
-                raise FailClosed(f"entry for {mint} returned an unpriced or zero-token fill")
-            trade.metadata = {
-                **trade.metadata,
-                "discovery_price_sol": candidate.get("price_sol"),
-                "discovery_source": candidate.get("source"),
-                "entry_mark_source": self._mark_provider.name if entry_mark else "confirmed_fill",
-                "entry_mark_timestamp": mark_timestamp.isoformat() if mark_timestamp else None,
-                "entry_mark_diagnostic": entry_mark.reason if entry_mark else None,
-            }
-            opened_at = datetime.now(UTC)
-            position = {
-                "id": str(uuid4()),
-                "mint_address": mint,
-                "entry_price_sol": float(trade.price_sol),
-                "amount_sol": float(trade.amount_sol),
-                "token_amount": float(trade.token_amount),
-                "peak_price_sol": float(trade.price_sol),
-                "trailing_armed": False,
-                "mode": self._mode,
-                "strategy": self._strategy,
-                "opened_at": opened_at,
-                "candidate_id": candidate.get("id"),
-                "fill_quality": "simulated" if self._mode == "paper" else "confirmed",
-                "tx_signature": trade.tx_signature,
-            }
-            await entry.create_position(position, _trade_record(trade))
-            self._positions[mint] = position
-            self._last_valid_mark_at[mint] = time.monotonic()
-            log.info("entered mint=%s position=%s", mint[:16], position["id"])
-            if self._mode == "live" and not self._live_entry_alerted:
-                self._live_entry_alerted = True
-                log.critical("FIRST LIVE ENTRY session mint=%s position=%s", mint, position["id"])
-                try:
-                    await self._alerts.send(
-                        "critical",
-                        "First live entry",
-                        f"Mint: {mint}\nPosition: {position['id']}\nAmount: {trade.amount_sol} SOL",
+                mark_timestamp: datetime | None = None
+                entry_mark: PriceResult | None = None
+                if isinstance(self._adapter, PaperExecutionAdapter):
+                    entry_mark = await self._get_mark(mint)
+                    mark_price = _positive_float(entry_mark.price_sol)
+                    if mark_price is None:
+                        log.warning(
+                            "entry skipped mint=%s no usable Price V3 mark reason=%s",
+                            mint[:16],
+                            entry_mark.reason,
+                        )
+                        return
+                    mark_timestamp = datetime.now(UTC)
+                    self._adapter.set_price(mint, mark_price)
+
+                if (
+                    self._mode == "live"
+                    and candidate.get("pool_type") == "bonding"
+                    and hasattr(self._adapter, "buy_bonding_curve")
+                ):
+                    trade = await self._adapter.buy_bonding_curve(mint, amount_sol, slippage_bps)
+                else:
+                    trade = await self._adapter.execute_swap(
+                        mint,
+                        Side.BUY,
+                        amount_sol,
+                        slippage_bps,
                     )
-                except Exception as exc:
-                    log.error("first live entry alert failed: %s", exc)
+                if (
+                    trade.token_amount is None
+                    or trade.token_amount <= 0
+                    or _positive_float(trade.price_sol) is None
+                ):
+                    raise FailClosed(f"entry for {mint} returned an unpriced or zero-token fill")
+                trade.metadata = {
+                    **trade.metadata,
+                    "discovery_price_sol": candidate.get("price_sol"),
+                    "discovery_source": candidate.get("source"),
+                    "entry_mark_source": (
+                        self._mark_provider.name if entry_mark else "confirmed_fill"
+                    ),
+                    "entry_mark_timestamp": mark_timestamp.isoformat() if mark_timestamp else None,
+                    "entry_mark_diagnostic": entry_mark.reason if entry_mark else None,
+                }
+                position = {
+                    "id": str(uuid4()),
+                    "mint_address": mint,
+                    "entry_price_sol": float(trade.price_sol),
+                    "amount_sol": float(trade.amount_sol),
+                    "token_amount": float(trade.token_amount),
+                    "peak_price_sol": float(trade.price_sol),
+                    "trailing_armed": False,
+                    "mode": self._mode,
+                    "strategy": self._strategy,
+                    "opened_at": datetime.now(UTC),
+                    "candidate_id": candidate.get("id"),
+                    "fill_quality": "simulated" if self._mode == "paper" else "confirmed",
+                    "tx_signature": trade.tx_signature,
+                }
+                await entry.create_position(position, _trade_record(trade))
+        except Exception as exc:
+            if self._mode == "live" and trade is not None:
+                await self._recover_live_entry_after_persistence_failure(mint, trade, exc)
+                return
+            raise
+
+        assert position is not None and trade is not None
+        self._positions[mint] = position
+        self._last_valid_mark_at[mint] = time.monotonic()
+        log.info("entered mint=%s position=%s", mint[:16], position["id"])
+        if self._mode == "live" and not self._live_entry_alerted:
+            self._live_entry_alerted = True
+            log.critical("FIRST LIVE ENTRY session mint=%s position=%s", mint, position["id"])
+            try:
+                await self._alerts.send(
+                    "critical",
+                    "First live entry",
+                    f"Mint: {mint}\nPosition: {position['id']}\nAmount: {trade.amount_sol} SOL",
+                )
+            except Exception as exc:
+                log.error("first live entry alert failed: %s", exc)
 
     async def _close_position(
         self,
@@ -653,6 +693,7 @@ class StrategyExecutor:
         self._last_pumpportal_price_at.pop(mint, None)
         self._last_jupiter_fallback_at.pop(mint, None)
         self._last_valid_mark_at.pop(mint, None)
+        self._last_position_mark_write_at.pop(str(position["id"]), None)
         self._mark_sla_warned.discard(mint)
         await self._store.refresh_daily_stats(self._strategy)
         log.info("closed mint=%s reason=%s", mint[:16], reason)
@@ -745,14 +786,80 @@ class StrategyExecutor:
             )
         return True
 
-    def _check_live_circuit_breaker(self) -> None:
+    def _check_live_circuit_breaker(self) -> bool:
         if self._mode != "live":
-            return
+            return False
         checker = getattr(self._adapter, "circuit_breaker_tripped", None)
         if checker is None:
             raise FailClosed("live adapter does not expose circuit-breaker status")
         if checker():
-            raise FailClosed("live circuit breaker is tripped")
+            return True
+        return False
+
+    def _set_monitor_only(self, reasons: tuple[str, ...]) -> None:
+        if self._monitor_only:
+            return
+        self._monitor_only = True
+        self._monitor_only_reasons = reasons
+        log.warning(
+            "Started in monitor-only mode -- new entries blocked, monitoring %d open positions "
+            "(%s)",
+            len(self._positions),
+            "; ".join(reasons),
+        )
+
+    def _should_persist_mark(self, position: dict[str, Any]) -> bool:
+        last_write = self._last_position_mark_write_at.get(str(position["id"]), 0.0)
+        return time.monotonic() - last_write >= 1.0
+
+    async def _recover_live_entry_after_persistence_failure(
+        self,
+        mint: str,
+        buy_trade: Any,
+        persistence_error: Exception,
+    ) -> None:
+        """Immediately unwind a confirmed buy that could not be recorded in Hive."""
+
+        token_amount = _positive_float(getattr(buy_trade, "token_amount", None))
+        try:
+            if token_amount is None:
+                raise RuntimeError("confirmed buy returned no token amount for recovery")
+            sell = getattr(self._adapter, "sell", None)
+            verify_cleared = getattr(self._adapter, "verify_token_balance_cleared", None)
+            if sell is None or verify_cleared is None:
+                raise RuntimeError("live adapter cannot liquidate and verify an unpersisted buy")
+            recovery_trade = await sell(mint, token_amount, 500)
+            await verify_cleared(mint)
+        except Exception as recovery_error:
+            reason = (
+                f"Hive persistence failed after buy ({persistence_error}); "
+                f"sell-back failed ({recovery_error})"
+            )
+            self._write_halt(reason)
+            trip = getattr(self._adapter, "trip_circuit_breaker", None)
+            if trip is not None:
+                trip(
+                    error=reason,
+                    mint=mint,
+                    signature_attempt=getattr(buy_trade, "tx_signature", None),
+                    reason="database_failure",
+                )
+            try:
+                await self._alerts.send(
+                    "critical",
+                    "Live buy persistence recovery failed",
+                    f"Mint: {mint}\nAmount: {token_amount or 0}\n{reason}",
+                )
+            except Exception as alert_error:
+                log.critical("DB failure recovery alert failed: %s", alert_error)
+            raise FailClosed(reason) from recovery_error
+
+        log.critical(
+            "live buy persistence failed; sold back mint=%s buy_sig=%s sell_sig=%s",
+            mint[:16],
+            getattr(buy_trade, "tx_signature", None) or "-",
+            getattr(recovery_trade, "tx_signature", None) or "-",
+        )
 
     def _raise_if_fatal(
         self,
@@ -860,6 +967,32 @@ def _live_settings() -> Settings:
     )
 
 
+async def _live_entry_block_reasons(store: ExecutorStore, adapter: Any) -> tuple[str, ...]:
+    """Evaluate entry-only live gates after Hive positions are hydrated."""
+
+    amount_sol = float(os.getenv("POSITION_SIZE_SOL", "0.02"))
+    settings = _live_settings()
+    guardrails = evaluate_live_guardrails(settings, requested_trade_sol=amount_sol)
+    if not guardrails.allowed:
+        return tuple(guardrails.diagnostics)
+    daily_caps = evaluate_daily_live_caps(
+        await store.load_daily_live_state(),
+        max_daily_trades=guardrails.max_daily_trades,
+        max_daily_loss_sol=guardrails.max_daily_loss_sol,
+        today=datetime.now(UTC).date(),
+    )
+    if not daily_caps.allowed:
+        return tuple(daily_caps.diagnostics)
+    balance_lookup = getattr(adapter, "get_sol_balance", None)
+    if balance_lookup is None:
+        return ("live adapter cannot verify wallet SOL balance",)
+    balance = await balance_lookup()
+    required = amount_sol + settings.live_guardrails.min_wallet_balance_sol
+    if balance is None or balance < required:
+        return (f"live wallet balance insufficient: balance={balance} required={required}",)
+    return ()
+
+
 def _acquire_singleton_lock(lock_path: Path | None = None) -> None:
     """Prevent concurrent V2 executors from sharing Hive and the wallet."""
 
@@ -899,39 +1032,19 @@ async def _run() -> None:
     try:
         if mode == "paper":
             adapter: Any = PaperExecutionAdapter()
+            entry_arming_check = None
         elif mode == "live":
-            amount_sol = float(os.getenv("POSITION_SIZE_SOL", "0.02"))
-            settings = _live_settings()
-            guardrails = evaluate_live_guardrails(settings, requested_trade_sol=amount_sol)
-            if not guardrails.allowed:
-                raise RuntimeError(
-                    f"live startup guardrails failed: {', '.join(guardrails.diagnostics)}",
-                )
-            daily_caps = evaluate_daily_live_caps(
-                await store.load_daily_live_state(),
-                max_daily_trades=guardrails.max_daily_trades,
-                max_daily_loss_sol=guardrails.max_daily_loss_sol,
-                today=datetime.now(UTC).date(),
-            )
-            if not daily_caps.allowed:
-                raise RuntimeError(
-                    f"live startup daily caps failed: {', '.join(daily_caps.diagnostics)}",
-                )
             adapter = build_live_adapter()
-            balance = await adapter.get_sol_balance()
-            required = amount_sol + settings.live_guardrails.min_wallet_balance_sol
-            if balance is None or balance < required:
-                await adapter.close()
-                raise RuntimeError(
-                    "live startup wallet balance insufficient: "
-                    f"balance={balance} required={required}",
-                )
+
+            async def entry_arming_check() -> tuple[str, ...]:
+                return await _live_entry_block_reasons(store, adapter)
         else:
             raise RuntimeError(f"EXECUTION_MODE must be paper or live, got {mode!r}")
         executor = StrategyExecutor(
             store,
             adapter,
             cycle_seconds=float(os.getenv("MEMECOIN_EXECUTOR_CYCLE_SECONDS", "1")),
+            entry_arming_check=entry_arming_check,
         )
         await executor.run()
     finally:

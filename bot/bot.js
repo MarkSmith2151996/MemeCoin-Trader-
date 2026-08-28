@@ -115,7 +115,7 @@ async function handleCommand(chatId, text) {
       break;
     }
     case cmd === "kill switch" || cmd === "killswitch": {
-      reply = await runKillSwitch(PROJECT_ROOT);
+      reply = await runV2KillSwitch(PROJECT_ROOT);
       break;
     }
     case /^start b$/.test(cmd): {
@@ -279,8 +279,8 @@ function scheduleDailySummary() {
 
 /* ---------------- helpers ---------------- */
 
-/** Run scripts/kill_switch.py asynchronously and resolve with its output. */
-function runKillSwitch(projectRoot) {
+/** Run the Hive-backed V2 kill switch and return its liquidation summary. */
+function runV2KillSwitch(projectRoot) {
   const script = path.join(projectRoot, "scripts", "kill_switch.py");
   return new Promise((resolve) => {
     const child = spawn("python3", [script], { cwd: projectRoot, timeout: 240000 });
