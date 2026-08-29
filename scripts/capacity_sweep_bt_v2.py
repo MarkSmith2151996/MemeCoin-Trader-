@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""MT-678: full-history V2 Strategy BT replay with measured execution costs.
+"""MT-680: fee-corrected full-history V2 Strategy BT replay.
 
 This is deliberately separate from the frozen MT-606/MT-613 scripts. It reads
 the enabled V2 configuration from Hive, reproduces the replayable V2 gates,
@@ -27,7 +27,7 @@ from collections.abc import Iterator
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, TextIO
 
 import asyncpg
 import duckdb
@@ -38,20 +38,24 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
-from src.strategy.position_manager import (  # noqa: E402, I001
-    DEX_FEE_PCT,
-    PRIORITY_FEE_PER_LEG,
-    SLIPPAGE_PCT,
-)
+from src.strategy.position_manager import PRIORITY_FEE_PER_LEG, SLIPPAGE_PCT  # noqa: E402, I001
 
 
 DEFAULT_ROOT = Path("/mnt/d/pumpapi-replay")
-DEFAULT_OUT_DIR = DEFAULT_ROOT / "results" / "capacity_sweep_bt_v2"
-DEFAULT_REPO_REPORT = REPO_ROOT / "data" / "capacity_sweep_bt_v2_report.md"
+DEFAULT_OUT_DIR = DEFAULT_ROOT / "results" / "capacity_sweep_bt_v2_feefix"
+DEFAULT_REPO_REPORT = REPO_ROOT / "data" / "capacity_sweep_bt_v2_feefix_report.md"
+DEFAULT_PROGRESS_LOG = DEFAULT_ROOT / "results" / "capacity_sweep_bt_v2_feefix.progress.log"
 STRATEGY = "BT"
 BAR_BATCH_SIZE = 100_000
 ENTRY_DELAY_SECONDS = 42.5
 REPEAT_LOSER_BAN_SECONDS = 24 * 60 * 60
+
+# Published default fees for the pool classes represented by this replay. The
+# archive does not retain per-route AMM configs, so graduated rows use the
+# PumpSwap/Raydium default rather than attempting to infer a variable tier.
+BONDING_DEX_FEE_PCT = 0.01
+GRADUATED_DEX_FEE_PCT = 0.0025
+FEE_SENSITIVITY_PCTS = (0.0025, 0.005, 0.0075, 0.01)
 
 # MT-613 calibrated poll model. These are poll-observation parameters rather
 # than strategy gates, so they remain separate from Hive's gate configuration.
@@ -64,6 +68,20 @@ TRAILING_BARS = 60
 BASELINE_ENTRIES = 282_924
 BASELINE_WIN_RATE_PCT = 68.92
 BASELINE_FRICTION_PNL_SOL = 1_147.32
+MT678_SUMMARIES = {
+    "perfect_visibility": {
+        "entries": 146_356,
+        "net_pnl_sol": 39_016.244666,
+        "net_daily_mean_sol": 309.652735,
+        "net_daily_median_sol": -1.034958,
+    },
+    "realistic_visibility": {
+        "entries": 146_088,
+        "net_pnl_sol": 38_824.175777,
+        "net_daily_mean_sol": 308.128379,
+        "net_daily_median_sol": -1.001172,
+    },
+}
 
 REQUIRED_GATES = {
     "mcap_floor",
@@ -136,6 +154,25 @@ class Bar:
     open: float
     close: float
     sol_in_pool: float | None
+    pool_type: str = "graduated"
+
+
+@dataclass(frozen=True, slots=True)
+class PriceRatioCaps:
+    """Archive-derived consecutive five-second close-ratio bounds."""
+
+    p99: float
+    p999: float
+    observations: int
+
+
+@dataclass(frozen=True, slots=True)
+class ExitCap:
+    """One reporting-only bound applied to the next-bar exit fill."""
+
+    name: str
+    label: str
+    price_ratio_bound: float | None
 
 
 @dataclass(frozen=True, slots=True)
@@ -149,32 +186,67 @@ class ReplayTrade:
     entry_pool_sol: float
     exit_pool_sol: float
     position_size_sol: float
+    trigger_price: float | None = None
+    entry_pool_type: str = "graduated"
+    exit_pool_type: str = "graduated"
 
-    @property
-    def raw_pnl_sol(self) -> float:
+    def exit_price_for_cap(self, price_ratio_bound: float | None) -> float:
+        """Return the next-bar fill limited by a trigger-relative archive bound."""
+
+        if price_ratio_bound is None:
+            return self.exit_price
+        trigger = self.trigger_price if self.trigger_price is not None else self.exit_price
+        return min(self.exit_price, trigger * price_ratio_bound)
+
+    def raw_pnl_for_cap(self, price_ratio_bound: float | None) -> float:
+        exit_price = self.exit_price_for_cap(price_ratio_bound)
         # A full liquidation cannot withdraw more SOL than the pool holds. This
         # bounds malformed/stale archive marks before reporting pre-cost PnL.
-        mark_proceeds = self.position_size_sol * self.exit_price / self.entry_price
+        mark_proceeds = self.position_size_sol * exit_price / self.entry_price
         return min(mark_proceeds, self.exit_pool_sol) - self.position_size_sol
 
-    @property
-    def net_pnl_sol(self) -> float:
-        """Apply measured slippage, AMM impact, DEX fees, and priority fees.
+    def net_pnl_for_cap(
+        self,
+        price_ratio_bound: float | None,
+        *,
+        entry_fee_pct: float | None = None,
+        exit_fee_pct: float | None = None,
+    ) -> float:
+        """Re-price gross fills with pool-aware swap fees and measured friction."""
 
-        The token amount is priced at the delayed entry fill plus entry-side
-        slippage and constant-product impact. The exit proceeds use the next
-    bar's close after the trigger, then the equivalent exit-side costs.
-        DEX fees match the per-leg estimate in ``position_manager.py``.
-        """
-
+        entry_fee = (
+            fee_pct_for_pool(self.entry_pool_type) if entry_fee_pct is None else entry_fee_pct
+        )
+        exit_fee = fee_pct_for_pool(self.exit_pool_type) if exit_fee_pct is None else exit_fee_pct
+        exit_price = self.exit_price_for_cap(price_ratio_bound)
         entry_impact = self.position_size_sol / self.entry_pool_sol
         exit_impact = self.position_size_sol / self.exit_pool_sol
         adjusted_entry = self.entry_price * (1.0 + SLIPPAGE_PCT + entry_impact)
-        adjusted_exit = self.exit_price * max(0.0, 1.0 - SLIPPAGE_PCT - exit_impact)
-        tokens = self.position_size_sol / adjusted_entry
-        proceeds = min(tokens * adjusted_exit, self.exit_pool_sol)
-        fees = self.position_size_sol * DEX_FEE_PCT * 2 + PRIORITY_FEE_PER_LEG * 2
-        return proceeds - self.position_size_sol - fees
+        adjusted_exit = exit_price * max(0.0, 1.0 - SLIPPAGE_PCT - exit_impact)
+        gross_tokens = self.position_size_sol / adjusted_entry
+        tokens_after_entry_fee = gross_tokens * (1.0 - entry_fee)
+        gross_exit_proceeds = min(tokens_after_entry_fee * adjusted_exit, self.exit_pool_sol)
+        net_exit_proceeds = gross_exit_proceeds * (1.0 - exit_fee)
+        return net_exit_proceeds - self.position_size_sol - PRIORITY_FEE_PER_LEG * 2
+
+    def gross_fill_values(self, price_ratio_bound: float | None) -> tuple[float, float]:
+        """Return fee-free impacted token and capped-proceeds fills for the trade log."""
+
+        exit_price = self.exit_price_for_cap(price_ratio_bound)
+        entry_impact = self.position_size_sol / self.entry_pool_sol
+        exit_impact = self.position_size_sol / self.exit_pool_sol
+        adjusted_entry = self.entry_price * (1.0 + SLIPPAGE_PCT + entry_impact)
+        adjusted_exit = exit_price * max(0.0, 1.0 - SLIPPAGE_PCT - exit_impact)
+        gross_tokens = self.position_size_sol / adjusted_entry
+        return gross_tokens, min(gross_tokens * adjusted_exit, self.exit_pool_sol)
+
+    @property
+    def raw_pnl_sol(self) -> float:
+        return self.raw_pnl_for_cap(None)
+
+    @property
+    def net_pnl_sol(self) -> float:
+        return self.net_pnl_for_cap(None)
 
 
 @dataclass(slots=True)
@@ -322,7 +394,18 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--end", help="Last replay date; default is the latest complete archive day.")
     parser.add_argument("--output-dir", type=Path, default=DEFAULT_OUT_DIR)
     parser.add_argument("--repo-report", type=Path, default=DEFAULT_REPO_REPORT)
+    parser.add_argument("--progress-log", type=Path, default=DEFAULT_PROGRESS_LOG)
+    parser.add_argument("--price-ratio-p99", type=float)
+    parser.add_argument("--price-ratio-p999", type=float)
+    parser.add_argument("--price-ratio-observations", type=int)
     return parser.parse_args()
+
+
+def log_progress(message: str, progress_log: TextIO | None = None) -> None:
+    print(message, flush=True)
+    if progress_log is not None:
+        progress_log.write(message + "\n")
+        progress_log.flush()
 
 
 def finite_number(value: object) -> float | None:
@@ -364,6 +447,18 @@ def pool_type(pool: object, graduated_this_bar: object) -> str:
     return "bonding" if str(pool or "").lower() == "pump" and not bool(graduated_this_bar) else "graduated"
 
 
+def fee_pct_for_pool(current_pool_type: str) -> float:
+    return BONDING_DEX_FEE_PCT if current_pool_type == "bonding" else GRADUATED_DEX_FEE_PCT
+
+
+def exit_caps(price_ratios: PriceRatioCaps) -> tuple[ExitCap, ...]:
+    return (
+        ExitCap("uncapped", "uncapped", None),
+        ExitCap("p99_9_cap", f"p99.9 cap ({price_ratios.p999:.6f}x)", price_ratios.p999),
+        ExitCap("p99_cap", f"p99 cap ({price_ratios.p99:.6f}x)", price_ratios.p99),
+    )
+
+
 def parquet_dates(enriched_dir: Path, start: str, end: str | None) -> list[str]:
     available = sorted(path.stem for path in enriched_dir.glob("*.parquet"))
     if not available:
@@ -375,6 +470,62 @@ def parquet_dates(enriched_dir: Path, start: str, end: str | None) -> list[str]:
     if not dates:
         raise FileNotFoundError(f"No replay files in requested range {start} through {last_date}")
     return dates
+
+
+def measure_price_ratio_caps(root: Path, dates: list[str]) -> PriceRatioCaps:
+    """Measure exact p99/p99.9 close ratios over consecutive archive bars."""
+
+    enriched_dir = root / "derived" / "enriched"
+    paths = [enriched_dir / f"{date}.parquet" for date in dates]
+    sources = ", ".join(f"'{sql_path(path)}'" for path in paths)
+    connection = open_duckdb(root)
+    try:
+        observations, p99, p999 = connection.execute(
+            f"""WITH bars AS (
+                    SELECT mint, bar_time, close,
+                           lag(bar_time) OVER mint_window AS previous_time,
+                           lag(close) OVER mint_window AS previous_close
+                    FROM read_parquet([{sources}])
+                    WINDOW mint_window AS (PARTITION BY mint ORDER BY bar_time)
+                ), ratios AS (
+                    SELECT close / previous_close AS ratio
+                    FROM bars
+                    WHERE bar_time - previous_time = 5000
+                      AND close > 0
+                      AND previous_close > 0
+                )
+                SELECT count(*), quantile_cont(ratio, 0.99), quantile_cont(ratio, 0.999)
+                FROM ratios""",
+        ).fetchone()
+    finally:
+        connection.close()
+    if not observations or not all(
+        value is not None and math.isfinite(float(value)) and float(value) >= 1.0
+        for value in (p99, p999)
+    ):
+        raise RuntimeError("Could not measure valid p99/p99.9 five-second bar price-ratio caps")
+    return PriceRatioCaps(float(p99), float(p999), int(observations))
+
+
+def price_ratio_caps_from_args(
+    args: argparse.Namespace,
+    root: Path,
+    dates: list[str],
+) -> tuple[PriceRatioCaps, bool]:
+    """Use a complete prior measurement only when all three values are supplied."""
+
+    values = (args.price_ratio_p99, args.price_ratio_p999, args.price_ratio_observations)
+    if all(value is None for value in values):
+        return measure_price_ratio_caps(root, dates), False
+    if any(value is None for value in values):
+        raise ValueError(
+            "--price-ratio-p99, --price-ratio-p999, and --price-ratio-observations must be supplied together",
+        )
+    p99, p999, observations = values
+    assert p99 is not None and p999 is not None and observations is not None
+    if not (math.isfinite(p99) and math.isfinite(p999) and p999 >= p99 >= 1.0 and observations > 0):
+        raise ValueError("Supplied price-ratio caps must be finite, ordered, and based on observations")
+    return PriceRatioCaps(p99, p999, observations), True
 
 
 def load_sol_prices(derived_dir: Path) -> dict[str, float]:
@@ -668,7 +819,7 @@ def bars_for_mints(
     sources = ", ".join(f"'{sql_path(path)}'" for path in paths)
     placeholders = ", ".join("?" for _ in mints)
     frame = connection.execute(
-        f"""SELECT mint, bar_time, open, close, max_sol_in_pool
+        f"""SELECT mint, bar_time, open, close, max_sol_in_pool, pool, graduated_this_bar
             FROM read_parquet([{sources}])
             WHERE mint IN ({placeholders}) AND bar_time >= ? AND bar_time <= ?
             ORDER BY mint, bar_time""",
@@ -690,6 +841,8 @@ def bars_for_mints(
             "open": frame["open"].to_numpy()[start:stop],
             "close": frame["close"].to_numpy()[start:stop],
             "pool": frame["max_sol_in_pool"].to_numpy()[start:stop],
+            "pool_label": frame["pool"].to_numpy()[start:stop],
+            "graduated": frame["graduated_this_bar"].to_numpy()[start:stop],
         }
     return result
 
@@ -706,6 +859,14 @@ def bar_at(series: dict[str, np.ndarray], index: int) -> Bar | None:
         open=open_price,
         close=close_price,
         sol_in_pool=positive_number(series["pool"][index]),
+        pool_type=pool_type(
+            series.get("pool_label", np.array([None]))[index]
+            if index < len(series.get("pool_label", ()))
+            else None,
+            series.get("graduated", np.array([False]))[index]
+            if index < len(series.get("graduated", ()))
+            else False,
+        ),
     )
 
 
@@ -768,6 +929,9 @@ def build_trade(
             entry_pool_sol=entry.sol_in_pool,
             exit_pool_sol=exit_pool,
             position_size_sol=config.position_size_sol,
+            trigger_price=mark.close,
+            entry_pool_type=entry.pool_type,
+            exit_pool_type=exit_bar.pool_type,
         )
     return None
 
@@ -826,6 +990,7 @@ def replay(
     all_dates: list[str],
     root: Path,
     config: LiveConfig,
+    progress_log: TextIO | None = None,
 ) -> tuple[ReplayState, ReplayState, VisibilityModel]:
     enriched_dir = root / "derived" / "enriched"
     sol_prices = load_sol_prices(root / "derived")
@@ -914,11 +1079,11 @@ def replay(
                 day_end,
                 config.number("max_age_seconds"),
             )
-            print(
+            log_progress(
                 f"{replay_date}: gate bars={len(perfect_candidates):,} "
                 f"visible={len(realistic_candidates):,} "
                 f"perfect trades={len(perfect.trades):,} realistic trades={len(realistic.trades):,}",
-                flush=True,
+                progress_log,
             )
     finally:
         connection.close()
@@ -930,9 +1095,15 @@ def replay(
 def daily_aggregates(
     trades: list[ReplayTrade],
     dates: list[str],
+    *,
+    price_ratio_bound: float | None,
+    uniform_fee_pct: float | None = None,
+    exclude_take_profit: bool = False,
 ) -> list[dict[str, Any]]:
     by_day: dict[str, list[ReplayTrade]] = {date: [] for date in dates}
     for trade in trades:
+        if exclude_take_profit and trade.exit_reason == "take_profit":
+            continue
         date = utc_datetime(trade.exit_time).date().isoformat()
         if date in by_day:
             by_day[date].append(trade)
@@ -944,8 +1115,17 @@ def daily_aggregates(
             {
                 "date": date,
                 "entries": len(day_trades),
-                "raw_pnl_sol": sum(trade.raw_pnl_sol for trade in day_trades),
-                "net_pnl_sol": sum(trade.net_pnl_sol for trade in day_trades),
+                "raw_pnl_sol": sum(
+                    trade.raw_pnl_for_cap(price_ratio_bound) for trade in day_trades
+                ),
+                "net_pnl_sol": sum(
+                    trade.net_pnl_for_cap(
+                        price_ratio_bound,
+                        entry_fee_pct=uniform_fee_pct,
+                        exit_fee_pct=uniform_fee_pct,
+                    )
+                    for trade in day_trades
+                ),
                 "take_profit_count": reason_counts["take_profit"],
                 "trailing_stop_count": reason_counts["trailing_stop"],
                 "hard_stop_count": reason_counts["hard_stop"],
@@ -958,11 +1138,35 @@ def daily_aggregates(
     return rows
 
 
-def summary(state: ReplayState, dates: list[str]) -> dict[str, Any]:
-    trades = state.trades
-    raw_values = [trade.raw_pnl_sol for trade in trades]
-    net_values = [trade.net_pnl_sol for trade in trades]
-    daily = daily_aggregates(trades, dates)
+def summary(
+    state: ReplayState,
+    dates: list[str],
+    *,
+    price_ratio_bound: float | None,
+    uniform_fee_pct: float | None = None,
+    exclude_take_profit: bool = False,
+) -> dict[str, Any]:
+    trades = [
+        trade
+        for trade in state.trades
+        if not exclude_take_profit or trade.exit_reason != "take_profit"
+    ]
+    raw_values = [trade.raw_pnl_for_cap(price_ratio_bound) for trade in trades]
+    net_values = [
+        trade.net_pnl_for_cap(
+            price_ratio_bound,
+            entry_fee_pct=uniform_fee_pct,
+            exit_fee_pct=uniform_fee_pct,
+        )
+        for trade in trades
+    ]
+    daily = daily_aggregates(
+        state.trades,
+        dates,
+        price_ratio_bound=price_ratio_bound,
+        uniform_fee_pct=uniform_fee_pct,
+        exclude_take_profit=exclude_take_profit,
+    )
     raw_days = [row["raw_pnl_sol"] for row in daily]
     net_days = [row["net_pnl_sol"] for row in daily]
     worst_raw = min(daily, key=lambda row: row["raw_pnl_sol"])
@@ -987,7 +1191,12 @@ def summary(state: ReplayState, dates: list[str]) -> dict[str, Any]:
     }
 
 
-def exit_breakdown(trades: list[ReplayTrade]) -> list[dict[str, Any]]:
+def exit_breakdown(
+    trades: list[ReplayTrade],
+    *,
+    price_ratio_bound: float | None,
+    uniform_fee_pct: float | None = None,
+) -> list[dict[str, Any]]:
     grouped: dict[str, list[ReplayTrade]] = {}
     for trade in trades:
         grouped.setdefault(trade.exit_reason, []).append(trade)
@@ -996,10 +1205,19 @@ def exit_breakdown(trades: list[ReplayTrade]) -> list[dict[str, Any]]:
     rows: list[dict[str, Any]] = []
     for reason in sorted(grouped, key=lambda item: (order.get(item, len(order)), item)):
         reason_trades = grouped[reason]
-        raw_pnl = sum(trade.raw_pnl_sol for trade in reason_trades)
-        net_pnl = sum(trade.net_pnl_sol for trade in reason_trades)
-        raw_wins = sum(trade.raw_pnl_sol > 0 for trade in reason_trades)
-        net_wins = sum(trade.net_pnl_sol > 0 for trade in reason_trades)
+        raw_values = [trade.raw_pnl_for_cap(price_ratio_bound) for trade in reason_trades]
+        net_values = [
+            trade.net_pnl_for_cap(
+                price_ratio_bound,
+                entry_fee_pct=uniform_fee_pct,
+                exit_fee_pct=uniform_fee_pct,
+            )
+            for trade in reason_trades
+        ]
+        raw_pnl = sum(raw_values)
+        net_pnl = sum(net_values)
+        raw_wins = sum(value > 0 for value in raw_values)
+        net_wins = sum(value > 0 for value in net_values)
         rows.append(
             {
                 "exit_reason": reason,
@@ -1016,6 +1234,68 @@ def exit_breakdown(trades: list[ReplayTrade]) -> list[dict[str, Any]]:
     return rows
 
 
+def fee_sensitivity(
+    state: ReplayState,
+    dates: list[str],
+    *,
+    price_ratio_bound: float,
+) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    for fee_pct in FEE_SENSITIVITY_PCTS:
+        values = summary(
+            state,
+            dates,
+            price_ratio_bound=price_ratio_bound,
+            uniform_fee_pct=fee_pct,
+        )
+        rows.append(
+            {
+                "scenario": state.scenario,
+                "fee_pct_per_leg": fee_pct,
+                "net_win_rate_pct": values["net_win_rate_pct"],
+                "net_pnl_sol": values["net_pnl_sol"],
+                "net_daily_median_sol": values["net_daily_median_sol"],
+                "net_daily_mean_sol": values["net_daily_mean_sol"],
+            },
+        )
+    return rows
+
+
+def median_fee_breakeven(
+    state: ReplayState,
+    dates: list[str],
+    *,
+    price_ratio_bound: float,
+) -> str:
+    """Find the non-negative uniform per-leg fee where daily median crosses zero."""
+
+    def median_at(fee_pct: float) -> float:
+        return float(
+            summary(
+                state,
+                dates,
+                price_ratio_bound=price_ratio_bound,
+                uniform_fee_pct=fee_pct,
+            )["net_daily_median_sol"],
+        )
+
+    zero_fee_median = median_at(0.0)
+    one_percent_median = median_at(0.01)
+    if zero_fee_median < 0:
+        return f"no non-negative fee breakeven (0.00% median {zero_fee_median:+.6f} SOL)"
+    if one_percent_median >= 0:
+        return f">1.00% per leg (1.00% median {one_percent_median:+.6f} SOL)"
+    low = 0.0
+    high = 0.01
+    for _ in range(40):
+        midpoint = (low + high) / 2
+        if median_at(midpoint) >= 0:
+            low = midpoint
+        else:
+            high = midpoint
+    return f"{(low + high) / 2 * 100:.4f}% per leg"
+
+
 def format_number(value: float) -> str:
     return f"{value:+.6f}"
 
@@ -1024,15 +1304,21 @@ def build_report(
     *,
     dates: list[str],
     config: LiveConfig,
-    summaries: list[dict[str, Any]],
+    price_ratios: PriceRatioCaps,
+    caps: tuple[ExitCap, ...],
+    summaries_by_cap: dict[str, list[dict[str, Any]]],
+    floor_summaries: list[dict[str, Any]],
+    fee_sensitivity_rows: dict[str, list[dict[str, Any]]],
     states: list[ReplayState],
     visibility: VisibilityModel,
 ) -> str:
-    by_scenario = {row["scenario"]: row for row in summaries}
+    p999_cap = next(cap for cap in caps if cap.name == "p99_9_cap")
+    p999_summaries = summaries_by_cap[p999_cap.name]
+    by_scenario = {row["scenario"]: row for row in p999_summaries}
     perfect = by_scenario["perfect_visibility"]
     realistic = by_scenario["realistic_visibility"]
     lines = [
-        "# MT-678: V2 Strategy BT Full-History Backtest",
+        "# MT-680: Fee-Corrected V2 Strategy BT Backtest",
         "",
         f"Replay range: **{dates[0]} through {dates[-1]} UTC** ({len(dates)} complete archive days).",
         f"Hive configuration captured read-only at: `{config.captured_at}`.",
@@ -1075,35 +1361,60 @@ def build_report(
                 "`services/executor.py` exit priority |"
             ),
             (
-                f"| DEX fee | {DEX_FEE_PCT * 100:.2f}% of position size per leg | "
-                "`src/strategy/position_manager.py:DEX_FEE_PCT` |"
+                f"| bonding-curve DEX fee | {BONDING_DEX_FEE_PCT * 100:.2f}% input per leg | "
+                "Pump.fun fee schedule; Pump.fun bonding classification |"
+            ),
+            (
+                f"| graduated DEX fee | {GRADUATED_DEX_FEE_PCT * 100:.2f}% input per leg | "
+                "PumpSwap / Raydium published default-pool schedules |"
             ),
             (
                 f"| priority fee | {PRIORITY_FEE_PER_LEG:.4f} SOL per leg ({PRIORITY_FEE_PER_LEG * 2:.4f} SOL round trip) | "
                 "`src/strategy/position_manager.py:PRIORITY_FEE_PER_LEG` |"
             ),
             "",
-            "Raw PnL uses the delayed entry and delayed next-bar exit prices before costs. Net PnL "
-            "uses the resulting token quantity after slippage/AMM impact, subtracts both 1% DEX "
-            "legs and both priority fees. Both scenarios cap full-liquidation proceeds at the "
-            "contemporaneous exit SOL reserve, so malformed/stale archive marks cannot imply an "
-            "impossible withdrawal. Net PnL is not comparable to MT-606's flat 3% model.",
+            "The replay charges a swap fee against the entry input before calculating tokens and against "
+            "the exit proceeds after impact. `pool == pump` while not graduated is bonding; every other "
+            "archive row is graduated. This permits a bonding entry and graduated exit to use different "
+            "fees. The full-liquidation pool-reserve bound remains in place before exit-side fees.",
             "",
-            "### Interpretation warning",
+            "### Fee sources and live-path trace",
             "",
-            "The mean PnL can be dominated by a small number of extreme archived take-profit and "
-            "trailing paths even after the pool-reserve bound. The median net day is the more stable "
-            "summary in this archive and may be negative while the mean is positive. These results "
-            "describe the archived bar/fill surface, not a validated live-profit forecast; no arbitrary "
-            "return cap was added because the archive cannot ground one in measured fill evidence.",
+            "- Pump.fun publishes bonding-curve and PumpSwap fees at "
+            "<https://pump.fun/docs/fees>. This replay uses the task-specified 1.00% bonding fee and "
+            "the 0.25% standard PumpSwap fee.",
+            "- Raydium documents a 0.25% default/most-used AMM-v4, CPMM, and CLMM tier at "
+            "<https://docs.raydium.io/reference/fee-comparison>. Some Raydium pool configs can instead "
+            "be 0.01%, 0.05%, or 1%; the archive has no route AMM-config record, so 0.25% is the "
+            "graduated fallback rather than a claim about every route.",
+            "- V2 `JupiterSwapClient.get_quote()` stores raw route data only in `JupiterSwapQuote.raw`; it "
+            "does not persist route fees. Jupiter's quote schema exposes deprecated `routePlan.swapInfo.feeAmount` "
+            "and `feeMint` fields (<https://dev.jup.ag/docs/api-reference/swap/v1/quote>), so there is no "
+            "recorded V2 route-fee ledger to substitute for published schedules.",
+            "- `src/strategy/position_manager.py` still defines legacy `DEX_FEE_PCT = 0.01` and subtracts "
+            "two entry-notional fees in `_estimated_round_trip_cost_sol`. The V2 service paper path instead "
+            "uses `_paper_exit_price`/mark PnL in `services/executor.py` and applies neither that legacy "
+            "cost estimate nor per-pool fees. This detached replay intentionally diverges from paper fills by "
+            "using delayed archive fills, pool impact, per-pool fees, and priority fees.",
             "",
             "Exit priority was traced through `StrategyExecutor._monitor_position_locked` and "
             "`StrategyExecutor._exit_reason`: peak/arm state updates first, then hard stop, take profit, "
-            "trailing stop, and time stop. V2 paper code would otherwise fill fixed levels through "
-            "`_paper_exit_price`; this replay intentionally supersedes that fill behavior with the required "
-            "next-bar execution model.",
+            "trailing stop, and time stop. The replay records that trigger, then uses the next completed bar's "
+            "close subject to each archive-derived cap.",
             "",
-            "## Full-range results",
+            "## Archive price-ratio caps",
+            "",
+            "| measure | value |",
+            "| --- | ---: |",
+            f"| valid consecutive 5-second close ratios | {price_ratios.observations:,} |",
+            f"| p99 close / previous-close ratio | {price_ratios.p99:.6f}x |",
+            f"| p99.9 close / previous-close ratio | {price_ratios.p999:.6f}x |",
+            "",
+            "Ratios require the same mint to have valid positive closes exactly five seconds apart. For a triggered "
+            "exit, the capped fill is `min(next_bar_close, trigger_price * bound)`. These are archive-distribution "
+            "bounds, not executable quote guarantees.",
+            "",
+            "## Headline: corrected fees at p99.9 exit cap",
             "",
             "| metric | perfect visibility | realistic visibility |",
             "| --- | ---: | ---: |",
@@ -1134,23 +1445,73 @@ def build_report(
     lines.append(
         f"| net worst-day date | {perfect['net_worst_day_date']} | {realistic['net_worst_day_date']} |",
     )
-    for state in states:
+    for cap in caps:
         lines.extend(
             [
                 "",
-                f"## Exit-reason breakdown: {state.scenario.replace('_', ' ')}",
-                "",
-                "| exit reason | count | raw WR | net WR | net WR contribution | raw PnL | net PnL | raw avg/trade | net avg/trade |",
-                "| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |",
+                f"## Exit-reason breakdown: {cap.label}",
             ],
         )
-        for row in exit_breakdown(state.trades):
-            lines.append(
-                f"| {row['exit_reason']} | {row['count']:,} | {row['raw_win_rate_pct']:.2f}% | "
-                f"{row['net_win_rate_pct']:.2f}% | {row['net_win_rate_contribution_pp']:.2f}pp | "
-                f"{format_number(row['raw_pnl_sol'])} | {format_number(row['net_pnl_sol'])} | "
-                f"{format_number(row['raw_avg_pnl_sol'])} | {format_number(row['net_avg_pnl_sol'])} |"
+        for state in states:
+            lines.extend(
+                [
+                    "",
+                    f"### {state.scenario.replace('_', ' ')}",
+                    "",
+                    "| exit reason | count | raw WR | net WR | net PnL | net avg/trade |",
+                    "| --- | ---: | ---: | ---: | ---: | ---: |",
+                ],
             )
+            for row in exit_breakdown(state.trades, price_ratio_bound=cap.price_ratio_bound):
+                lines.append(
+                    f"| {row['exit_reason']} | {row['count']:,} | {row['raw_win_rate_pct']:.2f}% | "
+                    f"{row['net_win_rate_pct']:.2f}% | {format_number(row['net_pnl_sol'])} | "
+                    f"{format_number(row['net_avg_pnl_sol'])} |",
+                )
+    lines.extend(
+        [
+            "",
+            "## Take-profit-excluded reporting floor",
+            "",
+            "This removes take-profit exits from the reported PnL after the replay. It does not re-run capacity "
+            "without those positions, so it is a conservative reporting floor rather than a replacement strategy.",
+            "",
+            "| metric at p99.9 cap | perfect visibility | realistic visibility |",
+            "| --- | ---: | ---: |",
+        ],
+    )
+    floor_by_scenario = {row["scenario"]: row for row in floor_summaries}
+    for label, key, specifier, suffix in metrics:
+        lines.append(
+            f"| {label} | {floor_by_scenario['perfect_visibility'][key]:{specifier}}{suffix} | "
+            f"{floor_by_scenario['realistic_visibility'][key]:{specifier}}{suffix} |",
+        )
+    lines.extend(
+        [
+            "",
+            "## Fee sensitivity at p99.9 exit cap",
+        ],
+    )
+    for scenario, rows in fee_sensitivity_rows.items():
+        lines.extend(
+            [
+                "",
+                f"### {scenario.replace('_', ' ')}",
+                "",
+                "| per-leg fee | net WR | net total PnL | net daily median | net daily mean |",
+                "| --- | ---: | ---: | ---: | ---: |",
+            ],
+        )
+        for row in rows:
+            lines.append(
+                f"| {row['fee_pct_per_leg'] * 100:.2f}% | {row['net_win_rate_pct']:.2f}% | "
+                f"{format_number(row['net_pnl_sol'])} | {format_number(row['net_daily_median_sol'])} | "
+                f"{format_number(row['net_daily_mean_sol'])} |",
+            )
+        state = next(state for state in states if state.scenario == scenario)
+        lines.append(
+            f"Breakeven uniform per-leg fee by net daily median: **{median_fee_breakeven(state, dates, price_ratio_bound=p999_cap.price_ratio_bound or 0.0)}**.",
+        )
     born = sum(int(stats["born_mints"]) for stats in visibility.daily_stats.values())
     found = sum(int(stats["born_discovered"]) for stats in visibility.daily_stats.values())
     lag_values = [float(stats["median_lag_s"]) for stats in visibility.daily_stats.values()]
@@ -1171,27 +1532,33 @@ def build_report(
             "and one-way discovery/watch-list model. Perfect visibility evaluates every replayable "
             "gate-passing archive observation.",
             "",
-            "## Comparison with MT-606 baseline",
+            "## Comparison with MT-678",
             "",
-            "| scenario | entries delta vs 282,924 | raw WR delta vs 68.92% | net PnL delta vs +1,147.32 SOL |",
-            "| --- | ---: | ---: | ---: |",
+            "| scenario | entries delta | p99.9 net PnL delta | p99.9 daily mean delta | p99.9 daily median delta |",
+            "| --- | ---: | ---: | ---: | ---: |",
         ],
     )
-    for row in summaries:
+    for row in p999_summaries:
+        baseline = MT678_SUMMARIES[row["scenario"]]
         lines.append(
-            f"| {row['scenario']} | {row['entries'] - BASELINE_ENTRIES:+,} | "
-            f"{row['raw_win_rate_pct'] - BASELINE_WIN_RATE_PCT:+.2f}pp | "
-            f"{row['net_pnl_sol'] - BASELINE_FRICTION_PNL_SOL:+.6f} |"
+            f"| {row['scenario']} | {row['entries'] - baseline['entries']:+,} | "
+            f"{row['net_pnl_sol'] - baseline['net_pnl_sol']:+.6f} | "
+            f"{row['net_daily_mean_sol'] - baseline['net_daily_mean_sol']:+.6f} | "
+            f"{row['net_daily_median_sol'] - baseline['net_daily_median_sol']:+.6f} |",
         )
     lines.extend(
         [
             "",
-            "MT-606 used the older gate snapshot, 0.05 SOL standard / 0.025 SOL Saturday sizing, "
-            "a flat 3% entry/exit friction model, fixed-level exits, and ended on 2026-08-17. This "
-            "run uses V2's Hive gates, 0.02 SOL no-Saturday-multiplier sizing, 42.5-second delayed "
-            "entry, next-bar exits, measured per-leg costs, score ordering, hard-stop-only 24-hour "
-            "repeat-loser ban, and four additional archive days. Those gate, scheduling, execution-cost, "
-            "and data-range changes jointly explain movement; this is not an apples-to-apples parameter-only delta.",
+            "MT-680 leaves MT-678's gates, sizing, visibility, timing, slippage, impact, reserve bound, and "
+            "capacity sequencing unchanged. Movement therefore comes from replacing the all-pool flat 1% "
+            "entry-notional fee with per-leg pool fees and from applying measured p99.9 exit-mark sanity caps. "
+            "The latter removes impossible next-bar archive marks that previously dominated take-profit means.",
+            "",
+            "## Recommended realistic daily PnL",
+            "",
+            f"**{realistic['net_daily_median_sol']:+.6f} SOL/day** is the recommended single estimate: the "
+            "realistic-visibility, p99.9-capped, corrected-fee daily median. It reflects the live discovery "
+            "constraint and is robust to the remaining skew that makes means and total PnL unrepresentative.",
             "",
             "## Replay limits",
             "",
@@ -1220,50 +1587,183 @@ def write_outputs(
     repo_report: Path,
     config: LiveConfig,
     dates: list[str],
+    price_ratios: PriceRatioCaps,
     states: list[ReplayState],
     visibility: VisibilityModel,
 ) -> None:
     output_dir.mkdir(parents=True, exist_ok=True)
-    summaries = [summary(state, dates) for state in states]
+    caps = exit_caps(price_ratios)
+    summaries_by_cap = {
+        cap.name: [
+            summary(state, dates, price_ratio_bound=cap.price_ratio_bound)
+            for state in states
+        ]
+        for cap in caps
+    }
+    p999_cap = next(cap for cap in caps if cap.name == "p99_9_cap")
+    floor_summaries = [
+        summary(
+            state,
+            dates,
+            price_ratio_bound=p999_cap.price_ratio_bound,
+            exclude_take_profit=True,
+        )
+        for state in states
+    ]
+    fee_sensitivity_rows = {
+        state.scenario: fee_sensitivity(
+            state,
+            dates,
+            price_ratio_bound=p999_cap.price_ratio_bound or 0.0,
+        )
+        for state in states
+    }
     report = build_report(
         dates=dates,
         config=config,
-        summaries=summaries,
+        price_ratios=price_ratios,
+        caps=caps,
+        summaries_by_cap=summaries_by_cap,
+        floor_summaries=floor_summaries,
+        fee_sensitivity_rows=fee_sensitivity_rows,
         states=states,
         visibility=visibility,
     )
-    (output_dir / "capacity_sweep_bt_v2_report.md").write_text(report, encoding="utf-8")
+    (output_dir / "capacity_sweep_bt_v2_feefix_report.md").write_text(report, encoding="utf-8")
     repo_report.parent.mkdir(parents=True, exist_ok=True)
     repo_report.write_text(report, encoding="utf-8")
 
-    with (output_dir / "capacity_sweep_bt_v2_summary.csv").open("w", newline="", encoding="utf-8") as output:
-        fields = list(summaries[0])
-        writer = csv.DictWriter(output, fieldnames=fields)
-        writer.writeheader()
-        writer.writerows(summaries)
-    with (output_dir / "capacity_sweep_bt_v2_exit_reasons.csv").open(
+    summary_rows = [
+        {"cap": cap.name, **row}
+        for cap in caps
+        for row in summaries_by_cap[cap.name]
+    ]
+    with (output_dir / "capacity_sweep_bt_v2_feefix_summary.csv").open(
         "w",
         newline="",
         encoding="utf-8",
     ) as output:
-        fields = ["scenario", *exit_breakdown(states[0].trades)[0].keys()]
+        fields = list(summary_rows[0])
         writer = csv.DictWriter(output, fieldnames=fields)
         writer.writeheader()
-        for state in states:
-            for row in exit_breakdown(state.trades):
-                writer.writerow({"scenario": state.scenario, **row})
-    with (output_dir / "capacity_sweep_bt_v2_daily_exit_counts.csv").open(
+        writer.writerows(summary_rows)
+    with (output_dir / "capacity_sweep_bt_v2_feefix_floor_summary.csv").open(
         "w",
         newline="",
         encoding="utf-8",
     ) as output:
-        fields = ["scenario", *daily_aggregates(states[0].trades, dates)[0].keys()]
+        fields = list(floor_summaries[0])
         writer = csv.DictWriter(output, fieldnames=fields)
         writer.writeheader()
+        writer.writerows(floor_summaries)
+    with (output_dir / "capacity_sweep_bt_v2_feefix_exit_reasons.csv").open(
+        "w",
+        newline="",
+        encoding="utf-8",
+    ) as output:
+        first_breakdown = exit_breakdown(
+            states[0].trades,
+            price_ratio_bound=caps[0].price_ratio_bound,
+        )
+        fields = ["cap", "scenario", *first_breakdown[0].keys()]
+        writer = csv.DictWriter(output, fieldnames=fields)
+        writer.writeheader()
+        for cap in caps:
+            for state in states:
+                for row in exit_breakdown(state.trades, price_ratio_bound=cap.price_ratio_bound):
+                    writer.writerow({"cap": cap.name, "scenario": state.scenario, **row})
+    with (output_dir / "capacity_sweep_bt_v2_feefix_daily_exit_counts.csv").open(
+        "w",
+        newline="",
+        encoding="utf-8",
+    ) as output:
+        first_daily = daily_aggregates(
+            states[0].trades,
+            dates,
+            price_ratio_bound=caps[0].price_ratio_bound,
+        )
+        fields = ["cap", "scenario", *first_daily[0].keys()]
+        writer = csv.DictWriter(output, fieldnames=fields)
+        writer.writeheader()
+        for cap in caps:
+            for state in states:
+                for row in daily_aggregates(
+                    state.trades,
+                    dates,
+                    price_ratio_bound=cap.price_ratio_bound,
+                ):
+                    writer.writerow({"cap": cap.name, "scenario": state.scenario, **row})
+    with (output_dir / "capacity_sweep_bt_v2_feefix_fee_sensitivity.csv").open(
+        "w",
+        newline="",
+        encoding="utf-8",
+    ) as output:
+        rows = [row for scenario_rows in fee_sensitivity_rows.values() for row in scenario_rows]
+        writer = csv.DictWriter(output, fieldnames=list(rows[0]))
+        writer.writeheader()
+        writer.writerows(rows)
+    with (output_dir / "capacity_sweep_bt_v2_feefix_trades.csv").open(
+        "w",
+        newline="",
+        encoding="utf-8",
+    ) as output:
+        fields = [
+            "scenario",
+            "mint",
+            "entry_time",
+            "exit_time",
+            "exit_reason",
+            "entry_price",
+            "trigger_price",
+            "next_bar_exit_price",
+            "exit_price_p99_9_cap",
+            "exit_price_p99_cap",
+            "entry_pool_sol",
+            "exit_pool_sol",
+            "entry_pool_type",
+            "exit_pool_type",
+            "entry_fee_pct",
+            "exit_fee_pct",
+            "gross_entry_tokens",
+            "gross_exit_proceeds_uncapped_sol",
+            "gross_exit_proceeds_p99_9_cap_sol",
+            "gross_exit_proceeds_p99_cap_sol",
+        ]
+        writer = csv.DictWriter(output, fieldnames=fields)
+        writer.writeheader()
+        p99_cap = next(cap for cap in caps if cap.name == "p99_cap")
         for state in states:
-            for row in daily_aggregates(state.trades, dates):
-                writer.writerow({"scenario": state.scenario, **row})
-    with (output_dir / "capacity_sweep_bt_v2_visibility.csv").open(
+            for trade in state.trades:
+                gross_tokens, uncapped_proceeds = trade.gross_fill_values(None)
+                _, p999_proceeds = trade.gross_fill_values(p999_cap.price_ratio_bound)
+                _, p99_proceeds = trade.gross_fill_values(p99_cap.price_ratio_bound)
+                writer.writerow(
+                    {
+                        "scenario": state.scenario,
+                        "mint": trade.mint,
+                        "entry_time": trade.entry_time,
+                        "exit_time": trade.exit_time,
+                        "exit_reason": trade.exit_reason,
+                        "entry_price": trade.entry_price,
+                        "trigger_price": trade.trigger_price,
+                        "next_bar_exit_price": trade.exit_price,
+                        "exit_price_p99_9_cap": trade.exit_price_for_cap(
+                            p999_cap.price_ratio_bound,
+                        ),
+                        "exit_price_p99_cap": trade.exit_price_for_cap(p99_cap.price_ratio_bound),
+                        "entry_pool_sol": trade.entry_pool_sol,
+                        "exit_pool_sol": trade.exit_pool_sol,
+                        "entry_pool_type": trade.entry_pool_type,
+                        "exit_pool_type": trade.exit_pool_type,
+                        "entry_fee_pct": fee_pct_for_pool(trade.entry_pool_type),
+                        "exit_fee_pct": fee_pct_for_pool(trade.exit_pool_type),
+                        "gross_entry_tokens": gross_tokens,
+                        "gross_exit_proceeds_uncapped_sol": uncapped_proceeds,
+                        "gross_exit_proceeds_p99_9_cap_sol": p999_proceeds,
+                        "gross_exit_proceeds_p99_cap_sol": p99_proceeds,
+                    },
+                )
+    with (output_dir / "capacity_sweep_bt_v2_feefix_visibility.csv").open(
         "w",
         newline="",
         encoding="utf-8",
@@ -1281,10 +1781,17 @@ def write_outputs(
         "max_open": config.max_open,
         "entry_delay_seconds": ENTRY_DELAY_SECONDS,
         "slippage_pct_per_leg": SLIPPAGE_PCT,
-        "dex_fee_pct_per_leg": DEX_FEE_PCT,
+        "bonding_dex_fee_pct_per_leg": BONDING_DEX_FEE_PCT,
+        "graduated_dex_fee_pct_per_leg": GRADUATED_DEX_FEE_PCT,
+        "fee_sensitivity_pct_per_leg": list(FEE_SENSITIVITY_PCTS),
         "priority_fee_sol_per_leg": PRIORITY_FEE_PER_LEG,
+        "price_ratio_caps": {
+            "observations": price_ratios.observations,
+            "p99": price_ratios.p99,
+            "p999": price_ratios.p999,
+        },
     }
-    (output_dir / "capacity_sweep_bt_v2_config.json").write_text(
+    (output_dir / "capacity_sweep_bt_v2_feefix_config.json").write_text(
         json.dumps(snapshot, indent=2, sort_keys=True) + "\n",
         encoding="utf-8",
     )
@@ -1298,22 +1805,36 @@ def main() -> None:
     config = asyncio.run(load_live_config())
     all_dates = parquet_dates(enriched_dir, "0000-01-01", None)
     dates = parquet_dates(enriched_dir, args.start, args.end)
-    print(
-        f"Replaying {len(dates)} complete day(s): {dates[0]} through {dates[-1]} "
-        f"with position_size={config.position_size_sol:g} SOL max_open={config.max_open}",
-        flush=True,
-    )
-    perfect, realistic, visibility = replay(
-        dates=dates,
-        all_dates=all_dates,
-        root=root,
-        config=config,
-    )
+    progress_path = args.progress_log.resolve()
+    progress_path.parent.mkdir(parents=True, exist_ok=True)
+    with progress_path.open("w", encoding="utf-8") as progress_log:
+        log_progress(
+            f"Replaying {len(dates)} complete day(s): {dates[0]} through {dates[-1]} "
+            f"with position_size={config.position_size_sol:g} SOL max_open={config.max_open}",
+            progress_log,
+        )
+        if args.price_ratio_p99 is None:
+            log_progress("Measuring archive 5-second close-ratio caps...", progress_log)
+        price_ratios, reused_caps = price_ratio_caps_from_args(args, root, dates)
+        log_progress(
+            f"Archive price ratios ({'reused full-range measurement' if reused_caps else 'measured'}): "
+            f"observations={price_ratios.observations:,} "
+            f"p99={price_ratios.p99:.6f}x p99.9={price_ratios.p999:.6f}x",
+            progress_log,
+        )
+        perfect, realistic, visibility = replay(
+            dates=dates,
+            all_dates=all_dates,
+            root=root,
+            config=config,
+            progress_log=progress_log,
+        )
     write_outputs(
         output_dir=args.output_dir.resolve(),
         repo_report=args.repo_report.resolve(),
         config=config,
         dates=dates,
+        price_ratios=price_ratios,
         states=[perfect, realistic],
         visibility=visibility,
     )

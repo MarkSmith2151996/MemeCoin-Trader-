@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import random
 import sys
+from dataclasses import replace
 from pathlib import Path
 
 import numpy as np
@@ -87,7 +88,28 @@ def test_pool_reserve_bounds_mark_and_costed_liquidation_proceeds() -> None:
     )
 
     assert trade.raw_pnl_sol == pytest.approx(-0.01)
-    assert trade.net_pnl_sol == pytest.approx(-0.0208)
+    assert trade.net_pnl_sol == pytest.approx(-0.0204)
+
+
+def test_pool_aware_fees_and_trigger_relative_exit_cap() -> None:
+    trade = bt.ReplayTrade(
+        mint="migration",
+        entry_time=0,
+        entry_price=1.0,
+        exit_time=5_000,
+        exit_price=10.0,
+        exit_reason="take_profit",
+        entry_pool_sol=100.0,
+        exit_pool_sol=100.0,
+        position_size_sol=0.02,
+        trigger_price=2.5,
+        entry_pool_type="bonding",
+        exit_pool_type="graduated",
+    )
+    all_graduated = replace(trade, entry_pool_type="graduated")
+
+    assert trade.exit_price_for_cap(1.5) == pytest.approx(3.75)
+    assert trade.net_pnl_sol < all_graduated.net_pnl_sol
 
 
 def test_visibility_sampler_returns_distinct_weighted_mints() -> None:
@@ -126,14 +148,39 @@ def test_report_renders_percentages_and_exit_breakdowns() -> None:
         "median_lag_s": 5.0,
         "p90_lag_s": 5.0,
     }
+    ratios = bt.PriceRatioCaps(p99=1.5, p999=2.0, observations=10)
+    caps = bt.exit_caps(ratios)
+    summaries_by_cap = {
+        cap.name: [
+            bt.summary(state, ["2026-04-18"], price_ratio_bound=cap.price_ratio_bound)
+            for state in states
+        ]
+        for cap in caps
+    }
 
     report = bt.build_report(
         dates=["2026-04-18"],
         config=config(),
-        summaries=[bt.summary(state, ["2026-04-18"]) for state in states],
+        price_ratios=ratios,
+        caps=caps,
+        summaries_by_cap=summaries_by_cap,
+        floor_summaries=[
+            bt.summary(
+                state,
+                ["2026-04-18"],
+                price_ratio_bound=ratios.p999,
+                exclude_take_profit=True,
+            )
+            for state in states
+        ],
+        fee_sensitivity_rows={
+            state.scenario: bt.fee_sensitivity(state, ["2026-04-18"], price_ratio_bound=ratios.p999)
+            for state in states
+        },
         states=states,
         visibility=visibility,
     )
 
     assert "| raw win rate | 100.00% | 100.00% |" in report
     assert "| take_profit | 1 |" in report
+    assert "p99.9 cap (2.000000x)" in report
