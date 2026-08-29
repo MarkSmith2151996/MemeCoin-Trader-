@@ -122,8 +122,8 @@ def test_visibility_sampler_returns_distinct_weighted_mints() -> None:
     assert len(set(sample)) == bt.POLL_SIZE
 
 
-def test_backtest_priority_fee_proxy_matches_mt682_p75_ceiling() -> None:
-    assert bt.PRIORITY_FEE_PER_LEG == pytest.approx(0.001)
+def test_backtest_priority_fee_proxy_uses_conservative_floor() -> None:
+    assert bt.PRIORITY_FEE_PER_LEG == pytest.approx(0.0002)
 
 
 def test_duckdb_connection_has_a_bounded_memory_limit(tmp_path: Path) -> None:

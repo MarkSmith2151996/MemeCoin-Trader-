@@ -15,10 +15,10 @@ from src.strategy.exits import build_partial_exits
 
 # ── Round-trip execution cost model (MT-584) ─────────────────────────
 # Estimated execution costs deducted from raw realized PnL to produce the
-# adjusted_pnl_sol column on closed positions. MT-685 aligns the static
-# backtest/cost-estimate proxy with MT-682's 1,000,000-lamport p75 ceiling
-# (0.001 SOL per leg); V2 live execution queries that p75 dynamically.
-PRIORITY_FEE_PER_LEG = 0.001  # SOL priority-fee proxy per leg
+# adjusted_pnl_sol column on closed positions. Conservative priority-fee
+# floor: the direct path pays ~0, while Jupiter fallback p75 is a minority
+# of trades.
+PRIORITY_FEE_PER_LEG = 0.0002  # SOL priority-fee proxy per leg
 DEX_FEE_PCT = 0.01             # 1% bonding-curve fee per leg
 SLIPPAGE_PCT = 0.00187         # 0.187% measured median per leg (MT-594, 233 matched trades Aug 6-8)
 
