@@ -88,7 +88,7 @@ def test_pool_reserve_bounds_mark_and_costed_liquidation_proceeds() -> None:
     )
 
     assert trade.raw_pnl_sol == pytest.approx(-0.01)
-    assert trade.net_pnl_sol == pytest.approx(-0.0204)
+    assert trade.net_pnl_sol == pytest.approx(-0.022)
 
 
 def test_pool_aware_fees_and_trigger_relative_exit_cap() -> None:
@@ -120,6 +120,19 @@ def test_visibility_sampler_returns_distinct_weighted_mints() -> None:
 
     assert len(sample) == bt.POLL_SIZE
     assert len(set(sample)) == bt.POLL_SIZE
+
+
+def test_backtest_priority_fee_proxy_matches_mt682_p75_ceiling() -> None:
+    assert bt.PRIORITY_FEE_PER_LEG == pytest.approx(0.001)
+
+
+def test_duckdb_connection_has_a_bounded_memory_limit(tmp_path: Path) -> None:
+    connection = bt.open_duckdb(tmp_path)
+    try:
+        memory_limit = connection.execute("SELECT current_setting('memory_limit')").fetchone()[0]
+        assert memory_limit == "1.8 GiB"  # DuckDB renders the configured decimal 2GB in GiB.
+    finally:
+        connection.close()
 
 
 def test_report_renders_percentages_and_exit_breakdowns() -> None:

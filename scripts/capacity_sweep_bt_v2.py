@@ -68,6 +68,10 @@ TRAILING_BARS = 60
 BASELINE_ENTRIES = 282_924
 BASELINE_WIN_RATE_PCT = 68.92
 BASELINE_FRICTION_PNL_SOL = 1_147.32
+
+# Keep the detached replay well below the WSL VM ceiling. DuckDB spills to the
+# configured temp directory rather than letting a large archive query OOM the host.
+DUCKDB_MEMORY_LIMIT = "2GB"
 MT678_SUMMARIES = {
     "perfect_visibility": {
         "entries": 146_356,
@@ -545,7 +549,7 @@ def open_duckdb(root: Path) -> duckdb.DuckDBPyConnection:
     temporary_dir = root / "derived" / ".capacity-sweep-bt-v2-duckdb-tmp"
     temporary_dir.mkdir(parents=True, exist_ok=True)
     connection = duckdb.connect()
-    connection.execute("SET memory_limit = '4GB'")
+    connection.execute(f"SET memory_limit = '{DUCKDB_MEMORY_LIMIT}'")
     connection.execute(f"SET temp_directory = '{sql_path(temporary_dir)}'")
     connection.execute("SET threads = 2")
     connection.execute("SET preserve_insertion_order = true")
@@ -1370,6 +1374,7 @@ def build_report(
             ),
             (
                 f"| priority fee | {PRIORITY_FEE_PER_LEG:.4f} SOL per leg ({PRIORITY_FEE_PER_LEG * 2:.4f} SOL round trip) | "
+                "MT-682 dynamic p75 provider's 1,000,000-lamport ceiling; "
                 "`src/strategy/position_manager.py:PRIORITY_FEE_PER_LEG` |"
             ),
             "",
