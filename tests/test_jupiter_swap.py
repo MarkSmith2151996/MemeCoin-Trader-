@@ -70,7 +70,12 @@ def _quote_response(**overrides: object) -> dict[str, object]:
     return payload
 
 
-def _make_client(handler, keypair: Keypair | None = None) -> JupiterSwapClient:
+def _make_client(
+    handler,
+    keypair: Keypair | None = None,
+    *,
+    priority_fee_callback=None,
+) -> JupiterSwapClient:
     transport = httpx.MockTransport(handler)
     client = httpx.AsyncClient(transport=transport)
     return JupiterSwapClient(
@@ -82,6 +87,7 @@ def _make_client(handler, keypair: Keypair | None = None) -> JupiterSwapClient:
         confirm_timeout_s=0.5,
         poll_interval_s=0.01,
         max_retries=2,
+        priority_fee_callback=priority_fee_callback,
         use_jito_bundles=False,
     )
 
@@ -313,6 +319,62 @@ def test_quote_failures_return_none() -> None:
 def test_quote_non_positive_amount_returns_none() -> None:
     client = _make_client(lambda request: httpx.Response(500))
     assert asyncio.run(client.get_quote(WSOL_MINT, TOKEN_MINT, 0)) is None
+
+
+def test_priority_fee_callback_feeds_buy_and_sell_swap_requests() -> None:
+    calls: list[str] = []
+    fee_bodies: list[object] = []
+
+    async def priority_fee() -> int:
+        calls.append("priority_fee")
+        return 75_000
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        fee_bodies.append(json.loads(request.content)["prioritizationFeeLamports"])
+        return httpx.Response(
+            200,
+            json={"swapTransaction": "transaction", "lastValidBlockHeight": 1},
+        )
+
+    client = _make_client(handler, priority_fee_callback=priority_fee)
+    buy_quote = JupiterSwapQuote(
+        input_mint=WSOL_MINT,
+        output_mint=TOKEN_MINT,
+        in_amount=20_000_000,
+        out_amount=1_000_000,
+        price_impact_pct=0.0,
+        slippage_bps=100,
+        token_decimals=6,
+        price_sol=None,
+        raw={},
+        swap_api_base_url="http://jupiter.test",
+        swap_api_legacy_paths=True,
+    )
+    sell_quote = JupiterSwapQuote(
+        input_mint=TOKEN_MINT,
+        output_mint=WSOL_MINT,
+        in_amount=1_000_000,
+        out_amount=20_000_000,
+        price_impact_pct=0.0,
+        slippage_bps=300,
+        token_decimals=6,
+        price_sol=None,
+        raw={},
+        swap_api_base_url="http://jupiter.test",
+        swap_api_legacy_paths=True,
+    )
+
+    async def run() -> None:
+        try:
+            await client._request_swap_transaction(buy_quote)
+            await client._request_swap_transaction(sell_quote)
+        finally:
+            await client.close()
+
+    asyncio.run(run())
+
+    assert calls == ["priority_fee", "priority_fee"]
+    assert fee_bodies == [75_000, 75_000]
 
 
 def test_execute_swap_confirmed_happy_path() -> None:

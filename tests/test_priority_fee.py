@@ -61,6 +61,17 @@ def test_75th_percentile_of_recent_fees() -> None:
     assert asyncio.run(run()) == 4
 
 
+def test_empty_fee_data_returns_none_for_legacy_swap_fee_fallback() -> None:
+    async def run() -> int | None:
+        provider, _ = _provider([])
+        try:
+            return await provider.get_fee_lamports()
+        finally:
+            await provider.close()
+
+    assert asyncio.run(run()) is None
+
+
 def test_fee_is_cached_within_refresh_interval() -> None:
     async def run() -> tuple[int | None, int]:
         provider, calls = _provider([10, 20, 30, 40, 50])
