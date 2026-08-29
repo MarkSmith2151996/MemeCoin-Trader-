@@ -1,0 +1,10 @@
+[Unit]
+Description=Daily Memecoin Creator History Refresh
+
+[Timer]
+OnCalendar=*-*-* 00:15:00 UTC
+Persistent=true
+Unit=memecoin-creator-history.service
+
+[Install]
+WantedBy=timers.target

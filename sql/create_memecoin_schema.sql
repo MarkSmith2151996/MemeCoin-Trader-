@@ -39,6 +39,12 @@ CREATE TABLE IF NOT EXISTS memecoin.candidates (
     unique_wallets INTEGER,
     price_change_5m REAL,
     price_change_1h REAL,
+    creator_wallet TEXT,
+    creator_initial_buy REAL,
+    creator_initial_buy_sol REAL,
+    creator_self_snipe_pct REAL,
+    creator_prior_deploy_count INTEGER,
+    creator_prior_rug_rate DOUBLE PRECISION,
     strength_score REAL,
     raw_json JSONB
 );
@@ -51,13 +57,34 @@ ALTER TABLE memecoin.candidates
     ADD COLUMN IF NOT EXISTS freeze_authority_revoked BOOLEAN,
     ADD COLUMN IF NOT EXISTS top_holder_pct REAL,
     ADD COLUMN IF NOT EXISTS security_source TEXT,
-    ADD COLUMN IF NOT EXISTS security_checked_at TIMESTAMPTZ;
+    ADD COLUMN IF NOT EXISTS security_checked_at TIMESTAMPTZ,
+    ADD COLUMN IF NOT EXISTS creator_wallet TEXT,
+    ADD COLUMN IF NOT EXISTS creator_initial_buy REAL,
+    ADD COLUMN IF NOT EXISTS creator_initial_buy_sol REAL,
+    ADD COLUMN IF NOT EXISTS creator_self_snipe_pct REAL,
+    ADD COLUMN IF NOT EXISTS creator_prior_deploy_count INTEGER,
+    ADD COLUMN IF NOT EXISTS creator_prior_rug_rate DOUBLE PRECISION;
 
 CREATE INDEX IF NOT EXISTS candidates_observed_mint_idx
     ON memecoin.candidates (observed_at, mint_address);
 
 CREATE INDEX IF NOT EXISTS candidates_mint_observed_idx
     ON memecoin.candidates (mint_address, observed_at DESC, id DESC);
+
+CREATE INDEX IF NOT EXISTS candidates_creator_observed_idx
+    ON memecoin.candidates (creator_wallet, observed_at DESC)
+    WHERE creator_wallet IS NOT NULL;
+
+CREATE TABLE IF NOT EXISTS memecoin.creator_history (
+    creator_wallet TEXT PRIMARY KEY,
+    as_of_date DATE NOT NULL,
+    source_through_date DATE,
+    prior_deploy_count INTEGER NOT NULL,
+    prior_rug_observation_count INTEGER NOT NULL,
+    prior_rug_count INTEGER NOT NULL,
+    prior_rug_rate DOUBLE PRECISION,
+    refreshed_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
 
 CREATE TABLE IF NOT EXISTS memecoin.positions (
     id UUID PRIMARY KEY,

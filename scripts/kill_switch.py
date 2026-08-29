@@ -140,14 +140,14 @@ def ensure_executor_stopped(*, force: bool) -> None:
     if systemctl is not None:
         try:
             stopped = subprocess.run(
-                [systemctl, "stop", EXECUTOR_UNIT],
+                ["sudo", "-n", systemctl, "stop", EXECUTOR_UNIT],
                 capture_output=True,
                 text=True,
                 timeout=30,
                 check=False,
             )
             active = subprocess.run(
-                [systemctl, "is-active", "--quiet", EXECUTOR_UNIT],
+                ["sudo", "-n", systemctl, "is-active", "--quiet", EXECUTOR_UNIT],
                 capture_output=True,
                 text=True,
                 timeout=10,
@@ -166,7 +166,8 @@ def ensure_executor_stopped(*, force: bool) -> None:
                 log.warning("systemctl unavailable for kill switch: %s", detail)
             else:
                 raise RuntimeError(
-                    f"could not confirm {EXECUTOR_UNIT} is stopped: {detail or 'still active'}",
+                    "could not confirm "
+                    f"{EXECUTOR_UNIT} is stopped with sudo -n: {detail or 'still active'}",
                 )
 
     if _singleton_lock_is_free():

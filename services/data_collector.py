@@ -20,6 +20,7 @@ from dotenv import load_dotenv
 if __package__ in {None, ""}:
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
+from services.logging_utils import configure_service_logging
 from services.store import MemecoinStore
 
 log = logging.getLogger("memecoin.data_collector")
@@ -41,6 +42,43 @@ def _finite_float(value: object) -> float | None:
     except (TypeError, ValueError):
         return None
     return number if math.isfinite(number) else None
+
+
+def _nonnegative_float(value: object) -> float | None:
+    number = _finite_float(value)
+    return number if number is not None and number >= 0 else None
+
+
+def _string_field(payload: dict[str, Any], *names: str) -> str | None:
+    for name in names:
+        value = payload.get(name)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    return None
+
+
+def _first_value(payload: dict[str, Any], *names: str) -> object:
+    for name in names:
+        if name in payload and payload[name] is not None:
+            return payload[name]
+    return None
+
+
+def _creator_self_snipe_pct(payload: dict[str, Any], initial_buy: float | None) -> float | None:
+    if initial_buy is None:
+        return None
+    virtual_tokens = _nonnegative_float(
+        _first_value(
+            payload,
+            "vTokensInBondingCurve",
+            "v_tokens_bonding_curve",
+            "virtualTokenReserves",
+        )
+    )
+    if virtual_tokens is None:
+        return None
+    total_tokens = initial_buy + virtual_tokens
+    return 100 * initial_buy / total_tokens if total_tokens > 0 else None
 
 
 def _integer(value: object) -> int | None:
@@ -174,6 +212,12 @@ def normalize_jupiter_token(
         "unique_wallets": _integer(token.get("holderCount")),
         "price_change_5m": _finite_float(stats_5m.get("priceChange")),
         "price_change_1h": _finite_float(stats_1h.get("priceChange")),
+        "creator_wallet": None,
+        "creator_initial_buy": None,
+        "creator_initial_buy_sol": None,
+        "creator_self_snipe_pct": None,
+        "creator_prior_deploy_count": None,
+        "creator_prior_rug_rate": None,
         "strength_score": _strength_score(
             age_seconds=corrected_age_seconds,
             mcap_usd=mcap_usd,
@@ -201,6 +245,8 @@ def normalize_pumpportal_token(
     observed = observed_at or datetime.now(UTC)
     pool_sol = _finite_float(payload.get("vSolInBondingCurve"))
     price_sol = _finite_float(payload.get("priceSol"))
+    initial_buy = _nonnegative_float(_first_value(payload, "initialBuy", "initial_buy"))
+    initial_buy_sol = _nonnegative_float(_first_value(payload, "solAmount", "sol_amount"))
     return {
         "mint_address": mint,
         "observed_at": observed,
@@ -231,6 +277,19 @@ def normalize_pumpportal_token(
         "unique_wallets": None,
         "price_change_5m": None,
         "price_change_1h": None,
+        "creator_wallet": _string_field(
+            payload,
+            "creator_wallet",
+            "creatorWallet",
+            "creator",
+            "creatorAddress",
+            "traderPublicKey",
+        ),
+        "creator_initial_buy": initial_buy,
+        "creator_initial_buy_sol": initial_buy_sol,
+        "creator_self_snipe_pct": _creator_self_snipe_pct(payload, initial_buy),
+        "creator_prior_deploy_count": None,
+        "creator_prior_rug_rate": None,
         "strength_score": None,
         "raw_json": payload,
     }
@@ -253,6 +312,7 @@ class DataCollector:
         self._interval_seconds = interval_seconds
         self._sol_price_usd: float | None = None
         self._sol_price_at = 0.0
+        self._creator_history_cache: dict[tuple[str, object], dict[str, Any] | None] = {}
 
     async def run(self) -> None:
         await asyncio.gather(self._poll_jupiter(), self._listen_pumpportal())
@@ -304,6 +364,7 @@ class DataCollector:
                             sol_price_usd=self._sol_price_usd,
                         )
                         if candidate is not None:
+                            await self._attach_creator_history(candidate)
                             await self._store.insert_candidate(candidate)
             except asyncio.CancelledError:
                 raise
@@ -332,6 +393,25 @@ class DataCollector:
                     return price
         return self._sol_price_usd
 
+    async def _attach_creator_history(self, candidate: dict[str, Any]) -> None:
+        """Copy the current daily snapshot onto PumpPortal candidate evidence."""
+
+        creator_wallet = candidate.get("creator_wallet")
+        observed_at = candidate.get("observed_at")
+        if not isinstance(creator_wallet, str) or not isinstance(observed_at, datetime):
+            return
+        cache_key = (creator_wallet, observed_at.date())
+        if cache_key not in self._creator_history_cache:
+            self._creator_history_cache[cache_key] = await self._store.get_creator_history(
+                creator_wallet,
+                observed_at.date(),
+            )
+        history = self._creator_history_cache[cache_key]
+        if history is None:
+            return
+        candidate["creator_prior_deploy_count"] = history.get("prior_deploy_count")
+        candidate["creator_prior_rug_rate"] = history.get("prior_rug_rate")
+
 
 async def _run() -> None:
     load_dotenv()
@@ -354,7 +434,7 @@ async def _run() -> None:
 
 
 def main() -> None:
-    logging.basicConfig(level=logging.INFO, format="%(asctime)sZ %(levelname)s %(message)s")
+    configure_service_logging()
     asyncio.run(_run())
 
 

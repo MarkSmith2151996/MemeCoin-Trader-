@@ -1,0 +1,10 @@
+[Unit]
+Description=Memecoin Creator History Refresh
+After=network.target
+
+[Service]
+Type=oneshot
+User=dev
+WorkingDirectory=/home/dev/projects/memecoin-trader
+EnvironmentFile=/home/dev/projects/memecoin-trader/.env
+ExecStart=/usr/bin/python3 scripts/build_creator_history.py

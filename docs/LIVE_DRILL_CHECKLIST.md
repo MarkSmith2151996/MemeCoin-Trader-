@@ -7,10 +7,13 @@ explicitly says otherwise.
 ## 1. Kill Drill
 
 1. Seed paper-safe V2 test positions in a disposable Hive environment.
-2. Confirm `memecoin-executor.service` is stopped, then run `python3 scripts/kill_switch.py`.
-3. Confirm every unsettled live Hive row is closed only after its wallet balance clears.
-4. Re-run the command with `EXECUTION_MODE=paper` to prove an incomplete previous kill is retried.
-5. If `systemctl` is unavailable, the command must report a free singleton lock or refuse; use `--force` only after manually proving the executor is stopped.
+2. Install this exact `/etc/sudoers.d/memecoin-kill-drill` line with `visudo -f` (the bot and executor run as `dev`):
+   `dev ALL=(root) NOPASSWD: /usr/bin/systemctl stop memecoin-executor.service, /usr/bin/systemctl is-active --quiet memecoin-executor.service`
+3. Confirm the file is mode `0440`, then run `sudo -n /usr/bin/systemctl is-active --quiet memecoin-executor.service`. Exit `0` means active and exit `3` means stopped; either proves the noninteractive sudo rule works.
+4. Run `python3 scripts/kill_switch.py`. Its Telegram path invokes the same command and now uses `sudo -n` for both stop and status checks.
+5. Confirm every unsettled live Hive row is closed only after its wallet balance clears.
+6. Re-run the command with `EXECUTION_MODE=paper` to prove an incomplete previous kill is retried.
+7. If `systemctl` is unavailable, the command must report a free singleton lock or refuse; use `--force` only after manually proving the executor is stopped.
 
 Expected logs: `confirmed memecoin-executor.service is stopped before liquidation`,
 `V2 KILL SWITCH SELL OK`, or `V2 kill switch incomplete` for a retained row.

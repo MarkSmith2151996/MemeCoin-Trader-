@@ -89,6 +89,12 @@ class MemecoinStore:
             "unique_wallets",
             "price_change_5m",
             "price_change_1h",
+            "creator_wallet",
+            "creator_initial_buy",
+            "creator_initial_buy_sol",
+            "creator_self_snipe_pct",
+            "creator_prior_deploy_count",
+            "creator_prior_rug_rate",
             "strength_score",
             "raw_json",
         )
@@ -101,6 +107,26 @@ class MemecoinStore:
         """
         async with self._pool.acquire() as connection:
             return int(await connection.fetchval(query, *values))
+
+    async def get_creator_history(
+        self,
+        creator_wallet: str,
+        as_of_date: object,
+    ) -> dict[str, Any] | None:
+        """Return the latest snapshot that existed by a candidate's UTC day."""
+
+        rows = await self.fetch(
+            """
+            SELECT prior_deploy_count, prior_rug_rate, as_of_date, source_through_date
+            FROM memecoin.creator_history
+            WHERE creator_wallet = $1 AND as_of_date <= $2::date
+            ORDER BY as_of_date DESC
+            LIMIT 1
+            """,
+            creator_wallet,
+            as_of_date,
+        )
+        return rows[0] if rows else None
 
     async def list_open_positions(self, strategy: str, mode: str) -> list[dict[str, Any]]:
         return await self.fetch(

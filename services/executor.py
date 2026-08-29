@@ -23,6 +23,7 @@ if __package__ in {None, ""}:
 
 from services.adapters.live import build_live_adapter
 from services.adapters.paper import PaperExecutionAdapter
+from services.logging_utils import configure_service_logging
 from services.store import MemecoinStore
 from services.strategy import GateConfig, get_qualifying_candidates, load_gates
 from src.core.config import Settings, load_settings
@@ -1411,7 +1412,7 @@ async def _run() -> None:
 
 
 def main() -> None:
-    logging.basicConfig(level=logging.INFO, format="%(asctime)sZ %(levelname)s %(message)s")
+    configure_service_logging()
     _acquire_singleton_lock()
     asyncio.run(_run())
 
