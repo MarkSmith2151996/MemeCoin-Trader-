@@ -19,7 +19,11 @@ import capacity_sweep_bt_v2 as bt  # noqa: E402
 
 def config() -> bt.LiveConfig:
     return bt.LiveConfig(
-        gates={},
+        gates={
+            "mcap_floor": 5_100,
+            "min_pool_sol_bonding": 5,
+            "min_pool_sol_graduated": 5,
+        },
         exits={
             "hard_stop_pct": 8,
             "take_profit_pct": 150,
@@ -64,6 +68,64 @@ def test_hard_stop_fills_on_next_bar_not_stop_level() -> None:
     assert trade.exit_price == pytest.approx(0.79)
     assert trade.raw_pnl_sol == pytest.approx(-0.0042)
     assert trade.net_pnl_sol < trade.raw_pnl_sol
+
+
+def test_hard_stop_waits_for_the_configured_delay() -> None:
+    series = {
+        "time": np.array([0, 45_000, 50_000, 75_000, 80_000], dtype=np.int64),
+        "open": np.array([1.0, 1.0, 0.91, 0.90, 0.85]),
+        "close": np.array([1.0, 1.0, 0.90, 0.89, 0.84]),
+        "pool": np.array([10.0, 10.0, 10.0, 10.0, 10.0]),
+    }
+    delayed_config = replace(config(), hard_stop_delay_seconds=30)
+
+    trade = bt.build_trade(bt.Candidate("mint", 0, 1, 90), series, delayed_config)
+
+    assert trade is not None
+    assert trade.exit_reason == "hard_stop"
+    assert trade.exit_time == 80_000
+
+
+def test_cli_overrides_update_effective_config_and_header() -> None:
+    args = bt.parse_args(
+        [
+            "--mcap-floor",
+            "10000",
+            "--min-pool-sol",
+            "50",
+            "--hard-stop-pct",
+            "12",
+            "--hard-stop-delay-seconds",
+            "30",
+        ],
+    )
+    effective = bt.apply_cli_overrides(config(), args)
+    header = bt.replay_header(["2026-04-18"], effective)
+
+    assert effective.gates["mcap_floor"] == 10_000
+    assert effective.gates["min_pool_sol_bonding"] == 50
+    assert effective.gates["min_pool_sol_graduated"] == 50
+    assert effective.exits["hard_stop_pct"] == 12
+    assert effective.hard_stop_delay_seconds == 30
+    assert "mcap_floor=10000" in header
+    assert "min_pool_sol_bonding=50" in header
+    assert "min_pool_sol_graduated=50" in header
+    assert "hard_stop_pct=12" in header
+    assert "hard_stop_delay_seconds=30" in header
+    assert "--mcap-floor=10000" in header
+    assert "--min-pool-sol=50" in header
+    assert "--hard-stop-pct=12" in header
+    assert "--hard-stop-delay-seconds=30" in header
+
+
+def test_cli_defaults_preserve_hive_values() -> None:
+    original = config()
+    effective = bt.apply_cli_overrides(original, bt.parse_args([]))
+
+    assert effective.gates == original.gates
+    assert effective.exits == original.exits
+    assert effective.hard_stop_delay_seconds == 0
+    assert effective.overrides == {}
 
 
 def test_hard_stop_ban_expires_after_twenty_four_hours() -> None:

@@ -120,13 +120,15 @@ KNOWN_EXIT_REASONS = ("take_profit", "trailing_stop", "hard_stop", "time_stop")
 
 @dataclass(frozen=True, slots=True)
 class LiveConfig:
-    """The V2 strategy configuration captured from Hive at replay start."""
+    """The effective replay configuration: Hive values plus local CLI overrides."""
 
     gates: dict[str, Any]
     exits: dict[str, float]
     position_size_sol: float
     max_open: int
     captured_at: str
+    hard_stop_delay_seconds: float = 0.0
+    overrides: dict[str, str] = field(default_factory=dict)
 
     def number(self, name: str) -> float:
         value = self.gates[name]
@@ -391,7 +393,7 @@ class VisibilityModel:
         }
 
 
-def parse_args() -> argparse.Namespace:
+def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--root", type=Path, default=DEFAULT_ROOT)
     parser.add_argument("--start", default="2026-04-18")
@@ -402,7 +404,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--price-ratio-p99", type=float)
     parser.add_argument("--price-ratio-p999", type=float)
     parser.add_argument("--price-ratio-observations", type=int)
-    return parser.parse_args()
+    parser.add_argument("--mcap-floor", type=float)
+    parser.add_argument("--min-pool-sol", type=float)
+    parser.add_argument("--hard-stop-pct", type=float)
+    parser.add_argument("--hard-stop-delay-seconds", type=float, default=0.0)
+    return parser.parse_args(argv)
 
 
 def log_progress(message: str, progress_log: TextIO | None = None) -> None:
@@ -423,6 +429,73 @@ def finite_number(value: object) -> float | None:
 def positive_number(value: object) -> float | None:
     number = finite_number(value)
     return number if number is not None and number > 0 else None
+
+
+def apply_cli_overrides(config: LiveConfig, args: argparse.Namespace) -> LiveConfig:
+    """Keep Hive read-only while applying valid run-local replay parameters."""
+
+    gates = dict(config.gates)
+    exits = dict(config.exits)
+    overrides = dict(config.overrides)
+
+    if args.mcap_floor is not None:
+        value = positive_number(args.mcap_floor)
+        if value is None:
+            raise ValueError("--mcap-floor must be a positive finite number")
+        gates["mcap_floor"] = value
+        overrides["mcap_floor"] = "--mcap-floor"
+    if args.min_pool_sol is not None:
+        value = positive_number(args.min_pool_sol)
+        if value is None:
+            raise ValueError("--min-pool-sol must be a positive finite number")
+        gates["min_pool_sol_bonding"] = value
+        gates["min_pool_sol_graduated"] = value
+        overrides["min_pool_sol_bonding"] = "--min-pool-sol"
+        overrides["min_pool_sol_graduated"] = "--min-pool-sol"
+    if args.hard_stop_pct is not None:
+        value = positive_number(args.hard_stop_pct)
+        if value is None:
+            raise ValueError("--hard-stop-pct must be a positive finite number")
+        exits["hard_stop_pct"] = value
+        overrides["hard_stop_pct"] = "--hard-stop-pct"
+
+    hard_stop_delay_seconds = finite_number(args.hard_stop_delay_seconds)
+    if hard_stop_delay_seconds is None or hard_stop_delay_seconds < 0:
+        raise ValueError("--hard-stop-delay-seconds must be a non-negative finite number")
+    return LiveConfig(
+        gates=gates,
+        exits=exits,
+        position_size_sol=config.position_size_sol,
+        max_open=config.max_open,
+        captured_at=config.captured_at,
+        hard_stop_delay_seconds=hard_stop_delay_seconds,
+        overrides=overrides,
+    )
+
+
+def replay_header(dates: list[str], config: LiveConfig) -> str:
+    """Describe effective gates and exits before a potentially long replay starts."""
+
+    cli_overrides = []
+    if "mcap_floor" in config.overrides:
+        cli_overrides.append(f"--mcap-floor={config.number('mcap_floor'):g}")
+    if "min_pool_sol_bonding" in config.overrides:
+        cli_overrides.append(f"--min-pool-sol={config.number('min_pool_sol_bonding'):g}")
+    if "hard_stop_pct" in config.overrides:
+        cli_overrides.append(f"--hard-stop-pct={config.exits['hard_stop_pct']:g}")
+    if config.hard_stop_delay_seconds > 0:
+        cli_overrides.append(f"--hard-stop-delay-seconds={config.hard_stop_delay_seconds:g}")
+    overrides_text = ", ".join(cli_overrides) if cli_overrides else "none"
+    return (
+        f"Replaying {len(dates)} complete day(s): {dates[0]} through {dates[-1]} "
+        f"with position_size={config.position_size_sol:g} SOL max_open={config.max_open}; "
+        f"effective mcap_floor={config.number('mcap_floor'):g} "
+        f"min_pool_sol_bonding={config.number('min_pool_sol_bonding'):g} "
+        f"min_pool_sol_graduated={config.number('min_pool_sol_graduated'):g} "
+        f"hard_stop_pct={config.exits['hard_stop_pct']:g} "
+        f"hard_stop_delay_seconds={config.hard_stop_delay_seconds:g}; "
+        f"CLI overrides: {overrides_text}"
+    )
 
 
 def utc_datetime(timestamp_ms: int) -> datetime:
@@ -886,7 +959,8 @@ def build_trade(
     the available proxy for the live mark feed. Every trigger is executed at
     the following completed bar's close, never at the trigger or stop-level
     price. This uses the stable, fully observed 5-second bar price rather than
-    the archive's malformed transition-bar opening ticks.
+    the archive's malformed transition-bar opening ticks. A replay-only delay
+    can defer hard-stop arming without changing the live exit order.
     """
 
     entry_index = bisect.bisect_left(
@@ -909,7 +983,11 @@ def build_trade(
             1.0 + config.exits["trailing_arm_pct"] / 100.0
         )
         reason: str | None = None
-        if mark.close <= entry_price * (1.0 - config.exits["hard_stop_pct"] / 100.0):
+        seconds_held = (mark.time - entry.time) / 1000.0
+        if (
+            seconds_held >= config.hard_stop_delay_seconds
+            and mark.close <= entry_price * (1.0 - config.exits["hard_stop_pct"] / 100.0)
+        ):
             reason = "hard_stop"
         elif mark.close >= entry_price * (1.0 + config.exits["take_profit_pct"] / 100.0):
             reason = "take_profit"
@@ -1327,20 +1405,31 @@ def build_report(
         f"Replay range: **{dates[0]} through {dates[-1]} UTC** ({len(dates)} complete archive days).",
         f"Hive configuration captured read-only at: `{config.captured_at}`.",
         "",
-        "## Auditable live V2 parameters",
+        "## Auditable V2 replay parameters",
         "",
         "| source | parameter | value |",
         "| --- | --- | ---: |",
     ]
     for name in sorted(config.gates):
         value = json.dumps(config.gates[name], separators=(",", ":"))
-        lines.append(f"| `memecoin.gate_config` | {name} | `{value}` |")
+        source = (
+            f"CLI `{config.overrides[name]}`"
+            if name in config.overrides
+            else "`memecoin.gate_config`"
+        )
+        lines.append(f"| {source} | {name} | `{value}` |")
     for name in sorted(config.exits):
-        lines.append(f"| `memecoin.exit_config` | {name} | {config.exits[name]:g} |")
+        source = (
+            f"CLI `{config.overrides[name]}`"
+            if name in config.overrides
+            else "`memecoin.exit_config`"
+        )
+        lines.append(f"| {source} | {name} | {config.exits[name]:g} |")
     lines.extend(
         [
             f"| live environment | POSITION_SIZE_SOL | {config.position_size_sol:g} |",
             f"| live configuration | MAX_OPEN | {config.max_open} |",
+            f"| replay CLI/default | hard_stop_delay_seconds | {config.hard_stop_delay_seconds:g} |",
             "",
             "The age-tier transaction requirement remains executable logic in "
             "`services.data_collector._age_adjusted_min_txns`: 3 / 5 / 8 / 12 / 16 "
@@ -1784,6 +1873,8 @@ def write_outputs(
         "exits": config.exits,
         "position_size_sol": config.position_size_sol,
         "max_open": config.max_open,
+        "hard_stop_delay_seconds": config.hard_stop_delay_seconds,
+        "cli_overrides": config.overrides,
         "entry_delay_seconds": ENTRY_DELAY_SECONDS,
         "slippage_pct_per_leg": SLIPPAGE_PCT,
         "bonding_dex_fee_pct_per_leg": BONDING_DEX_FEE_PCT,
@@ -1807,15 +1898,14 @@ def main() -> None:
     args = parse_args()
     root = args.root.resolve()
     enriched_dir = root / "derived" / "enriched"
-    config = asyncio.run(load_live_config())
+    config = apply_cli_overrides(asyncio.run(load_live_config()), args)
     all_dates = parquet_dates(enriched_dir, "0000-01-01", None)
     dates = parquet_dates(enriched_dir, args.start, args.end)
     progress_path = args.progress_log.resolve()
     progress_path.parent.mkdir(parents=True, exist_ok=True)
     with progress_path.open("w", encoding="utf-8") as progress_log:
         log_progress(
-            f"Replaying {len(dates)} complete day(s): {dates[0]} through {dates[-1]} "
-            f"with position_size={config.position_size_sol:g} SOL max_open={config.max_open}",
+            replay_header(dates, config),
             progress_log,
         )
         if args.price_ratio_p99 is None:
