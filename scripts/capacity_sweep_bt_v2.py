@@ -395,12 +395,12 @@ class VisibilityModel:
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--root", type=Path, default=DEFAULT_ROOT)
+    parser.add_argument("--root", type=Path, help="Replay archive root.")
     parser.add_argument("--start", default="2026-04-18")
     parser.add_argument("--end", help="Last replay date; default is the latest complete archive day.")
-    parser.add_argument("--output-dir", type=Path, default=DEFAULT_OUT_DIR)
-    parser.add_argument("--repo-report", type=Path, default=DEFAULT_REPO_REPORT)
-    parser.add_argument("--progress-log", type=Path, default=DEFAULT_PROGRESS_LOG)
+    parser.add_argument("--output-dir", type=Path, help="Directory for replay outputs.")
+    parser.add_argument("--repo-report", type=Path, help="Repository copy of the markdown report.")
+    parser.add_argument("--progress-log", type=Path, help="Replay progress log path.")
     parser.add_argument("--price-ratio-p99", type=float)
     parser.add_argument("--price-ratio-p999", type=float)
     parser.add_argument("--price-ratio-observations", type=int)
@@ -409,6 +409,16 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--hard-stop-pct", type=float)
     parser.add_argument("--hard-stop-delay-seconds", type=float, default=0.0)
     return parser.parse_args(argv)
+
+
+def resolve_replay_paths(args: argparse.Namespace) -> tuple[Path, Path, Path, Path]:
+    """Resolve archive-relative defaults while preserving explicit path overrides."""
+
+    root = (args.root or DEFAULT_ROOT).resolve()
+    output_dir = (args.output_dir or root / "results" / "capacity_sweep_bt_v2_feefix").resolve()
+    progress_log = (args.progress_log or root / "results" / "capacity_sweep_bt_v2_feefix.progress.log").resolve()
+    repo_report = (args.repo_report or DEFAULT_REPO_REPORT).resolve()
+    return root, output_dir, progress_log, repo_report
 
 
 def log_progress(message: str, progress_log: TextIO | None = None) -> None:
@@ -543,10 +553,7 @@ def parquet_dates(enriched_dir: Path, start: str, end: str | None) -> list[str]:
     last_date = end or available[-1]
     if start > last_date:
         raise ValueError(f"--start {start} is after --end {last_date}")
-    dates = [date for date in available if start <= date <= last_date]
-    if not dates:
-        raise FileNotFoundError(f"No replay files in requested range {start} through {last_date}")
-    return dates
+    return [date for date in available if start <= date <= last_date]
 
 
 def measure_price_ratio_caps(root: Path, dates: list[str]) -> PriceRatioCaps:
@@ -1085,10 +1092,13 @@ def replay(
 
     try:
         for replay_date in dates:
+            path = enriched_dir / f"{replay_date}.parquet"
+            if not path.is_file():
+                log_progress(f"{replay_date}: enriched parquet missing; skipping", progress_log)
+                continue
             sol_usd = sol_prices.get(replay_date)
             if sol_usd is None:
                 raise RuntimeError(f"No SOL/USD price available for {replay_date}")
-            path = enriched_dir / f"{replay_date}.parquet"
             # One cumulative-window query feeds both MT-613 discovery and V2
             # gate evaluation. Keeping the rows for one day avoids a second
             # expensive full-day parquet scan without exposing future bars.
@@ -1896,12 +1906,15 @@ def write_outputs(
 
 def main() -> None:
     args = parse_args()
-    root = args.root.resolve()
+    root, output_dir, progress_path, repo_report = resolve_replay_paths(args)
     enriched_dir = root / "derived" / "enriched"
-    config = apply_cli_overrides(asyncio.run(load_live_config()), args)
     all_dates = parquet_dates(enriched_dir, "0000-01-01", None)
     dates = parquet_dates(enriched_dir, args.start, args.end)
-    progress_path = args.progress_log.resolve()
+    if not dates:
+        end = args.end or args.start
+        print(f"Skipping replay: no enriched Parquet files in requested range {args.start} through {end}", flush=True)
+        return
+    config = apply_cli_overrides(asyncio.run(load_live_config()), args)
     progress_path.parent.mkdir(parents=True, exist_ok=True)
     with progress_path.open("w", encoding="utf-8") as progress_log:
         log_progress(
@@ -1925,15 +1938,15 @@ def main() -> None:
             progress_log=progress_log,
         )
     write_outputs(
-        output_dir=args.output_dir.resolve(),
-        repo_report=args.repo_report.resolve(),
+        output_dir=output_dir,
+        repo_report=repo_report,
         config=config,
         dates=dates,
         price_ratios=price_ratios,
         states=[perfect, realistic],
         visibility=visibility,
     )
-    print(f"Wrote V2 replay outputs to {args.output_dir.resolve()}", flush=True)
+    print(f"Wrote V2 replay outputs to {output_dir}", flush=True)
 
 
 if __name__ == "__main__":

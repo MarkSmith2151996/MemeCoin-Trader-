@@ -128,6 +128,78 @@ def test_cli_defaults_preserve_hive_values() -> None:
     assert effective.overrides == {}
 
 
+def test_root_derives_output_and_progress_paths() -> None:
+    root, output_dir, progress_log, repo_report = bt.resolve_replay_paths(
+        bt.parse_args(["--root", "/tmp/test"]),
+    )
+
+    assert root == Path("/tmp/test")
+    assert output_dir == Path("/tmp/test/results/capacity_sweep_bt_v2_feefix")
+    assert progress_log == Path("/tmp/test/results/capacity_sweep_bt_v2_feefix.progress.log")
+    assert repo_report == bt.DEFAULT_REPO_REPORT
+
+
+def test_path_defaults_preserve_windows_archive_locations() -> None:
+    root, output_dir, progress_log, repo_report = bt.resolve_replay_paths(bt.parse_args([]))
+
+    assert root == bt.DEFAULT_ROOT
+    assert output_dir == bt.DEFAULT_OUT_DIR
+    assert progress_log == bt.DEFAULT_PROGRESS_LOG
+    assert repo_report == bt.DEFAULT_REPO_REPORT
+
+
+def test_explicit_output_and_progress_paths_override_root() -> None:
+    root, output_dir, progress_log, repo_report = bt.resolve_replay_paths(
+        bt.parse_args(
+            [
+                "--root",
+                "/tmp/test",
+                "--output-dir",
+                "/tmp/output",
+                "--progress-log",
+                "/tmp/progress.log",
+                "--repo-report",
+                "/tmp/report.md",
+            ],
+        ),
+    )
+
+    assert root == Path("/tmp/test")
+    assert output_dir == Path("/tmp/output")
+    assert progress_log == Path("/tmp/progress.log")
+    assert repo_report == Path("/tmp/report.md")
+
+
+def test_missing_requested_day_skips_without_loading_live_config(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    (tmp_path / "derived" / "enriched").mkdir(parents=True)
+    (tmp_path / "derived" / "enriched" / "2026-07-29.parquet").touch()
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "capacity_sweep_bt_v2.py",
+            "--root",
+            str(tmp_path),
+            "--start",
+            "2026-07-30",
+            "--end",
+            "2026-07-30",
+        ],
+    )
+
+    bt.main()
+
+    output = capsys.readouterr().out
+    assert (
+        "Skipping replay: no enriched Parquet files in requested range "
+        "2026-07-30 through 2026-07-30"
+    ) in output
+
+
 def test_hard_stop_ban_expires_after_twenty_four_hours() -> None:
     state = bt.ReplayState("test", max_open=5)
     state.hard_stop_ban_until["mint"] = 86_400_000
