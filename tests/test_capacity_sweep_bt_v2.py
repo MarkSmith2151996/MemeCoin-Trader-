@@ -169,6 +169,30 @@ def test_gate_candidate_captures_entry_characteristics() -> None:
     assert candidate.txn_count_at_entry == 10
     assert candidate.top_holder_pct_at_entry is None
     assert candidate.volume_to_mcap_ratio_at_entry == 0.04
+    assert (
+        bt.candidate_from_row(
+            (
+                "mint",
+                1_000,
+                1,
+                3.0,
+                1.0,
+                10,
+                100.0,
+                10_000.0,
+                10.0,
+                "pump",
+                False,
+                0.0,
+                1.0,
+            ),
+            sol_usd=100.0,
+            carry={},
+            config=candidate_config,
+            graduated_only=True,
+        )
+        is None
+    )
 
 
 def test_trade_csv_appends_entry_characteristics() -> None:
@@ -216,6 +240,15 @@ def test_cli_overrides_update_effective_config_and_header() -> None:
     assert "--hard-stop-delay-seconds=30" in header
 
 
+def test_graduated_only_cli_flag_parses_and_is_logged() -> None:
+    args = bt.parse_args(["--graduated-only"])
+    header = bt.replay_header(["2026-04-18"], config(), graduated_only=args.graduated_only)
+
+    assert args.graduated_only is True
+    assert "graduated_only=True" in header
+    assert "--graduated-only" in header
+
+
 def test_cli_defaults_preserve_hive_values() -> None:
     original = config()
     effective = bt.apply_cli_overrides(original, bt.parse_args([]))
@@ -224,6 +257,7 @@ def test_cli_defaults_preserve_hive_values() -> None:
     assert effective.exits == original.exits
     assert effective.hard_stop_delay_seconds == 0
     assert effective.overrides == {}
+    assert bt.parse_args([]).graduated_only is False
 
 
 def test_root_derives_output_and_progress_paths() -> None:

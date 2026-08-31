@@ -454,6 +454,11 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--min-pool-sol", type=float)
     parser.add_argument("--hard-stop-pct", type=float)
     parser.add_argument("--hard-stop-delay-seconds", type=float, default=0.0)
+    parser.add_argument(
+        "--graduated-only",
+        action="store_true",
+        help="Trade only DEX-graduated archive bars, skipping Pump.fun bonding curves.",
+    )
     return parser.parse_args(argv)
 
 
@@ -529,7 +534,12 @@ def apply_cli_overrides(config: LiveConfig, args: argparse.Namespace) -> LiveCon
     )
 
 
-def replay_header(dates: list[str], config: LiveConfig) -> str:
+def replay_header(
+    dates: list[str],
+    config: LiveConfig,
+    *,
+    graduated_only: bool = False,
+) -> str:
     """Describe effective gates and exits before a potentially long replay starts."""
 
     cli_overrides = []
@@ -541,6 +551,8 @@ def replay_header(dates: list[str], config: LiveConfig) -> str:
         cli_overrides.append(f"--hard-stop-pct={config.exits['hard_stop_pct']:g}")
     if config.hard_stop_delay_seconds > 0:
         cli_overrides.append(f"--hard-stop-delay-seconds={config.hard_stop_delay_seconds:g}")
+    if graduated_only:
+        cli_overrides.append("--graduated-only")
     overrides_text = ", ".join(cli_overrides) if cli_overrides else "none"
     return (
         f"Replaying {len(dates)} complete day(s): {dates[0]} through {dates[-1]} "
@@ -550,6 +562,7 @@ def replay_header(dates: list[str], config: LiveConfig) -> str:
         f"min_pool_sol_graduated={config.number('min_pool_sol_graduated'):g} "
         f"hard_stop_pct={config.exits['hard_stop_pct']:g} "
         f"hard_stop_delay_seconds={config.hard_stop_delay_seconds:g}; "
+        f"graduated_only={graduated_only}; "
         f"CLI overrides: {overrides_text}"
     )
 
@@ -842,6 +855,7 @@ def candidate_from_row(
     sol_usd: float,
     carry: dict[str, RunningStats],
     config: LiveConfig,
+    graduated_only: bool = False,
 ) -> Candidate | None:
     (
         mint,
@@ -876,6 +890,8 @@ def candidate_from_row(
     if not config.number("mcap_floor") <= mcap <= config.number("mcap_ceiling"):
         return None
     current_pool_type = pool_type(pool, graduated_this_bar)
+    if graduated_only and current_pool_type == "bonding":
+        return None
     pool_floor = config.number(
         "min_pool_sol_bonding" if current_pool_type == "bonding" else "min_pool_sol_graduated",
     )
@@ -941,10 +957,18 @@ def candidates_from_rows(
     sol_usd: float,
     running_stats: dict[str, RunningStats],
     config: LiveConfig,
+    *,
+    graduated_only: bool = False,
 ) -> list[Candidate]:
     candidates: list[Candidate] = []
     for row in rows:
-        candidate = candidate_from_row(row, sol_usd=sol_usd, carry=running_stats, config=config)
+        candidate = candidate_from_row(
+            row,
+            sol_usd=sol_usd,
+            carry=running_stats,
+            config=config,
+            graduated_only=graduated_only,
+        )
         if candidate is not None:
             candidates.append(candidate)
     return candidates
@@ -1145,6 +1169,7 @@ def replay(
     all_dates: list[str],
     root: Path,
     config: LiveConfig,
+    graduated_only: bool = False,
     progress_log: TextIO | None = None,
 ) -> tuple[ReplayState, ReplayState, VisibilityModel]:
     enriched_dir = root / "derived" / "enriched"
@@ -1181,6 +1206,7 @@ def replay(
                 sol_usd,
                 running_stats,
                 config,
+                graduated_only=graduated_only,
             )
             realistic_candidates = [
                 candidate
@@ -1970,7 +1996,7 @@ def main() -> None:
     progress_path.parent.mkdir(parents=True, exist_ok=True)
     with progress_path.open("w", encoding="utf-8") as progress_log:
         log_progress(
-            replay_header(dates, config),
+            replay_header(dates, config, graduated_only=args.graduated_only),
             progress_log,
         )
         if args.price_ratio_p99 is None:
@@ -1987,6 +2013,7 @@ def main() -> None:
             all_dates=all_dates,
             root=root,
             config=config,
+            graduated_only=args.graduated_only,
             progress_log=progress_log,
         )
     write_outputs(
