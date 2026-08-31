@@ -86,6 +86,104 @@ def test_hard_stop_waits_for_the_configured_delay() -> None:
     assert trade.exit_time == 80_000
 
 
+def test_trade_retains_candidate_entry_characteristics() -> None:
+    series = {
+        "time": np.array([0, 45_000, 50_000, 55_000], dtype=np.int64),
+        "open": np.array([1.0, 2.0, 0.91, 0.80]),
+        "close": np.array([1.0, 1.0, 0.90, 0.79]),
+        "pool": np.array([10.0, 10.0, 10.0, 10.0]),
+        "pool_label": np.array(["pump"] * 4),
+        "graduated": np.array([False] * 4),
+    }
+    candidate = bt.Candidate(
+        mint="mint",
+        scan_time=0,
+        ordinal=1,
+        strength_score=90.0,
+        buy_sell_ratio_at_entry=2.5,
+        age_seconds_at_entry=120.0,
+        volume_usd_at_entry=6_000.0,
+        txn_count_at_entry=12,
+        volume_to_mcap_ratio_at_entry=0.12,
+    )
+
+    trade = bt.build_trade(candidate, series, config())
+
+    assert trade is not None
+    assert trade.score_at_entry == 90.0
+    assert trade.buy_sell_ratio_at_entry == 2.5
+    assert trade.age_seconds_at_entry == 120.0
+    assert trade.volume_usd_at_entry == 6_000.0
+    assert trade.txn_count_at_entry == 12
+    assert trade.top_holder_pct_at_entry is None
+    assert trade.volume_to_mcap_ratio_at_entry == 0.12
+    assert trade.entry_pool_type == "bonding"
+
+
+def test_gate_candidate_captures_entry_characteristics() -> None:
+    candidate_config = replace(
+        config(),
+        gates={
+            **config().gates,
+            "mcap_ceiling": 50_000,
+            "min_age_seconds": 0,
+            "max_age_seconds": 1_320,
+            "age_offset_seconds": 39,
+            "txn_count_adjustment": 1,
+            "min_volume_usd": 100,
+            "min_volume_to_mcap_ratio": 0.005,
+            "max_volume_to_mcap_ratio": 50,
+            "min_buy_sell_ratio": 0.5,
+            "creator_holdings_max": 0,
+            "score_threshold_bonding": 0,
+            "score_threshold_graduated": 0,
+            "blocked_weekdays": [],
+            "blocked_hours_utc": [],
+        },
+    )
+    candidate = bt.candidate_from_row(
+        (
+            "mint",
+            1_000,
+            1,
+            3.0,
+            1.0,
+            10,
+            100.0,
+            10_000.0,
+            10.0,
+            "pump",
+            False,
+            0.0,
+            1.0,
+        ),
+        sol_usd=100.0,
+        carry={},
+        config=candidate_config,
+    )
+
+    assert candidate is not None
+    assert candidate.buy_sell_ratio_at_entry == 3.0
+    assert candidate.age_seconds_at_entry == 139.0
+    assert candidate.volume_usd_at_entry == 400.0
+    assert candidate.txn_count_at_entry == 10
+    assert candidate.top_holder_pct_at_entry is None
+    assert candidate.volume_to_mcap_ratio_at_entry == 0.04
+
+
+def test_trade_csv_appends_entry_characteristics() -> None:
+    assert bt.TRADE_CSV_FIELDS[-8:] == (
+        "score_at_entry",
+        "buy_sell_ratio_at_entry",
+        "age_seconds_at_entry",
+        "volume_usd_at_entry",
+        "txn_count_at_entry",
+        "top_holder_pct_at_entry",
+        "pool_type_at_entry",
+        "volume_to_mcap_ratio_at_entry",
+    )
+
+
 def test_cli_overrides_update_effective_config_and_header() -> None:
     args = bt.parse_args(
         [

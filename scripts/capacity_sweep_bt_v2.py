@@ -69,6 +69,39 @@ BASELINE_ENTRIES = 282_924
 BASELINE_WIN_RATE_PCT = 68.92
 BASELINE_FRICTION_PNL_SOL = 1_147.32
 
+# Keep the established trade columns in order; append entry characteristics for
+# post-hoc filter analysis without breaking existing CSV consumers.
+TRADE_CSV_FIELDS = (
+    "scenario",
+    "mint",
+    "entry_time",
+    "exit_time",
+    "exit_reason",
+    "entry_price",
+    "trigger_price",
+    "next_bar_exit_price",
+    "exit_price_p99_9_cap",
+    "exit_price_p99_cap",
+    "entry_pool_sol",
+    "exit_pool_sol",
+    "entry_pool_type",
+    "exit_pool_type",
+    "entry_fee_pct",
+    "exit_fee_pct",
+    "gross_entry_tokens",
+    "gross_exit_proceeds_uncapped_sol",
+    "gross_exit_proceeds_p99_9_cap_sol",
+    "gross_exit_proceeds_p99_cap_sol",
+    "score_at_entry",
+    "buy_sell_ratio_at_entry",
+    "age_seconds_at_entry",
+    "volume_usd_at_entry",
+    "txn_count_at_entry",
+    "top_holder_pct_at_entry",
+    "pool_type_at_entry",
+    "volume_to_mcap_ratio_at_entry",
+)
+
 # Keep the detached replay well below the WSL VM ceiling. DuckDB spills to the
 # configured temp directory rather than letting a large archive query OOM the host.
 DUCKDB_MEMORY_LIMIT = "2GB"
@@ -152,6 +185,12 @@ class Candidate:
     scan_time: int
     ordinal: int
     strength_score: float
+    buy_sell_ratio_at_entry: float | None = None
+    age_seconds_at_entry: float | None = None
+    volume_usd_at_entry: float | None = None
+    txn_count_at_entry: int | None = None
+    top_holder_pct_at_entry: float | None = None
+    volume_to_mcap_ratio_at_entry: float | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -195,6 +234,13 @@ class ReplayTrade:
     trigger_price: float | None = None
     entry_pool_type: str = "graduated"
     exit_pool_type: str = "graduated"
+    score_at_entry: float | None = None
+    buy_sell_ratio_at_entry: float | None = None
+    age_seconds_at_entry: float | None = None
+    volume_usd_at_entry: float | None = None
+    txn_count_at_entry: int | None = None
+    top_holder_pct_at_entry: float | None = None
+    volume_to_mcap_ratio_at_entry: float | None = None
 
     def exit_price_for_cap(self, price_ratio_bound: float | None) -> float:
         """Return the next-bar fill limited by a trigger-relative archive bound."""
@@ -874,7 +920,20 @@ def candidate_from_row(
         return None
     if observed_at.hour in config.integers("blocked_hours_utc"):
         return None
-    return Candidate(mint_text, int(bar_time), int(ordinal), score)
+    # The archive contains only top-10 concentration, not the single-holder
+    # value used by V2, so preserve the requested field as unknown.
+    return Candidate(
+        mint=mint_text,
+        scan_time=int(bar_time),
+        ordinal=int(ordinal),
+        strength_score=score,
+        buy_sell_ratio_at_entry=buy_volume_usd / sell_volume_usd,
+        age_seconds_at_entry=corrected_age,
+        volume_usd_at_entry=volume_usd,
+        txn_count_at_entry=stats.trade_count,
+        top_holder_pct_at_entry=None,
+        volume_to_mcap_ratio_at_entry=volume_mcap_ratio,
+    )
 
 
 def candidates_from_rows(
@@ -1021,6 +1080,13 @@ def build_trade(
             trigger_price=mark.close,
             entry_pool_type=entry.pool_type,
             exit_pool_type=exit_bar.pool_type,
+            score_at_entry=candidate.strength_score,
+            buy_sell_ratio_at_entry=candidate.buy_sell_ratio_at_entry,
+            age_seconds_at_entry=candidate.age_seconds_at_entry,
+            volume_usd_at_entry=candidate.volume_usd_at_entry,
+            txn_count_at_entry=candidate.txn_count_at_entry,
+            top_holder_pct_at_entry=candidate.top_holder_pct_at_entry,
+            volume_to_mcap_ratio_at_entry=candidate.volume_to_mcap_ratio_at_entry,
         )
     return None
 
@@ -1811,29 +1877,7 @@ def write_outputs(
         newline="",
         encoding="utf-8",
     ) as output:
-        fields = [
-            "scenario",
-            "mint",
-            "entry_time",
-            "exit_time",
-            "exit_reason",
-            "entry_price",
-            "trigger_price",
-            "next_bar_exit_price",
-            "exit_price_p99_9_cap",
-            "exit_price_p99_cap",
-            "entry_pool_sol",
-            "exit_pool_sol",
-            "entry_pool_type",
-            "exit_pool_type",
-            "entry_fee_pct",
-            "exit_fee_pct",
-            "gross_entry_tokens",
-            "gross_exit_proceeds_uncapped_sol",
-            "gross_exit_proceeds_p99_9_cap_sol",
-            "gross_exit_proceeds_p99_cap_sol",
-        ]
-        writer = csv.DictWriter(output, fieldnames=fields)
+        writer = csv.DictWriter(output, fieldnames=TRADE_CSV_FIELDS)
         writer.writeheader()
         p99_cap = next(cap for cap in caps if cap.name == "p99_cap")
         for state in states:
@@ -1865,6 +1909,14 @@ def write_outputs(
                         "gross_exit_proceeds_uncapped_sol": uncapped_proceeds,
                         "gross_exit_proceeds_p99_9_cap_sol": p999_proceeds,
                         "gross_exit_proceeds_p99_cap_sol": p99_proceeds,
+                        "score_at_entry": trade.score_at_entry,
+                        "buy_sell_ratio_at_entry": trade.buy_sell_ratio_at_entry,
+                        "age_seconds_at_entry": trade.age_seconds_at_entry,
+                        "volume_usd_at_entry": trade.volume_usd_at_entry,
+                        "txn_count_at_entry": trade.txn_count_at_entry,
+                        "top_holder_pct_at_entry": trade.top_holder_pct_at_entry,
+                        "pool_type_at_entry": trade.entry_pool_type,
+                        "volume_to_mcap_ratio_at_entry": trade.volume_to_mcap_ratio_at_entry,
                     },
                 )
     with (output_dir / "capacity_sweep_bt_v2_feefix_visibility.csv").open(
