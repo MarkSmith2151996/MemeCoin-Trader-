@@ -453,6 +453,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--mcap-floor", type=float)
     parser.add_argument("--min-pool-sol", type=float)
     parser.add_argument("--hard-stop-pct", type=float)
+    parser.add_argument("--time-stop-minutes", type=float, default=None)
     parser.add_argument("--hard-stop-delay-seconds", type=float, default=0.0)
     parser.add_argument(
         "--graduated-only",
@@ -519,6 +520,12 @@ def apply_cli_overrides(config: LiveConfig, args: argparse.Namespace) -> LiveCon
             raise ValueError("--hard-stop-pct must be a positive finite number")
         exits["hard_stop_pct"] = value
         overrides["hard_stop_pct"] = "--hard-stop-pct"
+    if args.time_stop_minutes is not None:
+        value = positive_number(args.time_stop_minutes)
+        if value is None:
+            raise ValueError("--time-stop-minutes must be a positive finite number")
+        exits["time_stop_minutes"] = value
+        overrides["time_stop_minutes"] = "--time-stop-minutes"
 
     hard_stop_delay_seconds = finite_number(args.hard_stop_delay_seconds)
     if hard_stop_delay_seconds is None or hard_stop_delay_seconds < 0:
@@ -549,6 +556,8 @@ def replay_header(
         cli_overrides.append(f"--min-pool-sol={config.number('min_pool_sol_bonding'):g}")
     if "hard_stop_pct" in config.overrides:
         cli_overrides.append(f"--hard-stop-pct={config.exits['hard_stop_pct']:g}")
+    if "time_stop_minutes" in config.overrides:
+        cli_overrides.append(f"--time-stop-minutes={config.exits['time_stop_minutes']:g}")
     if config.hard_stop_delay_seconds > 0:
         cli_overrides.append(f"--hard-stop-delay-seconds={config.hard_stop_delay_seconds:g}")
     if graduated_only:

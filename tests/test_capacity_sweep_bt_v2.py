@@ -217,6 +217,8 @@ def test_cli_overrides_update_effective_config_and_header() -> None:
             "50",
             "--hard-stop-pct",
             "12",
+            "--time-stop-minutes",
+            "20",
             "--hard-stop-delay-seconds",
             "30",
         ],
@@ -228,6 +230,7 @@ def test_cli_overrides_update_effective_config_and_header() -> None:
     assert effective.gates["min_pool_sol_bonding"] == 50
     assert effective.gates["min_pool_sol_graduated"] == 50
     assert effective.exits["hard_stop_pct"] == 12
+    assert effective.exits["time_stop_minutes"] == 20
     assert effective.hard_stop_delay_seconds == 30
     assert "mcap_floor=10000" in header
     assert "min_pool_sol_bonding=50" in header
@@ -237,6 +240,7 @@ def test_cli_overrides_update_effective_config_and_header() -> None:
     assert "--mcap-floor=10000" in header
     assert "--min-pool-sol=50" in header
     assert "--hard-stop-pct=12" in header
+    assert "--time-stop-minutes=20" in header
     assert "--hard-stop-delay-seconds=30" in header
 
 
@@ -257,6 +261,7 @@ def test_cli_defaults_preserve_hive_values() -> None:
     assert effective.exits == original.exits
     assert effective.hard_stop_delay_seconds == 0
     assert effective.overrides == {}
+    assert bt.parse_args([]).time_stop_minutes is None
     assert bt.parse_args([]).graduated_only is False
 
 
