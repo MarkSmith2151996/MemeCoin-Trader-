@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import random
 import sys
 from dataclasses import replace
@@ -242,6 +243,85 @@ def test_cli_overrides_update_effective_config_and_header() -> None:
     assert "--hard-stop-pct=12" in header
     assert "--time-stop-minutes=20" in header
     assert "--hard-stop-delay-seconds=30" in header
+
+
+def test_complete_cli_config_skips_hive_read(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    monkeypatch.delenv("MEMECOIN_POSTGRES_DSN", raising=False)
+    monkeypatch.delenv("DATABASE_URL", raising=False)
+    monkeypatch.setattr(bt, "load_dotenv", lambda *_args, **_kwargs: None)
+    args = bt.parse_args(
+        [
+            "--mcap-floor", "5100", "--mcap-ceiling", "50000", "--min-age-seconds", "0",
+            "--max-age-seconds", "1320", "--age-offset-seconds", "39",
+            "--txn-count-adjustment", "1",
+            "--min-volume-usd", "100", "--min-volume-to-mcap-ratio", "0.005",
+            "--max-volume-to-mcap-ratio", "50", "--min-buy-sell-ratio", "0.5",
+            "--min-pool-sol", "5",
+            "--creator-holdings-max", "0", "--max-top-holder-pct", "100",
+            "--score-threshold-bonding", "40", "--score-threshold-graduated", "40",
+            "--blocked-weekdays", "2", "--blocked-hours-utc", "0", "7", "--max-open", "5",
+            "--position-size-sol", "0.02", "--trailing-stop-pct", "2", "--trailing-arm-pct", "2",
+            "--hard-stop-pct", "8", "--take-profit-pct", "150", "--time-stop-minutes", "10",
+        ],
+    )
+
+    effective = asyncio.run(bt.load_effective_config(args))
+
+    assert effective.position_size_sol == 0.02
+    assert effective.max_open == 5
+    assert effective.gates["blocked_hours_utc"] == [0, 7]
+    assert "All config provided via CLI - skipping Hive read" in capsys.readouterr().out
+
+
+def test_partial_cli_config_without_hive_dsn_lists_missing_args(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("MEMECOIN_POSTGRES_DSN", raising=False)
+    monkeypatch.delenv("DATABASE_URL", raising=False)
+    monkeypatch.setattr(bt, "load_dotenv", lambda *_args, **_kwargs: None)
+
+    with pytest.raises(RuntimeError, match=r"missing CLI args: .*--mcap-ceiling"):
+        asyncio.run(bt.load_effective_config(bt.parse_args(["--mcap-floor", "5100"])))
+
+
+def test_partial_cli_config_uses_hive_and_overrides_it(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def fake_load_live_config(
+        dsn: str | None = None,
+        *,
+        position_size_sol: float | None = None,
+        max_open_override: int | None = None,
+    ) -> bt.LiveConfig:
+        assert dsn == "postgresql://example"
+        assert position_size_sol == 0.03
+        assert max_open_override is None
+        return config()
+
+    monkeypatch.setenv("MEMECOIN_POSTGRES_DSN", "postgresql://example")
+    monkeypatch.setattr(bt, "load_live_config", fake_load_live_config)
+
+    effective = asyncio.run(
+        bt.load_effective_config(
+            bt.parse_args(
+                [
+                    "--mcap-floor",
+                    "10000",
+                    "--position-size-sol",
+                    "0.03",
+                    "--trailing-stop-pct",
+                    "5",
+                ],
+            ),
+        ),
+    )
+
+    assert effective.gates["mcap_floor"] == 10_000
+    assert effective.position_size_sol == 0.03
+    assert effective.exits["trailing_stop_pct"] == 5
 
 
 def test_graduated_only_cli_flag_parses_and_is_logged() -> None:

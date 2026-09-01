@@ -451,8 +451,28 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--price-ratio-p999", type=float)
     parser.add_argument("--price-ratio-observations", type=int)
     parser.add_argument("--mcap-floor", type=float)
+    parser.add_argument("--mcap-ceiling", type=float)
+    parser.add_argument("--min-age-seconds", type=float)
+    parser.add_argument("--max-age-seconds", type=float)
+    parser.add_argument("--age-offset-seconds", type=float)
+    parser.add_argument("--txn-count-adjustment", type=float)
+    parser.add_argument("--min-volume-usd", type=float)
+    parser.add_argument("--min-volume-to-mcap-ratio", type=float)
+    parser.add_argument("--max-volume-to-mcap-ratio", type=float)
+    parser.add_argument("--min-buy-sell-ratio", type=float)
     parser.add_argument("--min-pool-sol", type=float)
+    parser.add_argument("--creator-holdings-max", type=float)
+    parser.add_argument("--max-top-holder-pct", type=float)
+    parser.add_argument("--score-threshold-bonding", type=float)
+    parser.add_argument("--score-threshold-graduated", type=float)
+    parser.add_argument("--blocked-weekdays", type=int, nargs="*")
+    parser.add_argument("--blocked-hours-utc", type=int, nargs="*")
+    parser.add_argument("--max-open", type=int)
+    parser.add_argument("--position-size-sol", type=float)
     parser.add_argument("--hard-stop-pct", type=float)
+    parser.add_argument("--trailing-stop-pct", type=float)
+    parser.add_argument("--trailing-arm-pct", type=float)
+    parser.add_argument("--take-profit-pct", type=float)
     parser.add_argument("--time-stop-minutes", type=float, default=None)
     parser.add_argument("--hard-stop-delay-seconds", type=float, default=0.0)
     parser.add_argument(
@@ -527,14 +547,74 @@ def apply_cli_overrides(config: LiveConfig, args: argparse.Namespace) -> LiveCon
         exits["time_stop_minutes"] = value
         overrides["time_stop_minutes"] = "--time-stop-minutes"
 
+    for option, gate_name in (
+        ("mcap_ceiling", "mcap_ceiling"),
+        ("min_age_seconds", "min_age_seconds"),
+        ("max_age_seconds", "max_age_seconds"),
+        ("age_offset_seconds", "age_offset_seconds"),
+        ("txn_count_adjustment", "txn_count_adjustment"),
+        ("min_volume_usd", "min_volume_usd"),
+        ("min_volume_to_mcap_ratio", "min_volume_to_mcap_ratio"),
+        ("max_volume_to_mcap_ratio", "max_volume_to_mcap_ratio"),
+        ("min_buy_sell_ratio", "min_buy_sell_ratio"),
+        ("creator_holdings_max", "creator_holdings_max"),
+        ("max_top_holder_pct", "max_top_holder_pct"),
+        ("score_threshold_bonding", "score_threshold_bonding"),
+        ("score_threshold_graduated", "score_threshold_graduated"),
+    ):
+        raw_value = getattr(args, option)
+        if raw_value is not None:
+            value = finite_number(raw_value)
+            if value is None:
+                raise ValueError(f"--{option.replace('_', '-')} must be a finite number")
+            gates[gate_name] = value
+            overrides[gate_name] = f"--{option.replace('_', '-')}"
+    for option, gate_name in (
+        ("blocked_weekdays", "blocked_weekdays"),
+        ("blocked_hours_utc", "blocked_hours_utc"),
+    ):
+        value = getattr(args, option)
+        if value is not None:
+            gates[gate_name] = value
+            overrides[gate_name] = f"--{option.replace('_', '-')}"
+    for option, exit_name in (
+        ("trailing_stop_pct", "trailing_stop_pct"),
+        ("trailing_arm_pct", "trailing_arm_pct"),
+        ("take_profit_pct", "take_profit_pct"),
+    ):
+        raw_value = getattr(args, option)
+        if raw_value is not None:
+            value = finite_number(raw_value)
+            if value is None:
+                raise ValueError(f"--{option.replace('_', '-')} must be a finite number")
+            exits[exit_name] = value
+            overrides[exit_name] = f"--{option.replace('_', '-')}"
+
+    if args.position_size_sol is not None:
+        value = positive_number(args.position_size_sol)
+        if value is None:
+            raise ValueError("--position-size-sol must be a positive finite number")
+        position_size_sol = value
+        overrides["position_size_sol"] = "--position-size-sol"
+    else:
+        position_size_sol = config.position_size_sol
+    if args.max_open is not None:
+        if args.max_open <= 0:
+            raise ValueError("--max-open must be a positive integer")
+        max_open = args.max_open
+        gates["max_open"] = max_open
+        overrides["max_open"] = "--max-open"
+    else:
+        max_open = config.max_open
+
     hard_stop_delay_seconds = finite_number(args.hard_stop_delay_seconds)
     if hard_stop_delay_seconds is None or hard_stop_delay_seconds < 0:
         raise ValueError("--hard-stop-delay-seconds must be a non-negative finite number")
     return LiveConfig(
         gates=gates,
         exits=exits,
-        position_size_sol=config.position_size_sol,
-        max_open=config.max_open,
+        position_size_sol=position_size_sol,
+        max_open=max_open,
         captured_at=config.captured_at,
         hard_stop_delay_seconds=hard_stop_delay_seconds,
         overrides=overrides,
@@ -704,19 +784,110 @@ def open_duckdb(root: Path) -> duckdb.DuckDBPyConnection:
     return connection
 
 
-async def load_live_config() -> LiveConfig:
+def hive_dsn() -> str | None:
+    load_dotenv(REPO_ROOT / ".env", override=False)
+    return os.getenv("MEMECOIN_POSTGRES_DSN") or os.getenv("DATABASE_URL")
+
+
+def missing_cli_config_args(args: argparse.Namespace) -> list[str]:
+    """Return the CLI options still requiring the read-only Hive config source."""
+
+    required = {
+        "--mcap-floor": args.mcap_floor,
+        "--mcap-ceiling": args.mcap_ceiling,
+        "--min-age-seconds": args.min_age_seconds,
+        "--max-age-seconds": args.max_age_seconds,
+        "--age-offset-seconds": args.age_offset_seconds,
+        "--txn-count-adjustment": args.txn_count_adjustment,
+        "--min-volume-usd": args.min_volume_usd,
+        "--min-volume-to-mcap-ratio": args.min_volume_to_mcap_ratio,
+        "--max-volume-to-mcap-ratio": args.max_volume_to_mcap_ratio,
+        "--min-buy-sell-ratio": args.min_buy_sell_ratio,
+        "--min-pool-sol": args.min_pool_sol,
+        "--creator-holdings-max": args.creator_holdings_max,
+        "--max-top-holder-pct": args.max_top_holder_pct,
+        "--score-threshold-bonding": args.score_threshold_bonding,
+        "--score-threshold-graduated": args.score_threshold_graduated,
+        "--blocked-weekdays": args.blocked_weekdays,
+        "--blocked-hours-utc": args.blocked_hours_utc,
+        "--max-open": args.max_open,
+        "--position-size-sol": args.position_size_sol,
+        "--trailing-stop-pct": args.trailing_stop_pct,
+        "--trailing-arm-pct": args.trailing_arm_pct,
+        "--hard-stop-pct": args.hard_stop_pct,
+        "--take-profit-pct": args.take_profit_pct,
+        "--time-stop-minutes": args.time_stop_minutes,
+    }
+    return [option for option, value in required.items() if value is None]
+
+
+def config_from_cli(args: argparse.Namespace) -> LiveConfig:
+    """Build an effective replay config when no Hive values are needed."""
+
+    missing = missing_cli_config_args(args)
+    if missing:
+        raise ValueError("Cannot build CLI-only config; missing " + ", ".join(missing))
+    assert args.position_size_sol is not None
+    assert args.max_open is not None
+    gates = {
+        "mcap_floor": args.mcap_floor,
+        "mcap_ceiling": args.mcap_ceiling,
+        "min_age_seconds": args.min_age_seconds,
+        "max_age_seconds": args.max_age_seconds,
+        "age_offset_seconds": args.age_offset_seconds,
+        "txn_count_adjustment": args.txn_count_adjustment,
+        "min_volume_usd": args.min_volume_usd,
+        "min_volume_to_mcap_ratio": args.min_volume_to_mcap_ratio,
+        "max_volume_to_mcap_ratio": args.max_volume_to_mcap_ratio,
+        "min_buy_sell_ratio": args.min_buy_sell_ratio,
+        "min_pool_sol_bonding": args.min_pool_sol,
+        "min_pool_sol_graduated": args.min_pool_sol,
+        "creator_holdings_max": args.creator_holdings_max,
+        "max_top_holder_pct": args.max_top_holder_pct,
+        "score_threshold_bonding": args.score_threshold_bonding,
+        "score_threshold_graduated": args.score_threshold_graduated,
+        "blocked_weekdays": args.blocked_weekdays,
+        "blocked_hours_utc": args.blocked_hours_utc,
+        "max_open": args.max_open,
+    }
+    exits = {
+        "trailing_stop_pct": args.trailing_stop_pct,
+        "trailing_arm_pct": args.trailing_arm_pct,
+        "hard_stop_pct": args.hard_stop_pct,
+        "take_profit_pct": args.take_profit_pct,
+        "time_stop_minutes": args.time_stop_minutes,
+    }
+    return apply_cli_overrides(
+        LiveConfig(
+            gates=gates,
+            exits=exits,
+            position_size_sol=args.position_size_sol,
+            max_open=args.max_open,
+            captured_at=datetime.now(UTC).isoformat(),
+        ),
+        args,
+    )
+
+
+async def load_live_config(
+    dsn: str | None = None,
+    *,
+    position_size_sol: float | None = None,
+    max_open_override: int | None = None,
+) -> LiveConfig:
     """Read only enabled strategy rows and the local execution-size settings."""
 
-    load_dotenv(REPO_ROOT / ".env", override=False)
-    dsn = os.getenv("MEMECOIN_POSTGRES_DSN") or os.getenv("DATABASE_URL")
+    dsn = dsn or hive_dsn()
     if not dsn:
         raise RuntimeError("MEMECOIN_POSTGRES_DSN or DATABASE_URL is required")
-    position_value = os.getenv("POSITION_SIZE_SOL")
-    if position_value is None:
-        raise RuntimeError("POSITION_SIZE_SOL must be set in the live environment")
-    position_size = positive_number(position_value)
-    if position_size is None:
-        raise RuntimeError("POSITION_SIZE_SOL must be a positive finite number")
+    if position_size_sol is None:
+        position_size = positive_number(os.getenv("POSITION_SIZE_SOL"))
+        if position_size is None:
+            raise RuntimeError("POSITION_SIZE_SOL must be set in the live environment")
+    else:
+        position_size = positive_number(position_size_sol)
+        if position_size is None:
+            raise RuntimeError("--position-size-sol must be a positive finite number")
 
     connection = await asyncpg.connect(dsn)
     try:
@@ -760,7 +931,7 @@ async def load_live_config() -> LiveConfig:
     if max_open <= 0:
         raise RuntimeError("Hive max_open must be positive")
     env_max_open = os.getenv("MAX_OPEN")
-    if env_max_open is not None and int(env_max_open) != max_open:
+    if max_open_override is None and env_max_open is not None and int(env_max_open) != max_open:
         raise RuntimeError(
             f"MAX_OPEN environment value {env_max_open} does not match Hive max_open {max_open}",
         )
@@ -770,6 +941,30 @@ async def load_live_config() -> LiveConfig:
         position_size_sol=position_size,
         max_open=max_open,
         captured_at=datetime.now(UTC).isoformat(),
+    )
+
+
+async def load_effective_config(args: argparse.Namespace) -> LiveConfig:
+    """Use CLI-only values when complete, otherwise retain the Hive fallback."""
+
+    missing = missing_cli_config_args(args)
+    if not missing:
+        print("All config provided via CLI - skipping Hive read", flush=True)
+        return config_from_cli(args)
+    dsn = hive_dsn()
+    if not dsn:
+        raise RuntimeError(
+            "Hive config is unavailable; missing CLI args: "
+            + ", ".join(missing)
+            + ". Set MEMECOIN_POSTGRES_DSN or DATABASE_URL to load the remaining values.",
+        )
+    return apply_cli_overrides(
+        await load_live_config(
+            dsn,
+            position_size_sol=args.position_size_sol,
+            max_open_override=args.max_open,
+        ),
+        args,
     )
 
 
@@ -2001,7 +2196,7 @@ def main() -> None:
         end = args.end or args.start
         print(f"Skipping replay: no enriched Parquet files in requested range {args.start} through {end}", flush=True)
         return
-    config = apply_cli_overrides(asyncio.run(load_live_config()), args)
+    config = asyncio.run(load_effective_config(args))
     progress_path.parent.mkdir(parents=True, exist_ok=True)
     with progress_path.open("w", encoding="utf-8") as progress_log:
         log_progress(
