@@ -47,6 +47,7 @@ DEFAULT_REPO_REPORT = REPO_ROOT / "data" / "capacity_sweep_bt_v2_feefix_report.m
 DEFAULT_PROGRESS_LOG = DEFAULT_ROOT / "results" / "capacity_sweep_bt_v2_feefix.progress.log"
 STRATEGY = "BT"
 BAR_BATCH_SIZE = 100_000
+BAR_MINT_BATCH_SIZE = 750
 ENTRY_DELAY_SECONDS = 42.5
 REPEAT_LOSER_BAN_SECONDS = 24 * 60 * 60
 
@@ -97,7 +98,6 @@ TRADE_CSV_FIELDS = (
     "age_seconds_at_entry",
     "volume_usd_at_entry",
     "txn_count_at_entry",
-    "top_holder_pct_at_entry",
     "pool_type_at_entry",
     "volume_to_mcap_ratio_at_entry",
 )
@@ -134,7 +134,6 @@ REQUIRED_GATES = {
     "min_pool_sol_bonding",
     "min_pool_sol_graduated",
     "creator_holdings_max",
-    "max_top_holder_pct",
     "score_threshold_bonding",
     "score_threshold_graduated",
     "blocked_weekdays",
@@ -148,7 +147,7 @@ REQUIRED_EXITS = {
     "take_profit_pct",
     "time_stop_minutes",
 }
-KNOWN_EXIT_REASONS = ("take_profit", "trailing_stop", "hard_stop", "time_stop")
+KNOWN_EXIT_REASONS = ("take_profit", "trailing_stop", "hard_stop", "time_stop", "data_end")
 
 
 @dataclass(frozen=True, slots=True)
@@ -189,7 +188,6 @@ class Candidate:
     age_seconds_at_entry: float | None = None
     volume_usd_at_entry: float | None = None
     txn_count_at_entry: int | None = None
-    top_holder_pct_at_entry: float | None = None
     volume_to_mcap_ratio_at_entry: float | None = None
 
 
@@ -239,7 +237,6 @@ class ReplayTrade:
     age_seconds_at_entry: float | None = None
     volume_usd_at_entry: float | None = None
     txn_count_at_entry: int | None = None
-    top_holder_pct_at_entry: float | None = None
     volume_to_mcap_ratio_at_entry: float | None = None
 
     def exit_price_for_cap(self, price_ratio_bound: float | None) -> float:
@@ -248,7 +245,10 @@ class ReplayTrade:
         if price_ratio_bound is None:
             return self.exit_price
         trigger = self.trigger_price if self.trigger_price is not None else self.exit_price
-        return min(self.exit_price, trigger * price_ratio_bound)
+        return max(
+            trigger / price_ratio_bound,
+            min(self.exit_price, trigger * price_ratio_bound),
+        )
 
     def raw_pnl_for_cap(self, price_ratio_bound: float | None) -> float:
         exit_price = self.exit_price_for_cap(price_ratio_bound)
@@ -312,11 +312,13 @@ class ReplayState:
     scenario: str
     max_open: int
     positions: list[ScheduledPosition] = field(default_factory=list)
-    hard_stop_ban_until: dict[str, int] = field(default_factory=dict)
+    repeat_loser_ban_until: dict[str, int] = field(default_factory=dict)
     incomplete_mints: set[str] = field(default_factory=set)
     trades: list[ReplayTrade] = field(default_factory=list)
     entries_signalled: int = 0
     skipped_capacity: int = 0
+    stale_entry_rejects: int = 0
+    repeat_loser_bans: int = 0
 
 
 @dataclass(slots=True)
@@ -450,6 +452,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--price-ratio-p99", type=float)
     parser.add_argument("--price-ratio-p999", type=float)
     parser.add_argument("--price-ratio-observations", type=int)
+    parser.add_argument("--price-ratio-measure-start", help="First date for cap measurement.")
+    parser.add_argument("--price-ratio-measure-end", help="Last date for cap measurement.")
     parser.add_argument("--mcap-floor", type=float)
     parser.add_argument("--mcap-ceiling", type=float)
     parser.add_argument("--min-age-seconds", type=float)
@@ -462,7 +466,6 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--min-buy-sell-ratio", type=float)
     parser.add_argument("--min-pool-sol", type=float)
     parser.add_argument("--creator-holdings-max", type=float)
-    parser.add_argument("--max-top-holder-pct", type=float)
     parser.add_argument("--score-threshold-bonding", type=float)
     parser.add_argument("--score-threshold-graduated", type=float)
     parser.add_argument("--blocked-weekdays", type=int, nargs="*")
@@ -558,7 +561,6 @@ def apply_cli_overrides(config: LiveConfig, args: argparse.Namespace) -> LiveCon
         ("max_volume_to_mcap_ratio", "max_volume_to_mcap_ratio"),
         ("min_buy_sell_ratio", "min_buy_sell_ratio"),
         ("creator_holdings_max", "creator_holdings_max"),
-        ("max_top_holder_pct", "max_top_holder_pct"),
         ("score_threshold_bonding", "score_threshold_bonding"),
         ("score_threshold_graduated", "score_threshold_graduated"),
     ):
@@ -748,7 +750,16 @@ def price_ratio_caps_from_args(
 
     values = (args.price_ratio_p99, args.price_ratio_p999, args.price_ratio_observations)
     if all(value is None for value in values):
-        return measure_price_ratio_caps(root, dates), False
+        if args.price_ratio_measure_start is None and args.price_ratio_measure_end is None:
+            measure_dates = dates
+        else:
+            enriched_dir = root / "derived" / "enriched"
+            measure_dates = parquet_dates(
+                enriched_dir,
+                args.price_ratio_measure_start or "0000-01-01",
+                args.price_ratio_measure_end,
+            )
+        return measure_price_ratio_caps(root, measure_dates), False
     if any(value is None for value in values):
         raise ValueError(
             "--price-ratio-p99, --price-ratio-p999, and --price-ratio-observations must be supplied together",
@@ -805,7 +816,6 @@ def missing_cli_config_args(args: argparse.Namespace) -> list[str]:
         "--min-buy-sell-ratio": args.min_buy_sell_ratio,
         "--min-pool-sol": args.min_pool_sol,
         "--creator-holdings-max": args.creator_holdings_max,
-        "--max-top-holder-pct": args.max_top_holder_pct,
         "--score-threshold-bonding": args.score_threshold_bonding,
         "--score-threshold-graduated": args.score_threshold_graduated,
         "--blocked-weekdays": args.blocked_weekdays,
@@ -843,7 +853,6 @@ def config_from_cli(args: argparse.Namespace) -> LiveConfig:
         "min_pool_sol_bonding": args.min_pool_sol,
         "min_pool_sol_graduated": args.min_pool_sol,
         "creator_holdings_max": args.creator_holdings_max,
-        "max_top_holder_pct": args.max_top_holder_pct,
         "score_threshold_bonding": args.score_threshold_bonding,
         "score_threshold_graduated": args.score_threshold_graduated,
         "blocked_weekdays": args.blocked_weekdays,
@@ -1140,8 +1149,6 @@ def candidate_from_row(
         return None
     if observed_at.hour in config.integers("blocked_hours_utc"):
         return None
-    # The archive contains only top-10 concentration, not the single-holder
-    # value used by V2, so preserve the requested field as unknown.
     return Candidate(
         mint=mint_text,
         scan_time=int(bar_time),
@@ -1151,7 +1158,6 @@ def candidate_from_row(
         age_seconds_at_entry=corrected_age,
         volume_usd_at_entry=volume_usd,
         txn_count_at_entry=stats.trade_count,
-        top_holder_pct_at_entry=None,
         volume_to_mcap_ratio_at_entry=volume_mcap_ratio,
     )
 
@@ -1188,33 +1194,40 @@ def bars_for_mints(
     if not mints:
         return {}
     sources = ", ".join(f"'{sql_path(path)}'" for path in paths)
-    placeholders = ", ".join("?" for _ in mints)
-    frame = connection.execute(
-        f"""SELECT mint, bar_time, open, close, max_sol_in_pool, pool, graduated_this_bar
-            FROM read_parquet([{sources}])
-            WHERE mint IN ({placeholders}) AND bar_time >= ? AND bar_time <= ?
-            ORDER BY mint, bar_time""",
-        [*mints, window_start, window_end],
-    ).fetchdf()
-    if frame.empty:
-        return {}
     result: dict[str, dict[str, np.ndarray]] = {}
-    mints_array = frame["mint"].astype(str).to_numpy()
-    split = np.flatnonzero(mints_array[1:] != mints_array[:-1]) + 1
-    for mint, start, stop in zip(
-        (mints_array[index] for index in np.r_[0, split]),
-        np.r_[0, split],
-        np.r_[split, len(frame)],
-        strict=False,
-    ):
-        result[mint] = {
-            "time": frame["bar_time"].to_numpy()[start:stop].astype(np.int64),
-            "open": frame["open"].to_numpy()[start:stop],
-            "close": frame["close"].to_numpy()[start:stop],
-            "pool": frame["max_sol_in_pool"].to_numpy()[start:stop],
-            "pool_label": frame["pool"].to_numpy()[start:stop],
-            "graduated": frame["graduated_this_bar"].to_numpy()[start:stop],
-        }
+    for batch_start in range(0, len(mints), BAR_MINT_BATCH_SIZE):
+        batch = mints[batch_start : batch_start + BAR_MINT_BATCH_SIZE]
+        placeholders = ", ".join("?" for _ in batch)
+        frame = connection.execute(
+            f"""SELECT mint, bar_time, open, close, max_sol_in_pool, pool, graduated_this_bar
+                FROM read_parquet([{sources}])
+                WHERE mint IN ({placeholders}) AND bar_time >= ? AND bar_time <= ?
+                ORDER BY mint, bar_time""",
+            [*batch, window_start, window_end],
+        ).fetchdf()
+        if frame.empty:
+            continue
+        mints_array = frame["mint"].astype(str).to_numpy()
+        split = np.flatnonzero(mints_array[1:] != mints_array[:-1]) + 1
+        starts = np.r_[0, split]
+        stops = np.r_[split, len(frame)]
+        # Extract each column once per batch so the per-mint loop copies small
+        # slices instead of re-materialising a full-column array per mint.
+        times = frame["bar_time"].to_numpy().astype(np.int64)
+        opens = frame["open"].to_numpy()
+        closes = frame["close"].to_numpy()
+        pools = frame["max_sol_in_pool"].to_numpy()
+        pool_labels = frame["pool"].to_numpy()
+        graduated = frame["graduated_this_bar"].to_numpy()
+        for mint, start, stop in zip(mints_array[starts], starts, stops, strict=False):
+            result[mint] = {
+                "time": times[start:stop].copy(),
+                "open": opens[start:stop].copy(),
+                "close": closes[start:stop].copy(),
+                "pool": pools[start:stop].copy(),
+                "pool_label": pool_labels[start:stop].copy(),
+                "graduated": graduated[start:stop].copy(),
+            }
     return result
 
 
@@ -1245,6 +1258,8 @@ def build_trade(
     candidate: Candidate,
     series: dict[str, np.ndarray],
     config: LiveConfig,
+    *,
+    state: ReplayState | None = None,
 ) -> ReplayTrade | None:
     """Simulate current exit precedence with delayed next-bar-close fills.
 
@@ -1257,21 +1272,61 @@ def build_trade(
     can defer hard-stop arming without changing the live exit order.
     """
 
-    entry_index = bisect.bisect_left(
-        series["time"],
-        candidate.scan_time + int(ENTRY_DELAY_SECONDS * 1000),
-    )
+    intended_entry_time = candidate.scan_time + int(ENTRY_DELAY_SECONDS * 1000)
+    entry_index = bisect.bisect_left(series["time"], intended_entry_time)
     entry = bar_at(series, entry_index)
     if entry is None or entry.sol_in_pool is None:
         return None
+    # A gap in bar coverage can land the simulated entry minutes late at an
+    # unrelated price. Reject the candidate when the located bar overshoots the
+    # intended entry time by more than one reportable bar.
+    if entry.time > intended_entry_time + 30_000:
+        if state is not None:
+            state.stale_entry_rejects += 1
+        return None
     entry_price = entry.close
+
+    def make_trade(
+        exit_bar: Bar,
+        reason: str,
+        trigger_price: float | None,
+    ) -> ReplayTrade:
+        exit_pool = exit_bar.sol_in_pool or entry.sol_in_pool
+        return ReplayTrade(
+            mint=candidate.mint,
+            entry_time=entry.time,
+            entry_price=entry_price,
+            exit_time=exit_bar.time,
+            exit_price=exit_bar.close,
+            exit_reason=reason,
+            entry_pool_sol=entry.sol_in_pool,
+            exit_pool_sol=exit_pool,
+            position_size_sol=config.position_size_sol,
+            trigger_price=trigger_price,
+            entry_pool_type=entry.pool_type,
+            exit_pool_type=exit_bar.pool_type,
+            score_at_entry=candidate.strength_score,
+            buy_sell_ratio_at_entry=candidate.buy_sell_ratio_at_entry,
+            age_seconds_at_entry=candidate.age_seconds_at_entry,
+            volume_usd_at_entry=candidate.volume_usd_at_entry,
+            txn_count_at_entry=candidate.txn_count_at_entry,
+            volume_to_mcap_ratio_at_entry=candidate.volume_to_mcap_ratio_at_entry,
+        )
+
     peak = entry_price
     trailing_armed = False
     time_limit = entry.time + int(config.exits["time_stop_minutes"] * 60 * 1000)
+    last_mark: Bar | None = None
     for index in range(entry_index, len(series["time"])):
         mark = bar_at(series, index)
         if mark is None:
             continue
+        if last_mark is not None and mark.time - last_mark.time > 5_000:
+            # A gap means the token stopped producing the five-second archive
+            # bars needed to model the next exit fill. Close at the last known
+            # mark rather than carrying the position through missing data.
+            return make_trade(last_mark, "data_end", None)
+        last_mark = mark
         peak = max(peak, mark.close)
         trailing_armed = trailing_armed or peak / entry_price >= (
             1.0 + config.exits["trailing_arm_pct"] / 100.0
@@ -1292,30 +1347,17 @@ def build_trade(
         if reason is None:
             continue
         exit_bar = bar_at(series, index + 1)
-        if exit_bar is None:
-            return None
-        exit_pool = exit_bar.sol_in_pool or entry.sol_in_pool
-        return ReplayTrade(
-            mint=candidate.mint,
-            entry_time=entry.time,
-            entry_price=entry_price,
-            exit_time=exit_bar.time,
-            exit_price=exit_bar.close,
-            exit_reason=reason,
-            entry_pool_sol=entry.sol_in_pool,
-            exit_pool_sol=exit_pool,
-            position_size_sol=config.position_size_sol,
-            trigger_price=mark.close,
-            entry_pool_type=entry.pool_type,
-            exit_pool_type=exit_bar.pool_type,
-            score_at_entry=candidate.strength_score,
-            buy_sell_ratio_at_entry=candidate.buy_sell_ratio_at_entry,
-            age_seconds_at_entry=candidate.age_seconds_at_entry,
-            volume_usd_at_entry=candidate.volume_usd_at_entry,
-            txn_count_at_entry=candidate.txn_count_at_entry,
-            top_holder_pct_at_entry=candidate.top_holder_pct_at_entry,
-            volume_to_mcap_ratio_at_entry=candidate.volume_to_mcap_ratio_at_entry,
-        )
+        if exit_bar is None or exit_bar.time - mark.time > 5_000:
+            # The trigger landed on the last available bar, so no next-bar close
+            # exists to fill the exit. A coverage gap has the same effect: it
+            # cannot supply a valid next-bar close. Close at the last bar
+            # instead of carrying an unfillable position through missing data.
+            return make_trade(mark, "data_end", None)
+        return make_trade(exit_bar, reason, mark.close)
+    # The series ended before any exit trigger fired. Close at the last observed
+    # bar so the position is not silently discarded.
+    if last_mark is not None:
+        return make_trade(last_mark, "data_end", None)
     return None
 
 
@@ -1324,10 +1366,14 @@ def settle(state: ReplayState, through_time: int) -> None:
     for position in state.positions:
         if position.trade.exit_time <= through_time:
             state.trades.append(position.trade)
-            if position.trade.exit_reason == "hard_stop":
-                state.hard_stop_ban_until[position.mint] = (
+            # The repeat-loser ban applies to any net losing exit, not just the
+            # hard-stop reason, so the re-entry policy is independent of the
+            # hard-stop parameter under test.
+            if position.trade.net_pnl_sol < 0:
+                state.repeat_loser_ban_until[position.mint] = (
                     position.trade.exit_time + REPEAT_LOSER_BAN_SECONDS * 1000
                 )
+                state.repeat_loser_bans += 1
         else:
             active.append(position)
     state.positions = active
@@ -1336,7 +1382,7 @@ def settle(state: ReplayState, through_time: int) -> None:
 def eligible(candidate: Candidate, state: ReplayState) -> bool:
     return not (
         candidate.mint in state.incomplete_mints
-        or candidate.scan_time < state.hard_stop_ban_until.get(candidate.mint, 0)
+        or candidate.scan_time < state.repeat_loser_ban_until.get(candidate.mint, 0)
         or any(position.mint == candidate.mint for position in state.positions)
     )
 
@@ -1359,7 +1405,7 @@ def process_candidates(
         series = bars.get(candidate.mint)
         if series is None:
             continue
-        trade = build_trade(candidate, series, config)
+        trade = build_trade(candidate, series, config, state=state)
         if trade is None:
             state.incomplete_mints.add(candidate.mint)
             continue
@@ -1518,6 +1564,7 @@ def daily_aggregates(
                 "trailing_stop_count": reason_counts["trailing_stop"],
                 "hard_stop_count": reason_counts["hard_stop"],
                 "time_stop_count": reason_counts["time_stop"],
+                "data_end_count": reason_counts["data_end"],
                 "other_exit_count": sum(
                     count for reason, count in reason_counts.items() if reason not in KNOWN_EXIT_REASONS
                 ),
@@ -1564,6 +1611,7 @@ def summary(
         "entries": len(trades),
         "entries_signalled": state.entries_signalled,
         "skipped_capacity": state.skipped_capacity,
+        "stale_entry_rejects": state.stale_entry_rejects,
         "raw_pnl_sol": sum(raw_values),
         "net_pnl_sol": sum(net_values),
         "raw_win_rate_pct": sum(value > 0 for value in raw_values) / len(trades) * 100 if trades else 0.0,
@@ -1620,6 +1668,26 @@ def exit_breakdown(
             },
         )
     return rows
+
+
+def floor_impact(
+    trades: list[ReplayTrade],
+    price_ratio_bound: float | None,
+) -> tuple[int, float]:
+    """Count trades whose capped fill is floored and their net PnL delta vs uncapped."""
+
+    if price_ratio_bound is None:
+        return 0, 0.0
+    count = 0
+    pnl_delta = 0.0
+    for trade in trades:
+        trigger = trade.trigger_price if trade.trigger_price is not None else trade.exit_price
+        if trigger <= 0:
+            continue
+        if trade.exit_price < trigger / price_ratio_bound:
+            count += 1
+            pnl_delta += trade.net_pnl_for_cap(price_ratio_bound) - trade.net_pnl_for_cap(None)
+    return count, pnl_delta
 
 
 def fee_sensitivity(
@@ -1974,8 +2042,9 @@ def build_report(
             "  live quarantines.",
             "- Pool labels approximate V2 first-pool classification: `pool == pump` while not graduated "
             "  is treated as bonding; all other rows are treated as graduated.",
-            "- The V2 24-hour repeat-loser behavior is modeled as the persisted hard-stop ban in "
-            "  `services.strategy`/`services.store`; non-hard-stop losing exits do not create a ban.",
+            "- The V2 24-hour repeat-loser behavior is modeled as a ban applied to any net losing "
+            "  exit, independent of the exit reason, so re-entry policy does not change with the "
+            "  hard-stop parameter under test.",
         ],
     )
     return "\n".join(lines) + "\n"
@@ -2144,7 +2213,6 @@ def write_outputs(
                         "age_seconds_at_entry": trade.age_seconds_at_entry,
                         "volume_usd_at_entry": trade.volume_usd_at_entry,
                         "txn_count_at_entry": trade.txn_count_at_entry,
-                        "top_holder_pct_at_entry": trade.top_holder_pct_at_entry,
                         "pool_type_at_entry": trade.entry_pool_type,
                         "volume_to_mcap_ratio_at_entry": trade.volume_to_mcap_ratio_at_entry,
                     },
@@ -2181,6 +2249,31 @@ def write_outputs(
     }
     (output_dir / "capacity_sweep_bt_v2_feefix_config.json").write_text(
         json.dumps(snapshot, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+    corrections: dict[str, Any] = {}
+    for state in states:
+        corrections[state.scenario] = {
+            "stale_entry_rejects": state.stale_entry_rejects,
+            "repeat_loser_bans": state.repeat_loser_bans,
+            "data_end_count": sum(
+                1 for trade in state.trades if trade.exit_reason == "data_end"
+            ),
+            "data_end_net_pnl_sol": sum(
+                trade.net_pnl_for_cap(None)
+                for trade in state.trades
+                if trade.exit_reason == "data_end"
+            ),
+            "floor_impact": {
+                cap.name: {
+                    "count": floor_impact(state.trades, cap.price_ratio_bound)[0],
+                    "net_pnl_delta_sol": floor_impact(state.trades, cap.price_ratio_bound)[1],
+                }
+                for cap in caps
+            },
+        }
+    (output_dir / "capacity_sweep_bt_v2_feefix_corrections.json").write_text(
+        json.dumps(corrections, indent=2, sort_keys=True) + "\n",
         encoding="utf-8",
     )
     print("\n" + report, flush=True)

@@ -73,10 +73,13 @@ def test_hard_stop_fills_on_next_bar_not_stop_level() -> None:
 
 def test_hard_stop_waits_for_the_configured_delay() -> None:
     series = {
-        "time": np.array([0, 45_000, 50_000, 75_000, 80_000], dtype=np.int64),
-        "open": np.array([1.0, 1.0, 0.91, 0.90, 0.85]),
-        "close": np.array([1.0, 1.0, 0.90, 0.89, 0.84]),
-        "pool": np.array([10.0, 10.0, 10.0, 10.0, 10.0]),
+        "time": np.array(
+            [0, 45_000, 50_000, 55_000, 60_000, 65_000, 70_000, 75_000, 80_000],
+            dtype=np.int64,
+        ),
+        "open": np.array([1.0, 1.0, 0.91, 0.90, 0.90, 0.90, 0.90, 0.90, 0.85]),
+        "close": np.array([1.0, 1.0, 0.90, 0.89, 0.89, 0.89, 0.89, 0.89, 0.84]),
+        "pool": np.array([10.0, 10.0, 10.0, 10.0, 10.0, 10.0, 10.0, 10.0, 10.0]),
     }
     delayed_config = replace(config(), hard_stop_delay_seconds=30)
 
@@ -85,6 +88,129 @@ def test_hard_stop_waits_for_the_configured_delay() -> None:
     assert trade is not None
     assert trade.exit_reason == "hard_stop"
     assert trade.exit_time == 80_000
+
+
+def test_series_end_without_exit_closes_as_data_end() -> None:
+    series = {
+        "time": np.array([0, 45_000, 50_000, 55_000], dtype=np.int64),
+        "open": np.array([1.0, 1.0, 1.0, 1.0]),
+        "close": np.array([1.0, 1.0, 1.0, 1.0]),
+        "pool": np.array([10.0, 10.0, 10.0, 10.0]),
+    }
+    trade = bt.build_trade(bt.Candidate("mint", 0, 1, 90), series, config())
+
+    assert trade is not None
+    assert trade.exit_reason == "data_end"
+    assert trade.exit_time == 55_000
+    assert trade.exit_price == 1.0
+    assert trade.trigger_price is None
+
+
+def test_trigger_on_last_bar_closes_as_data_end() -> None:
+    series = {
+        "time": np.array([0, 45_000, 50_000], dtype=np.int64),
+        "open": np.array([1.0, 1.0, 0.80]),
+        "close": np.array([1.0, 1.0, 0.80]),
+        "pool": np.array([10.0, 10.0, 10.0]),
+    }
+    trade = bt.build_trade(bt.Candidate("mint", 0, 1, 90), series, config())
+
+    assert trade is not None
+    assert trade.exit_reason == "data_end"
+    assert trade.exit_time == 50_000
+    assert trade.exit_price == 0.80
+
+
+def test_bar_coverage_gap_closes_as_data_end() -> None:
+    series = {
+        "time": np.array([0, 45_000, 50_000, 70_000], dtype=np.int64),
+        "open": np.array([1.0, 1.0, 1.0, 1.0]),
+        "close": np.array([1.0, 1.0, 1.0, 1.0]),
+        "pool": np.array([10.0, 10.0, 10.0, 10.0]),
+    }
+    trade = bt.build_trade(bt.Candidate("mint", 0, 1, 90), series, config())
+
+    assert trade is not None
+    assert trade.exit_reason == "data_end"
+    assert trade.exit_time == 50_000
+
+
+def test_exit_fill_gap_closes_as_data_end() -> None:
+    series = {
+        "time": np.array([0, 45_000, 50_000, 70_000], dtype=np.int64),
+        "open": np.array([1.0, 1.0, 0.80, 0.80]),
+        "close": np.array([1.0, 1.0, 0.80, 0.80]),
+        "pool": np.array([10.0, 10.0, 10.0, 10.0]),
+    }
+    trade = bt.build_trade(bt.Candidate("mint", 0, 1, 90), series, config())
+
+    assert trade is not None
+    assert trade.exit_reason == "data_end"
+    assert trade.exit_time == 50_000
+
+
+def test_stale_entry_rejected_when_bar_overshoots() -> None:
+    series = {
+        "time": np.array([0, 100_000, 105_000, 110_000], dtype=np.int64),
+        "open": np.array([1.0, 1.0, 1.0, 1.0]),
+        "close": np.array([1.0, 1.0, 1.0, 1.0]),
+        "pool": np.array([10.0, 10.0, 10.0, 10.0]),
+    }
+    trade = bt.build_trade(bt.Candidate("mint", 0, 1, 90), series, config())
+
+    assert trade is None
+
+
+def test_repeat_loser_ban_applies_to_any_net_losing_exit() -> None:
+    losing = bt.ReplayTrade(
+        mint="loser",
+        entry_time=0,
+        entry_price=1.0,
+        exit_time=5_000,
+        exit_price=0.5,
+        exit_reason="trailing_stop",
+        entry_pool_sol=100.0,
+        exit_pool_sol=100.0,
+        position_size_sol=0.02,
+    )
+    winning = bt.ReplayTrade(
+        mint="winner",
+        entry_time=0,
+        entry_price=1.0,
+        exit_time=5_000,
+        exit_price=2.0,
+        exit_reason="take_profit",
+        entry_pool_sol=100.0,
+        exit_pool_sol=100.0,
+        position_size_sol=0.02,
+    )
+    state = bt.ReplayState("test", max_open=5)
+    state.positions.append(bt.ScheduledPosition("loser", losing))
+    state.positions.append(bt.ScheduledPosition("winner", winning))
+
+    bt.settle(state, 10_000)
+
+    assert losing.net_pnl_sol < 0
+    assert "loser" in state.repeat_loser_ban_until
+    assert "winner" not in state.repeat_loser_ban_until
+
+
+def test_exit_price_cap_has_symmetric_downside_floor() -> None:
+    trade = bt.ReplayTrade(
+        mint="inverse-artifact",
+        entry_time=0,
+        entry_price=1.0,
+        exit_time=5_000,
+        exit_price=0.0001,
+        exit_reason="hard_stop",
+        entry_pool_sol=100.0,
+        exit_pool_sol=100.0,
+        position_size_sol=0.02,
+        trigger_price=1.0,
+    )
+
+    assert trade.exit_price_for_cap(100.0) == pytest.approx(0.01)
+    assert trade.exit_price_for_cap(None) == pytest.approx(0.0001)
 
 
 def test_trade_retains_candidate_entry_characteristics() -> None:
@@ -116,7 +242,6 @@ def test_trade_retains_candidate_entry_characteristics() -> None:
     assert trade.age_seconds_at_entry == 120.0
     assert trade.volume_usd_at_entry == 6_000.0
     assert trade.txn_count_at_entry == 12
-    assert trade.top_holder_pct_at_entry is None
     assert trade.volume_to_mcap_ratio_at_entry == 0.12
     assert trade.entry_pool_type == "bonding"
 
@@ -168,7 +293,6 @@ def test_gate_candidate_captures_entry_characteristics() -> None:
     assert candidate.age_seconds_at_entry == 139.0
     assert candidate.volume_usd_at_entry == 400.0
     assert candidate.txn_count_at_entry == 10
-    assert candidate.top_holder_pct_at_entry is None
     assert candidate.volume_to_mcap_ratio_at_entry == 0.04
     assert (
         bt.candidate_from_row(
@@ -197,13 +321,12 @@ def test_gate_candidate_captures_entry_characteristics() -> None:
 
 
 def test_trade_csv_appends_entry_characteristics() -> None:
-    assert bt.TRADE_CSV_FIELDS[-8:] == (
+    assert bt.TRADE_CSV_FIELDS[-7:] == (
         "score_at_entry",
         "buy_sell_ratio_at_entry",
         "age_seconds_at_entry",
         "volume_usd_at_entry",
         "txn_count_at_entry",
-        "top_holder_pct_at_entry",
         "pool_type_at_entry",
         "volume_to_mcap_ratio_at_entry",
     )
@@ -260,7 +383,7 @@ def test_complete_cli_config_skips_hive_read(
             "--min-volume-usd", "100", "--min-volume-to-mcap-ratio", "0.005",
             "--max-volume-to-mcap-ratio", "50", "--min-buy-sell-ratio", "0.5",
             "--min-pool-sol", "5",
-            "--creator-holdings-max", "0", "--max-top-holder-pct", "100",
+            "--creator-holdings-max", "0",
             "--score-threshold-bonding", "40", "--score-threshold-graduated", "40",
             "--blocked-weekdays", "2", "--blocked-hours-utc", "0", "7", "--max-open", "5",
             "--position-size-sol", "0.02", "--trailing-stop-pct", "2", "--trailing-arm-pct", "2",
@@ -417,9 +540,9 @@ def test_missing_requested_day_skips_without_loading_live_config(
     ) in output
 
 
-def test_hard_stop_ban_expires_after_twenty_four_hours() -> None:
+def test_repeat_loser_ban_expires_after_twenty_four_hours() -> None:
     state = bt.ReplayState("test", max_open=5)
-    state.hard_stop_ban_until["mint"] = 86_400_000
+    state.repeat_loser_ban_until["mint"] = 86_400_000
 
     assert not bt.eligible(bt.Candidate("mint", 86_399_999, 1, 1), state)
     assert bt.eligible(bt.Candidate("mint", 86_400_000, 1, 1), state)
@@ -439,7 +562,7 @@ def test_pool_reserve_bounds_mark_and_costed_liquidation_proceeds() -> None:
     )
 
     assert trade.raw_pnl_sol == pytest.approx(-0.01)
-    assert trade.net_pnl_sol == pytest.approx(-0.022)
+    assert trade.net_pnl_sol == pytest.approx(-0.0204)
 
 
 def test_pool_aware_fees_and_trigger_relative_exit_cap() -> None:
@@ -548,3 +671,68 @@ def test_report_renders_percentages_and_exit_breakdowns() -> None:
     assert "| raw win rate | 100.00% | 100.00% |" in report
     assert "| take_profit | 1 |" in report
     assert "p99.9 cap (2.000000x)" in report
+
+
+def test_floor_impact_counts_floored_trades_and_pnl_delta() -> None:
+    floored = bt.ReplayTrade(
+        mint="inverse-artifact",
+        entry_time=0,
+        entry_price=1.0,
+        exit_time=5_000,
+        exit_price=0.0001,
+        exit_reason="hard_stop",
+        entry_pool_sol=100.0,
+        exit_pool_sol=100.0,
+        position_size_sol=0.02,
+        trigger_price=1.0,
+    )
+    clean = bt.ReplayTrade(
+        mint="clean",
+        entry_time=0,
+        entry_price=1.0,
+        exit_time=5_000,
+        exit_price=1.5,
+        exit_reason="take_profit",
+        entry_pool_sol=100.0,
+        exit_pool_sol=100.0,
+        position_size_sol=0.02,
+        trigger_price=1.2,
+    )
+
+    count, delta = bt.floor_impact([floored, clean], 100.0)
+
+    assert count == 1
+    assert delta > 0
+    assert bt.floor_impact([floored, clean], None) == (0, 0.0)
+
+
+def test_price_ratio_measure_subrange_restricts_measurement(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    enriched = tmp_path / "derived" / "enriched"
+    enriched.mkdir(parents=True)
+    for date in ("2026-04-18", "2026-04-19", "2026-04-20"):
+        (enriched / f"{date}.parquet").touch()
+    captured: dict[str, list[str]] = {}
+
+    def fake_measure(root: Path, measure_dates: list[str]) -> bt.PriceRatioCaps:
+        captured["dates"] = measure_dates
+        return bt.PriceRatioCaps(1.5, 2.0, 10)
+
+    monkeypatch.setattr(bt, "measure_price_ratio_caps", fake_measure)
+    replay_dates = ["2026-04-18", "2026-04-19", "2026-04-20"]
+
+    args = bt.parse_args(
+        ["--price-ratio-measure-start", "2026-04-18", "--price-ratio-measure-end", "2026-04-19"],
+    )
+    caps, reused = bt.price_ratio_caps_from_args(args, tmp_path, replay_dates)
+
+    assert reused is False
+    assert captured["dates"] == ["2026-04-18", "2026-04-19"]
+
+    captured.clear()
+    caps, reused = bt.price_ratio_caps_from_args(bt.parse_args([]), tmp_path, replay_dates)
+
+    assert reused is False
+    assert captured["dates"] == replay_dates
