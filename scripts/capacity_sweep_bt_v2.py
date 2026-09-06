@@ -244,11 +244,10 @@ class ReplayTrade:
 
         if price_ratio_bound is None:
             return self.exit_price
-        trigger = self.trigger_price if self.trigger_price is not None else self.exit_price
-        return max(
-            trigger / price_ratio_bound,
-            min(self.exit_price, trigger * price_ratio_bound),
+        reference_price = (
+            self.trigger_price if self.trigger_price is not None else self.entry_price
         )
+        return min(self.exit_price, reference_price * price_ratio_bound)
 
     def raw_pnl_for_cap(self, price_ratio_bound: float | None) -> float:
         exit_price = self.exit_price_for_cap(price_ratio_bound)
@@ -1670,24 +1669,41 @@ def exit_breakdown(
     return rows
 
 
-def floor_impact(
+def correction_metrics(
     trades: list[ReplayTrade],
     price_ratio_bound: float | None,
-) -> tuple[int, float]:
-    """Count trades whose capped fill is floored and their net PnL delta vs uncapped."""
+) -> dict[str, float | int]:
+    """Report concentration and extreme-print exposure without changing headline PnL."""
 
-    if price_ratio_bound is None:
-        return 0, 0.0
-    count = 0
-    pnl_delta = 0.0
-    for trade in trades:
-        trigger = trade.trigger_price if trade.trigger_price is not None else trade.exit_price
-        if trigger <= 0:
-            continue
-        if trade.exit_price < trigger / price_ratio_bound:
-            count += 1
-            pnl_delta += trade.net_pnl_for_cap(price_ratio_bound) - trade.net_pnl_for_cap(None)
-    return count, pnl_delta
+    values = sorted(
+        (trade.net_pnl_for_cap(price_ratio_bound) for trade in trades),
+        reverse=True,
+    )
+    total_net_pnl = sum(values)
+    top_one_pct_count = math.ceil(len(values) * 0.01)
+    extreme_values = [
+        trade.net_pnl_for_cap(price_ratio_bound)
+        for trade in trades
+        if trade.exit_price_for_cap(price_ratio_bound) / trade.entry_price > 100.0
+    ]
+    data_end_ratios = [
+        trade.exit_price_for_cap(price_ratio_bound) / trade.entry_price
+        for trade in trades
+        if trade.exit_reason == "data_end"
+    ]
+    return {
+        "total_net_pnl_sol": total_net_pnl,
+        "net_pnl_excluding_largest_trade_sol": total_net_pnl - sum(values[:1]),
+        "net_pnl_excluding_top_10_trades_sol": total_net_pnl - sum(values[:10]),
+        "net_pnl_excluding_top_1pct_trades_sol": total_net_pnl - sum(values[:top_one_pct_count]),
+        "exit_entry_ratio_over_100x_count": len(extreme_values),
+        "exit_entry_ratio_over_100x_net_pnl_sol": sum(extreme_values),
+        "max_exit_entry_ratio": max(
+            (trade.exit_price_for_cap(price_ratio_bound) / trade.entry_price for trade in trades),
+            default=0.0,
+        ),
+        "max_data_end_exit_entry_ratio": max(data_end_ratios, default=0.0),
+    }
 
 
 def fee_sensitivity(
@@ -1879,8 +1895,9 @@ def build_report(
             f"| p99.9 close / previous-close ratio | {price_ratios.p999:.6f}x |",
             "",
             "Ratios require the same mint to have valid positive closes exactly five seconds apart. For a triggered "
-            "exit, the capped fill is `min(next_bar_close, trigger_price * bound)`. These are archive-distribution "
-            "bounds, not executable quote guarantees.",
+            "exit, the capped fill is `min(next_bar_close, trigger_price * bound)`. A `data_end` exit has no "
+            "trigger, so its capped fill uses entry_price as the reference. These are archive-distribution bounds, "
+            "not executable quote guarantees.",
             "",
             "## Headline: corrected fees at p99.9 exit cap",
             "",
@@ -2256,18 +2273,17 @@ def write_outputs(
         corrections[state.scenario] = {
             "stale_entry_rejects": state.stale_entry_rejects,
             "repeat_loser_bans": state.repeat_loser_bans,
-            "data_end_count": sum(
-                1 for trade in state.trades if trade.exit_reason == "data_end"
-            ),
-            "data_end_net_pnl_sol": sum(
-                trade.net_pnl_for_cap(None)
-                for trade in state.trades
-                if trade.exit_reason == "data_end"
-            ),
-            "floor_impact": {
+            "caps": {
                 cap.name: {
-                    "count": floor_impact(state.trades, cap.price_ratio_bound)[0],
-                    "net_pnl_delta_sol": floor_impact(state.trades, cap.price_ratio_bound)[1],
+                    **correction_metrics(state.trades, cap.price_ratio_bound),
+                    "data_end_count": sum(
+                        1 for trade in state.trades if trade.exit_reason == "data_end"
+                    ),
+                    "data_end_net_pnl_sol": sum(
+                        trade.net_pnl_for_cap(cap.price_ratio_bound)
+                        for trade in state.trades
+                        if trade.exit_reason == "data_end"
+                    ),
                 }
                 for cap in caps
             },

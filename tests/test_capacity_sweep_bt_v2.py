@@ -195,7 +195,7 @@ def test_repeat_loser_ban_applies_to_any_net_losing_exit() -> None:
     assert "winner" not in state.repeat_loser_ban_until
 
 
-def test_exit_price_cap_has_symmetric_downside_floor() -> None:
+def test_exit_price_cap_is_one_sided_and_uses_entry_for_data_end() -> None:
     trade = bt.ReplayTrade(
         mint="inverse-artifact",
         entry_time=0,
@@ -208,9 +208,22 @@ def test_exit_price_cap_has_symmetric_downside_floor() -> None:
         position_size_sol=0.02,
         trigger_price=1.0,
     )
+    data_end = bt.ReplayTrade(
+        mint="data-end-artifact",
+        entry_time=0,
+        entry_price=1.0,
+        exit_time=5_000,
+        exit_price=1_000_000.0,
+        exit_reason="data_end",
+        entry_pool_sol=100.0,
+        exit_pool_sol=100.0,
+        position_size_sol=0.02,
+    )
 
-    assert trade.exit_price_for_cap(100.0) == pytest.approx(0.01)
+    assert trade.exit_price_for_cap(100.0) == pytest.approx(0.0001)
     assert trade.exit_price_for_cap(None) == pytest.approx(0.0001)
+    assert data_end.exit_price_for_cap(2.0) == pytest.approx(2.0)
+    assert data_end.exit_price_for_cap(None) == pytest.approx(1_000_000.0)
 
 
 def test_trade_retains_candidate_entry_characteristics() -> None:
@@ -673,37 +686,32 @@ def test_report_renders_percentages_and_exit_breakdowns() -> None:
     assert "p99.9 cap (2.000000x)" in report
 
 
-def test_floor_impact_counts_floored_trades_and_pnl_delta() -> None:
-    floored = bt.ReplayTrade(
-        mint="inverse-artifact",
-        entry_time=0,
-        entry_price=1.0,
-        exit_time=5_000,
-        exit_price=0.0001,
-        exit_reason="hard_stop",
-        entry_pool_sol=100.0,
-        exit_pool_sol=100.0,
-        position_size_sol=0.02,
-        trigger_price=1.0,
-    )
-    clean = bt.ReplayTrade(
-        mint="clean",
-        entry_time=0,
-        entry_price=1.0,
-        exit_time=5_000,
-        exit_price=1.5,
-        exit_reason="take_profit",
-        entry_pool_sol=100.0,
-        exit_pool_sol=100.0,
-        position_size_sol=0.02,
-        trigger_price=1.2,
-    )
+def test_correction_metrics_reports_pnl_concentration_and_extreme_prints() -> None:
+    trades = [
+        bt.ReplayTrade(
+            mint=f"trade-{index}",
+            entry_time=0,
+            entry_price=1.0,
+            exit_time=5_000,
+            exit_price=exit_price,
+            exit_reason="data_end" if index == 0 else "take_profit",
+            entry_pool_sol=10_000.0,
+            exit_pool_sol=10_000.0,
+            position_size_sol=0.02,
+        )
+        for index, exit_price in enumerate((1_000.0, 4.0, 3.0, 2.0, 0.5))
+    ]
 
-    count, delta = bt.floor_impact([floored, clean], 100.0)
+    metrics = bt.correction_metrics(trades, 2.0)
+    uncapped = bt.correction_metrics(trades, None)
 
-    assert count == 1
-    assert delta > 0
-    assert bt.floor_impact([floored, clean], None) == (0, 0.0)
+    assert metrics["max_data_end_exit_entry_ratio"] == pytest.approx(2.0)
+    assert metrics["max_exit_entry_ratio"] == pytest.approx(2.0)
+    assert metrics["exit_entry_ratio_over_100x_count"] == 0
+    assert uncapped["exit_entry_ratio_over_100x_count"] == 1
+    assert uncapped["net_pnl_excluding_largest_trade_sol"] < uncapped["total_net_pnl_sol"]
+    assert uncapped["net_pnl_excluding_top_10_trades_sol"] == pytest.approx(0.0)
+    assert uncapped["net_pnl_excluding_top_1pct_trades_sol"] < uncapped["total_net_pnl_sol"]
 
 
 def test_price_ratio_measure_subrange_restricts_measurement(
