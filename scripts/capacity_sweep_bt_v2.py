@@ -100,6 +100,9 @@ TRADE_CSV_FIELDS = (
     "txn_count_at_entry",
     "pool_type_at_entry",
     "volume_to_mcap_ratio_at_entry",
+    "unbounded_position_size_sol",
+    "realized_position_size_sol",
+    "position_size_clamp",
 )
 
 # Keep the detached replay well below the WSL VM ceiling. DuckDB spills to the
@@ -161,6 +164,8 @@ class LiveConfig:
     captured_at: str
     hard_stop_delay_seconds: float = 0.0
     overrides: dict[str, str] = field(default_factory=dict)
+    position_pct_of_pool: float | None = None
+    prune_invalid_trades: bool = False
 
     def number(self, name: str) -> float:
         value = self.gates[name]
@@ -238,6 +243,8 @@ class ReplayTrade:
     volume_usd_at_entry: float | None = None
     txn_count_at_entry: int | None = None
     volume_to_mcap_ratio_at_entry: float | None = None
+    unbounded_position_size_sol: float | None = None
+    position_size_clamp: str = "none"
 
     def exit_price_for_cap(self, price_ratio_bound: float | None) -> float:
         """Return the next-bar fill limited by a trigger-relative archive bound."""
@@ -318,6 +325,8 @@ class ReplayState:
     skipped_capacity: int = 0
     stale_entry_rejects: int = 0
     repeat_loser_bans: int = 0
+    invalid_pruned_trades: int = 0
+    invalid_pruned_reasons: Counter[str] = field(default_factory=Counter)
 
 
 @dataclass(slots=True)
@@ -365,6 +374,16 @@ class VisibilityModel:
             ((rng.random() ** (1.0 / weight), mint) for mint, weight in weighted_mints),
         )
         return [mint for _, mint in choices]
+
+    def prune_before_scan(self, current_scan_time: int, max_age_seconds: float) -> None:
+        """Discard discoveries too old to be candidates at the next day boundary."""
+
+        cutoff = current_scan_time - int(max_age_seconds * 1000)
+        self.discovered_at = {
+            mint: discovered_at
+            for mint, discovered_at in self.discovered_at.items()
+            if discovered_at >= cutoff
+        }
 
     def simulate_day(
         self,
@@ -471,6 +490,16 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--blocked-hours-utc", type=int, nargs="*")
     parser.add_argument("--max-open", type=int)
     parser.add_argument("--position-size-sol", type=float)
+    parser.add_argument(
+        "--position-pct-of-pool",
+        type=float,
+        help="Entry position as a fraction of the entry-bar SOL pool; clamps to 0.01-2 SOL.",
+    )
+    parser.add_argument(
+        "--prune-invalid-trades",
+        action="store_true",
+        help="Exclude only impossible-quantity and implausible-trigger fills from reporting.",
+    )
     parser.add_argument("--hard-stop-pct", type=float)
     parser.add_argument("--trailing-stop-pct", type=float)
     parser.add_argument("--trailing-arm-pct", type=float)
@@ -591,6 +620,12 @@ def apply_cli_overrides(config: LiveConfig, args: argparse.Namespace) -> LiveCon
             exits[exit_name] = value
             overrides[exit_name] = f"--{option.replace('_', '-')}"
 
+    position_pct_of_pool: float | None = None
+    if args.position_pct_of_pool is not None:
+        position_pct_of_pool = positive_number(args.position_pct_of_pool)
+        if position_pct_of_pool is None:
+            raise ValueError("--position-pct-of-pool must be a positive finite number")
+        overrides["position_pct_of_pool"] = "--position-pct-of-pool"
     if args.position_size_sol is not None:
         value = positive_number(args.position_size_sol)
         if value is None:
@@ -619,6 +654,8 @@ def apply_cli_overrides(config: LiveConfig, args: argparse.Namespace) -> LiveCon
         captured_at=config.captured_at,
         hard_stop_delay_seconds=hard_stop_delay_seconds,
         overrides=overrides,
+        position_pct_of_pool=position_pct_of_pool,
+        prune_invalid_trades=args.prune_invalid_trades,
     )
 
 
@@ -646,7 +683,7 @@ def replay_header(
     overrides_text = ", ".join(cli_overrides) if cli_overrides else "none"
     return (
         f"Replaying {len(dates)} complete day(s): {dates[0]} through {dates[-1]} "
-        f"with position_size={config.position_size_sol:g} SOL max_open={config.max_open}; "
+        f"with position_size={'entry_pool_sol * ' + format(config.position_pct_of_pool, 'g') if config.position_pct_of_pool is not None else format(config.position_size_sol, 'g') + ' SOL'} max_open={config.max_open}; "
         f"effective mcap_floor={config.number('mcap_floor'):g} "
         f"min_pool_sol_bonding={config.number('min_pool_sol_bonding'):g} "
         f"min_pool_sol_graduated={config.number('min_pool_sol_graduated'):g} "
@@ -827,6 +864,8 @@ def missing_cli_config_args(args: argparse.Namespace) -> list[str]:
         "--take-profit-pct": args.take_profit_pct,
         "--time-stop-minutes": args.time_stop_minutes,
     }
+    if args.position_pct_of_pool is not None:
+        required.pop("--position-size-sol")
     return [option for option, value in required.items() if value is None]
 
 
@@ -836,7 +875,7 @@ def config_from_cli(args: argparse.Namespace) -> LiveConfig:
     missing = missing_cli_config_args(args)
     if missing:
         raise ValueError("Cannot build CLI-only config; missing " + ", ".join(missing))
-    assert args.position_size_sol is not None
+    assert args.position_size_sol is not None or args.position_pct_of_pool is not None
     assert args.max_open is not None
     gates = {
         "mcap_floor": args.mcap_floor,
@@ -869,7 +908,7 @@ def config_from_cli(args: argparse.Namespace) -> LiveConfig:
         LiveConfig(
             gates=gates,
             exits=exits,
-            position_size_sol=args.position_size_sol,
+            position_size_sol=args.position_size_sol or 0.0,
             max_open=args.max_open,
             captured_at=datetime.now(UTC).isoformat(),
         ),
@@ -1284,6 +1323,16 @@ def build_trade(
             state.stale_entry_rejects += 1
         return None
     entry_price = entry.close
+    if config.position_pct_of_pool is None:
+        unbounded_position_size_sol = config.position_size_sol
+        position_size_sol = config.position_size_sol
+        position_size_clamp = "none"
+    else:
+        unbounded_position_size_sol = entry.sol_in_pool * config.position_pct_of_pool
+        position_size_sol = min(max(unbounded_position_size_sol, 0.01), 2.0)
+        position_size_clamp = (
+            "min" if position_size_sol == 0.01 else "max" if position_size_sol == 2.0 else "none"
+        )
 
     def make_trade(
         exit_bar: Bar,
@@ -1300,7 +1349,7 @@ def build_trade(
             exit_reason=reason,
             entry_pool_sol=entry.sol_in_pool,
             exit_pool_sol=exit_pool,
-            position_size_sol=config.position_size_sol,
+            position_size_sol=position_size_sol,
             trigger_price=trigger_price,
             entry_pool_type=entry.pool_type,
             exit_pool_type=exit_bar.pool_type,
@@ -1310,6 +1359,8 @@ def build_trade(
             volume_usd_at_entry=candidate.volume_usd_at_entry,
             txn_count_at_entry=candidate.txn_count_at_entry,
             volume_to_mcap_ratio_at_entry=candidate.volume_to_mcap_ratio_at_entry,
+            unbounded_position_size_sol=unbounded_position_size_sol,
+            position_size_clamp=position_size_clamp,
         )
 
     peak = entry_price
@@ -1412,6 +1463,31 @@ def process_candidates(
         state.entries_signalled += 1
 
 
+def invalid_trade_reasons(trade: ReplayTrade) -> tuple[str, ...]:
+    """Return the two market-state invalidity criteria permitted for this replay."""
+
+    reasons = []
+    if trade.position_size_sol / trade.entry_price > 1e15:
+        reasons.append("impossible_quantity")
+    if trade.trigger_price is not None and trade.trigger_price > trade.entry_price * 10:
+        reasons.append("implausible_trigger")
+    return tuple(reasons)
+
+
+def prune_invalid_trades(state: ReplayState) -> None:
+    """Remove invalid fills from reporting while retaining their historical capacity path."""
+
+    retained: list[ReplayTrade] = []
+    for trade in state.trades:
+        reasons = invalid_trade_reasons(trade)
+        if reasons:
+            state.invalid_pruned_trades += 1
+            state.invalid_pruned_reasons.update(reasons)
+        else:
+            retained.append(trade)
+    state.trades = retained
+
+
 def replay(
     *,
     dates: list[str],
@@ -1439,6 +1515,12 @@ def replay(
             sol_usd = sol_prices.get(replay_date)
             if sol_usd is None:
                 raise RuntimeError(f"No SOL/USD price available for {replay_date}")
+            # Discovery has no value beyond the candidate age window. Prune once
+            # at each date boundary, not for every five-second scan.
+            day_start = int(
+                datetime.fromisoformat(replay_date).replace(tzinfo=UTC).timestamp() * 1000
+            )
+            visibility.prune_before_scan(day_start, config.number("max_age_seconds"))
             # One cumulative-window query feeds both MT-613 discovery and V2
             # gate evaluation. Keeping the rows for one day avoids a second
             # expensive full-day parquet scan without exposing future bars.
@@ -1522,6 +1604,9 @@ def replay(
         connection.close()
     settle(perfect, math.inf)
     settle(realistic, math.inf)
+    if config.prune_invalid_trades:
+        prune_invalid_trades(perfect)
+        prune_invalid_trades(realistic)
     return perfect, realistic, visibility
 
 
@@ -2232,6 +2317,9 @@ def write_outputs(
                         "txn_count_at_entry": trade.txn_count_at_entry,
                         "pool_type_at_entry": trade.entry_pool_type,
                         "volume_to_mcap_ratio_at_entry": trade.volume_to_mcap_ratio_at_entry,
+                        "unbounded_position_size_sol": trade.unbounded_position_size_sol,
+                        "realized_position_size_sol": trade.position_size_sol,
+                        "position_size_clamp": trade.position_size_clamp,
                     },
                 )
     with (output_dir / "capacity_sweep_bt_v2_feefix_visibility.csv").open(
@@ -2249,6 +2337,8 @@ def write_outputs(
         "gates": config.gates,
         "exits": config.exits,
         "position_size_sol": config.position_size_sol,
+        "position_pct_of_pool": config.position_pct_of_pool,
+        "prune_invalid_trades": config.prune_invalid_trades,
         "max_open": config.max_open,
         "hard_stop_delay_seconds": config.hard_stop_delay_seconds,
         "cli_overrides": config.overrides,
@@ -2273,6 +2363,8 @@ def write_outputs(
         corrections[state.scenario] = {
             "stale_entry_rejects": state.stale_entry_rejects,
             "repeat_loser_bans": state.repeat_loser_bans,
+            "invalid_pruned_trades": state.invalid_pruned_trades,
+            "invalid_pruned_reasons": dict(state.invalid_pruned_reasons),
             "caps": {
                 cap.name: {
                     **correction_metrics(state.trades, cap.price_ratio_bound),

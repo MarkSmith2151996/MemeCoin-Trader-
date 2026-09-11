@@ -206,7 +206,9 @@ def file_path(root: Path, entry: dict[str, Any]) -> Path:
 
 
 def ensure_free_space(root: Path, entries: list[dict[str, Any]], completed: set[str]) -> None:
-    unknown_pending = [entry for entry in entries if entry["key"] not in completed and "size" not in entry]
+    unknown_pending = [
+        entry for entry in entries if entry["key"] not in completed and "size" not in entry
+    ]
     if unknown_pending:
         return
     pending_bytes = sum(entry["size"] for entry in entries if entry["key"] not in completed)
@@ -225,7 +227,11 @@ async def download_entry(
     temporary = destination.with_suffix(f"{destination.suffix}.part")
     destination.parent.mkdir(parents=True, exist_ok=True)
     expected_size = entry.get("size")
-    if expected_size is not None and destination.exists() and destination.stat().st_size == expected_size:
+    if (
+        expected_size is not None
+        and destination.exists()
+        and destination.stat().st_size == expected_size
+    ):
         return entry["size"]
     temporary.unlink(missing_ok=True)
     for attempt in range(MAX_RETRIES):
@@ -274,7 +280,8 @@ async def download_manifest(
     save_completed(state_path, completed)
     ensure_free_space(root, entries, completed)
     pending = [entry for entry in entries if entry["key"] not in completed]
-    total_bytes = sum(entry.get("size", 0) for entry in entries)
+    all_sizes_known = all("size" in entry for entry in entries)
+    total_bytes = sum(entry["size"] for entry in entries) if all_sizes_known else 0
     completed_bytes = sum(entry.get("size", 0) for entry in entries if entry["key"] in completed)
     started = time.monotonic()
     logger.info("Starting %d pending downloads with concurrency %d", len(pending), concurrency)
@@ -305,7 +312,8 @@ async def download_manifest(
                 entry["key"],
                 result / 1_000_000,
                 (
-                    f" - {completed_bytes / total_bytes * 100:.1f}% complete - est {remaining / 3600:.1f}h remaining"
+                    f" - {completed_bytes / total_bytes * 100:.1f}% complete"
+                    f" - est {remaining / 3600:.1f}h remaining"
                     if total_bytes
                     else " - size unknown",
                 ),

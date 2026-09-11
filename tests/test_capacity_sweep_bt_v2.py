@@ -334,7 +334,7 @@ def test_gate_candidate_captures_entry_characteristics() -> None:
 
 
 def test_trade_csv_appends_entry_characteristics() -> None:
-    assert bt.TRADE_CSV_FIELDS[-7:] == (
+    assert bt.TRADE_CSV_FIELDS[-10:] == (
         "score_at_entry",
         "buy_sell_ratio_at_entry",
         "age_seconds_at_entry",
@@ -342,6 +342,9 @@ def test_trade_csv_appends_entry_characteristics() -> None:
         "txn_count_at_entry",
         "pool_type_at_entry",
         "volume_to_mcap_ratio_at_entry",
+        "unbounded_position_size_sol",
+        "realized_position_size_sol",
+        "position_size_clamp",
     )
 
 
@@ -410,6 +413,28 @@ def test_complete_cli_config_skips_hive_read(
     assert effective.max_open == 5
     assert effective.gates["blocked_hours_utc"] == [0, 7]
     assert "All config provided via CLI - skipping Hive read" in capsys.readouterr().out
+
+
+def test_pool_percentage_replaces_flat_size_for_complete_cli_config() -> None:
+    args = bt.parse_args(
+        [
+            "--mcap-floor", "5100", "--mcap-ceiling", "50000", "--min-age-seconds", "0",
+            "--max-age-seconds", "1320", "--age-offset-seconds", "39",
+            "--txn-count-adjustment", "1", "--min-volume-usd", "100",
+            "--min-volume-to-mcap-ratio", "0.005", "--max-volume-to-mcap-ratio", "50",
+            "--min-buy-sell-ratio", "0.5", "--min-pool-sol", "5",
+            "--creator-holdings-max", "0", "--score-threshold-bonding", "40",
+            "--score-threshold-graduated", "40", "--blocked-weekdays", "2",
+            "--blocked-hours-utc", "0", "--max-open", "5", "--position-pct-of-pool", "0.005",
+            "--trailing-stop-pct", "2", "--trailing-arm-pct", "2", "--hard-stop-pct", "8",
+            "--take-profit-pct", "150", "--time-stop-minutes", "10",
+        ],
+    )
+
+    effective = bt.config_from_cli(args)
+
+    assert effective.position_pct_of_pool == pytest.approx(0.005)
+    assert effective.position_size_sol == 0.0
 
 
 def test_partial_cli_config_without_hive_dsn_lists_missing_args(
@@ -607,6 +632,60 @@ def test_visibility_sampler_returns_distinct_weighted_mints() -> None:
 
     assert len(sample) == bt.POLL_SIZE
     assert len(set(sample)) == bt.POLL_SIZE
+
+
+def test_visibility_prunes_discoveries_outside_the_candidate_age_window() -> None:
+    visibility = bt.VisibilityModel()
+    visibility.discovered_at = {"stale": 0, "boundary": 680_000, "fresh": 700_000}
+
+    visibility.prune_before_scan(2_000_000, 1_320)
+
+    assert visibility.discovered_at == {"boundary": 680_000, "fresh": 700_000}
+
+
+def test_pool_proportional_position_size_clamps_and_is_auditable() -> None:
+    proportional = replace(config(), position_pct_of_pool=0.01)
+    series = {
+        "time": np.array([0, 45_000, 50_000, 55_000], dtype=np.int64),
+        "open": np.array([1.0, 1.0, 1.0, 1.0]),
+        "close": np.array([1.0, 1.0, 1.0, 1.0]),
+        "pool": np.array([10.0, 10.0, 10.0, 10.0]),
+    }
+
+    trade = bt.build_trade(bt.Candidate("mint", 0, 1, 90), series, proportional)
+
+    assert trade is not None
+    assert trade.unbounded_position_size_sol == pytest.approx(0.1)
+    assert trade.position_size_sol == pytest.approx(0.1)
+    assert trade.position_size_clamp == "none"
+
+    min_trade = bt.build_trade(
+        bt.Candidate("mint", 0, 1, 90),
+        {**series, "pool": np.array([0.5, 0.5, 0.5, 0.5])},
+        proportional,
+    )
+    assert min_trade is not None
+    assert min_trade.position_size_sol == pytest.approx(0.01)
+    assert min_trade.position_size_clamp == "min"
+
+
+def test_invalid_trade_pruning_uses_only_the_two_permitted_criteria() -> None:
+    valid_rug = bt.ReplayTrade(
+        mint="rug", entry_time=0, entry_price=1.0, exit_time=5_000, exit_price=0.01,
+        exit_reason="hard_stop", entry_pool_sol=100.0, exit_pool_sol=0.001, position_size_sol=0.02,
+    )
+    invalid_quantity = replace(valid_rug, mint="quantity", entry_price=1e-18)
+    invalid_trigger = replace(valid_rug, mint="trigger", trigger_price=10.01)
+    state = bt.ReplayState("test", 5, trades=[valid_rug, invalid_quantity, invalid_trigger])
+
+    bt.prune_invalid_trades(state)
+
+    assert state.trades == [valid_rug]
+    assert state.invalid_pruned_trades == 2
+    assert state.invalid_pruned_reasons == {
+        "impossible_quantity": 1,
+        "implausible_trigger": 1,
+    }
 
 
 def test_backtest_priority_fee_proxy_uses_conservative_floor() -> None:
