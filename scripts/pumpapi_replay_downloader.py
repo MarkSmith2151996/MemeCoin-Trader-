@@ -121,19 +121,14 @@ async def head_entry(
                 async with session.head(archive_hour.url, allow_redirects=True) as response:
                     if response.status == 200:
                         content_length = response.headers.get("Content-Length")
-                        if content_length is None or not content_length.isdigit():
-                            return {
-                                "key": archive_hour.key,
-                                "url": archive_hour.url,
-                                "status": "error",
-                                "error": "missing_or_invalid_content_length",
-                            }
-                        return {
+                        entry: dict[str, Any] = {
                             "key": archive_hour.key,
                             "url": archive_hour.url,
                             "status": "available",
-                            "size": int(content_length),
                         }
+                        if content_length is not None and content_length.isdigit():
+                            entry["size"] = int(content_length)
+                        return entry
                     if response.status == 404:
                         return {
                             "key": archive_hour.key,
@@ -189,13 +184,15 @@ async def build_manifest(
         "entries": entries,
     }
     atomic_write_json(root / "manifest.json", manifest)
-    total_bytes = sum(entry["size"] for entry in available)
+    known_sizes = [entry["size"] for entry in available if "size" in entry]
+    total_bytes = sum(known_sizes)
     logger.info(
-        "Manifest saved: %d available, %d missing, %d errors, %.2f TB expected",
+        "Manifest saved: %d available, %d missing, %d errors, %.2f TB declared across %d files",
         len(available),
         len(missing),
         len(errors),
         total_bytes / 1_000_000_000_000,
+        len(known_sizes),
     )
     return manifest
 
@@ -209,6 +206,9 @@ def file_path(root: Path, entry: dict[str, Any]) -> Path:
 
 
 def ensure_free_space(root: Path, entries: list[dict[str, Any]], completed: set[str]) -> None:
+    unknown_pending = [entry for entry in entries if entry["key"] not in completed and "size" not in entry]
+    if unknown_pending:
+        return
     pending_bytes = sum(entry["size"] for entry in entries if entry["key"] not in completed)
     free_bytes = shutil.disk_usage(root).free
     if pending_bytes > free_bytes:
@@ -224,7 +224,8 @@ async def download_entry(
     destination = file_path(root, entry)
     temporary = destination.with_suffix(f"{destination.suffix}.part")
     destination.parent.mkdir(parents=True, exist_ok=True)
-    if destination.exists() and destination.stat().st_size == entry["size"]:
+    expected_size = entry.get("size")
+    if expected_size is not None and destination.exists() and destination.stat().st_size == expected_size:
         return entry["size"]
     temporary.unlink(missing_ok=True)
     for attempt in range(MAX_RETRIES):
@@ -239,8 +240,8 @@ async def download_entry(
                     async for chunk in response.content.iter_chunked(CHUNK_SIZE):
                         output.write(chunk)
             actual_size = temporary.stat().st_size
-            if actual_size != entry["size"]:
-                raise RuntimeError(f"size mismatch: expected {entry['size']}, got {actual_size}")
+            if expected_size is not None and actual_size != expected_size:
+                raise RuntimeError(f"size mismatch: expected {expected_size}, got {actual_size}")
             os.replace(temporary, destination)
             return actual_size
         except (TimeoutError, OSError, RuntimeError, aiohttp.ClientError) as exc:
@@ -268,13 +269,13 @@ async def download_manifest(
     entries = expected_entries(manifest)
     for entry in entries:
         destination = file_path(root, entry)
-        if destination.exists() and destination.stat().st_size == entry["size"]:
+        if "size" in entry and destination.exists() and destination.stat().st_size == entry["size"]:
             completed.add(entry["key"])
     save_completed(state_path, completed)
     ensure_free_space(root, entries, completed)
     pending = [entry for entry in entries if entry["key"] not in completed]
-    total_bytes = sum(entry["size"] for entry in entries)
-    completed_bytes = sum(entry["size"] for entry in entries if entry["key"] in completed)
+    total_bytes = sum(entry.get("size", 0) for entry in entries)
+    completed_bytes = sum(entry.get("size", 0) for entry in entries if entry["key"] in completed)
     started = time.monotonic()
     logger.info("Starting %d pending downloads with concurrency %d", len(pending), concurrency)
 
@@ -292,19 +293,22 @@ async def download_manifest(
                 logger.error("Download failed: %s", result)
                 continue
             completed.add(entry["key"])
-            completed_bytes += result
+            completed_bytes += entry.get("size", result)
             save_completed(state_path, completed)
             elapsed = max(time.monotonic() - started, 0.001)
             rate = max(completed_bytes / elapsed, 1)
             remaining = max(total_bytes - completed_bytes, 0) / rate
             logger.info(
-                "[%d/%d] %s - %.2f MB - %.1f%% complete - est %.1fh remaining",
+                "[%d/%d] %s - %.2f MB%s",
                 len(completed),
                 len(entries),
                 entry["key"],
                 result / 1_000_000,
-                completed_bytes / total_bytes * 100 if total_bytes else 100,
-                remaining / 3600,
+                (
+                    f" - {completed_bytes / total_bytes * 100:.1f}% complete - est {remaining / 3600:.1f}h remaining"
+                    if total_bytes
+                    else " - size unknown",
+                ),
             )
 
 
@@ -358,9 +362,9 @@ async def run(args: argparse.Namespace) -> None:
             completed = load_completed(root / "download_state.json")
             if all(entry["key"] in completed for entry in entries):
                 validate_sample(root, entries, logger)
-                total_bytes = sum(entry["size"] for entry in entries)
+                total_bytes = sum(entry.get("size", 0) for entry in entries)
                 logger.info(
-                    "Download complete - %d hours, %.2f TB total",
+                    "Download complete - %d hours, %.2f TB declared",
                     len(entries),
                     total_bytes / 1_000_000_000_000,
                 )
