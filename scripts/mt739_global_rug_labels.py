@@ -20,7 +20,7 @@ START = "2026-04-18"
 END = "2026-08-21"
 WINDOW_START = "2026-07-22"
 WINDOW_END = "2026-08-21"
-MIN_AVAILABLE_RAM_BYTES = 8_000_000_000
+MIN_AVAILABLE_RAM_BYTES = 3_000_000_000
 
 
 def date_range(start: str, end: str) -> list[str]:
