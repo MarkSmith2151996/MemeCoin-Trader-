@@ -1,0 +1,19 @@
+{
+  "entries": [
+    {
+      "entry_count": 24860,
+      "headline_pnl_sol": -12.727174,
+      "missing_trade_log": "/home/dev/workspace/data/results/mt728/",
+      "name": "mt728_rug_aware_p99_realistic_flat_0.02_jul22_aug21",
+      "status": "placeholder_missing_artifact"
+    },
+    {
+      "entry_count": 29982,
+      "headline_pnl_sol": 14.960984,
+      "missing_trade_log": "/home/dev/workspace/data/results/mt729/",
+      "name": "mt729_rug_blind_p99_realistic_flat_0.02_jul22_aug21",
+      "status": "superseded_placeholder_missing_artifact"
+    }
+  ],
+  "version": 1
+}
