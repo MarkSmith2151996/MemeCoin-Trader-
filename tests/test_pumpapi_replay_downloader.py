@@ -82,3 +82,12 @@ def test_head_error_remains_a_download_candidate() -> None:
         "2026/08/22/00",
         "2026/08/22/01",
     ]
+
+
+def test_prune_stale_completion_removes_missing_archives(tmp_path: Path) -> None:
+    entry = {"key": "2026/08/22/00"}
+    state = {"completed": {entry["key"]: {"size": 4, "validated": True}}, "failed": {}}
+
+    downloader.prune_stale_completion(tmp_path, [entry], state)
+
+    assert state["completed"] == {}

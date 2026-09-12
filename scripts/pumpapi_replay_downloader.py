@@ -343,6 +343,12 @@ def register_existing(root: Path, entries: list[dict[str, Any]], state: dict[str
         state["completed"][entry["key"]] = {"size": expected_size, "validated": True}
 
 
+def prune_stale_completion(root: Path, entries: list[dict[str, Any]], state: dict[str, Any]) -> None:
+    for entry in entries:
+        if entry["key"] in state["completed"] and not completed_on_disk(root, entry, state):
+            state["completed"].pop(entry["key"])
+
+
 def ensure_initial_free_space(root: Path, minimum_gb: float) -> int:
     free_bytes = shutil.disk_usage(root).free
     if free_bytes < minimum_gb * 1_000_000_000:
@@ -404,10 +410,12 @@ async def download_entry(
     raise AssertionError("unreachable")
 
 
-def incomplete_hours(entries: list[dict[str, Any]], state: dict[str, Any]) -> dict[str, list[str]]:
+def incomplete_hours(
+    root: Path, entries: list[dict[str, Any]], state: dict[str, Any]
+) -> dict[str, list[str]]:
     missing: dict[str, list[str]] = defaultdict(list)
     for entry in entries:
-        if entry["key"] not in state["completed"]:
+        if not completed_on_disk(root, entry, state):
             day, hour = entry["key"].rsplit("/", 1)
             missing[day].append(hour)
     return dict(missing)
@@ -464,6 +472,7 @@ async def download_day(
 
 def write_report(
     path: Path,
+    root: Path,
     hours: list[ArchiveHour],
     entries: list[dict[str, Any]],
     state: dict[str, Any],
@@ -472,8 +481,12 @@ def write_report(
     concurrency: int,
 ) -> None:
     elapsed = max(time.monotonic() - stats.started_at, 0.001)
-    incomplete = incomplete_hours(entries, state)
-    completed_bytes = sum(record["size"] for record in state["completed"].values())
+    incomplete = incomplete_hours(root, entries, state)
+    completed_bytes = sum(
+        state["completed"][entry["key"]]["size"]
+        for entry in entries
+        if completed_on_disk(root, entry, state)
+    )
     lines = [
         "# MT-748 PumpAPI Raw Download",
         "",
@@ -548,6 +561,7 @@ async def run(args: argparse.Namespace) -> int:
         entries = downloadable_entries(manifest)
         state = load_state(state_path)
         register_existing(root, entries, state)
+        prune_stale_completion(root, required_entries, state)
         save_state(state_path, state)
         if args.manifest_only:
             logger.info("Manifest ready for %d available objects", len(entries))
@@ -583,7 +597,11 @@ async def run(args: argparse.Namespace) -> int:
                     all(completed_on_disk(root, entry, state) for entry in entries_for_day)
                     for entries_for_day in by_day.values()
                 )
-                completed_bytes = sum(record["size"] for record in state["completed"].values())
+                completed_bytes = sum(
+                    state["completed"][entry["key"]]["size"]
+                    for entry in required_entries
+                    if completed_on_disk(root, entry, state)
+                )
                 projected_total = completed_bytes / complete_days * len(by_day)
                 if projected_total - completed_bytes > free_bytes - args.stop_free_gb * 1e9:
                     stats.stopped_reason = (
@@ -603,6 +621,7 @@ async def run(args: argparse.Namespace) -> int:
     if args.report_path:
         write_report(
             args.report_path,
+            root,
             hours,
             required_entries,
             state,
@@ -610,7 +629,7 @@ async def run(args: argparse.Namespace) -> int:
             final_free_bytes,
             args.concurrency,
         )
-    incomplete = incomplete_hours(required_entries, state)
+    incomplete = incomplete_hours(root, required_entries, state)
     logger.info("Finished: %d complete, %d incomplete", len(state["completed"]), sum(map(len, incomplete.values())))
     return 0 if not stats.stopped_reason and not incomplete else 2
 
