@@ -9,6 +9,7 @@ enriched archive and writes task-local outputs.
 from __future__ import annotations
 
 import csv
+import hashlib
 import math
 import random
 from collections import Counter, defaultdict
@@ -29,7 +30,7 @@ START = date(2026, 4, 18)
 END = date(2026, 5, 19)  # Exclusive: never read May 19 or later.
 FIXED_ENTRY_AGE_MS = 120_000
 MARK_TOLERANCE_MS = 30_000
-END_TO_END_DELAY_MS = 1_000
+LATENCIES_MS = (500, 1_000, 2_000)
 POSITION_SOL = Decimal("0.5")
 MAX_OPEN = 5
 HOLDS_MS = (30_000, 60_000, 120_000, 300_000, 1_200_000)
@@ -83,6 +84,12 @@ def finite(value: Any) -> float | None:
     return number if math.isfinite(number) else None
 
 
+def decision_phase_ms(mint: str, bar_time: int) -> int:
+    """Assign a reproducible non-edge phase within a five-second aggregate bar."""
+    digest = hashlib.sha256(f"{mint}:{bar_time}:MT-769".encode("ascii")).digest()
+    return 1 + int.from_bytes(digest[:8], "big") % 4_999
+
+
 def load_signals(paths: list[Path]) -> list[dict[str, Any]]:
     """Load only the deterministic MT-767 1,000-mint selection and its bars."""
     source = "[" + ", ".join(repr(str(path)) for path in paths) + "]"
@@ -124,11 +131,12 @@ def load_signals(paths: list[Path]) -> list[dict[str, Any]]:
 
     signals: list[dict[str, Any]] = []
     for mint, bars in by_mint.items():
-        decision_time = decisions[mint]
-        decision_bar = next(bar for bar in bars if bar["bar_time"] == decision_time)
+        decision_bar_time = decisions[mint]
+        decision_bar = next(bar for bar in bars if bar["bar_time"] == decision_bar_time)
         signals.append({
             "mint": mint,
-            "decision_time": decision_time,
+            "decision_time": decision_bar_time + decision_phase_ms(mint, decision_bar_time),
+            "decision_bar_time": decision_bar_time,
             "decision_bar": decision_bar,
             "bars": bars,
             # MT-766's strongest fully available early close-outcome raw feature.
@@ -146,17 +154,18 @@ def valid_bar(bar: dict[str, Any] | None) -> bool:
     return bool(bar and (finite(bar["close"]) or 0) > 0 and (finite(bar["min_sol_in_pool"]) or 0) > 0)
 
 
-def entry_gap_move(signal: dict[str, Any]) -> float | None:
+def entry_gap_move(signal: dict[str, Any], latency_ms: int) -> float | None:
     """Return the absolute decision-to-delayed-entry move without replacing null data."""
-    entry = first_bar_after(signal["bars"], signal["decision_time"] + END_TO_END_DELAY_MS)
-    before = finite(signal["decision_bar"]["close"])
+    before_bar = first_bar_after(signal["bars"], signal["decision_time"])
+    entry = first_bar_after(signal["bars"], signal["decision_time"] + latency_ms)
+    before = finite(before_bar["close"]) if before_bar else None
     after = finite(entry["close"]) if entry else None
     if before is None or before <= 0 or after is None or after <= 0:
         return None
     return abs(after / before - 1)
 
 
-def choose_fill_misses(signals: Sequence[dict[str, Any]], mode: str) -> set[str]:
+def choose_fill_misses(signals: Sequence[dict[str, Any]], mode: str, latency_ms: int) -> set[str]:
     """Choose exactly 7% of signals deterministically before capacity is considered."""
     miss_count = round(len(signals) * 0.07)
     if mode == "random":
@@ -164,7 +173,7 @@ def choose_fill_misses(signals: Sequence[dict[str, Any]], mode: str) -> set[str]
         return set(random.Random(RANDOM_SEED).sample(names, miss_count))
     ranked = sorted(
         signals,
-        key=lambda signal: (entry_gap_move(signal) is not None, entry_gap_move(signal) or -1.0, signal["mint"]),
+        key=lambda signal: (entry_gap_move(signal, latency_ms) is not None, entry_gap_move(signal, latency_ms) or -1.0, signal["mint"]),
         reverse=True,
     )
     return {signal["mint"] for signal in ranked[:miss_count]}
@@ -196,22 +205,32 @@ def death_result(mint: str, entry_bar: dict[str, Any], last_bar: dict[str, Any] 
     return result
 
 
-def simulate_candidate(signal: dict[str, Any], hold_ms: int, fill_mode: str, fill_misses: set[str]) -> dict[str, Any]:
+def simulate_candidate(
+    signal: dict[str, Any], hold_ms: int, fill_mode: str, fill_misses: set[str], latency_ms: int,
+) -> dict[str, Any]:
     """Apply latency to both legs and turn an early stop into a realized loss."""
     mint = signal["mint"]
     decision_time = signal["decision_time"]
-    entry_target = decision_time + END_TO_END_DELAY_MS
+    baseline_entry = first_bar_after(signal["bars"], decision_time)
+    entry_target = decision_time + latency_ms
     entry_bar = first_bar_after(signal["bars"], entry_target)
     record: dict[str, Any] = {
         "mint": mint,
         "hold_seconds": hold_ms // 1000,
         "fill_mode": fill_mode,
         "decision_time": decision_time,
+        "decision_bar_time": signal.get("decision_bar_time", ""),
+        "latency_ms": latency_ms,
         "entry_target_time": entry_target,
+        "baseline_entry_time": "",
+        "baseline_entry_price": None,
         "entry_time": "",
         "intended_exit_time": "",
         "exit_target_time": "",
         "exit_time": "",
+        "intended_exit_bar_time": "",
+        "intended_exit_price": None,
+        "delayed_exit_price": None,
         "status": "",
         "entry_unfillable_reason": "",
         "died_before_exit": False,
@@ -243,17 +262,19 @@ def simulate_candidate(signal: dict[str, Any], hold_ms: int, fill_mode: str, fil
         return record
 
     entry_time = entry_bar["bar_time"]
-    decision_price = finite(signal["decision_bar"]["close"])
+    decision_price = finite(baseline_entry["close"]) if baseline_entry else None
     entry_price = finite(entry_bar["close"])
     record.update({
         "entry_time": entry_time,
-        "entry_bar_shifted": entry_time != decision_time,
+        "baseline_entry_time": baseline_entry["bar_time"] if baseline_entry else "",
+        "baseline_entry_price": decision_price,
+        "entry_bar_shifted": bool(baseline_entry and entry_time != baseline_entry["bar_time"]),
         "entry_delay_price_change": None if decision_price is None or not decision_price else entry_price / decision_price - 1 if entry_price is not None else None,
         "entry_trade_count": entry_bar["trade_count"],
         "entry_volume_sol": None if finite(entry_bar["buy_volume_sol"]) is None or finite(entry_bar["sell_volume_sol"]) is None else finite(entry_bar["buy_volume_sol"]) + finite(entry_bar["sell_volume_sol"]),
     })
-    intended_exit = entry_time + hold_ms
-    exit_target = intended_exit + END_TO_END_DELAY_MS
+    intended_exit = entry_target + hold_ms
+    exit_target = intended_exit + latency_ms
     exit_bar = first_bar_after(signal["bars"], exit_target)
     last_bar = signal["bars"][-1] if signal["bars"] else None
     died = exit_bar is None
@@ -279,7 +300,10 @@ def simulate_candidate(signal: dict[str, Any], hold_ms: int, fill_mode: str, fil
         "intended_exit_time": intended_exit,
         "exit_target_time": exit_target,
         "exit_time": used_exit["bar_time"] if used_exit else "",
-        "exit_bar_shifted": bool(exit_bar and exit_bar["bar_time"] != intended_exit),
+        "intended_exit_bar_time": intended_price_bar["bar_time"] if intended_price_bar else "",
+        "intended_exit_price": intended_price,
+        "delayed_exit_price": exit_price,
+        "exit_bar_shifted": bool(exit_bar and intended_price_bar and exit_bar["bar_time"] != intended_price_bar["bar_time"]),
         "exit_delay_price_change": None if intended_price is None or not intended_price else exit_price / intended_price - 1 if exit_price is not None else None,
         "status": result["status"],
         "died_before_exit": died,
@@ -301,9 +325,11 @@ def rank_key(record: dict[str, Any]) -> tuple[bool, float, str]:
     return (value is not None, value if value is not None else -1.0, record["mint"])
 
 
-def run_mode(signals: Sequence[dict[str, Any]], hold_ms: int, fill_mode: str) -> list[dict[str, Any]]:
+def run_mode(
+    signals: Sequence[dict[str, Any]], hold_ms: int, fill_mode: str, latency_ms: int,
+) -> list[dict[str, Any]]:
     """Enforce five simultaneous reservations, prioritizing same-bar contenders."""
-    fill_misses = choose_fill_misses(signals, fill_mode)
+    fill_misses = choose_fill_misses(signals, fill_mode, latency_ms)
     batches: dict[int, list[dict[str, Any]]] = defaultdict(list)
     for signal in signals:
         batches[signal["decision_time"]].append(signal)
@@ -312,7 +338,7 @@ def run_mode(signals: Sequence[dict[str, Any]], hold_ms: int, fill_mode: str) ->
     records: list[dict[str, Any]] = []
     for decision_time in sorted(batches):
         active = [record for record in active if record["free_time"] > decision_time]
-        candidates = [simulate_candidate(signal, hold_ms, fill_mode, fill_misses) for signal in batches[decision_time]]
+        candidates = [simulate_candidate(signal, hold_ms, fill_mode, fill_misses, latency_ms) for signal in batches[decision_time]]
         candidates.sort(key=rank_key, reverse=True)
         for candidate in candidates:
             if candidate["slot_status"] != "pending":
@@ -386,13 +412,13 @@ def summary(records: Sequence[dict[str, Any]]) -> dict[str, Any]:
     }
 
 
-def death_curve(signals: Sequence[dict[str, Any]]) -> list[dict[str, Any]]:
+def death_curve(signals: Sequence[dict[str, Any]], latency_ms: int) -> list[dict[str, Any]]:
     rows: list[dict[str, Any]] = []
     for hold_ms in HOLDS_MS:
         alive = 0
         for signal in signals:
-            entry = first_bar_after(signal["bars"], signal["decision_time"] + END_TO_END_DELAY_MS)
-            if entry and first_bar_after(signal["bars"], entry["bar_time"] + hold_ms + END_TO_END_DELAY_MS):
+            entry = first_bar_after(signal["bars"], signal["decision_time"] + latency_ms)
+            if entry and first_bar_after(signal["bars"], signal["decision_time"] + latency_ms + hold_ms + latency_ms):
                 alive += 1
         rows.append({"hold_seconds": hold_ms // 1000, "still_trading": alive, "died_before_exit": len(signals) - alive})
     return rows
@@ -413,16 +439,18 @@ def write_latency() -> None:
         },
         {
             "measure": "PumpPortal WebSocket received through enrichment to decision-ready",
-            "median_seconds": sci(Decimal("1.0")),
-            "p75_seconds": sci(Decimal("1.0")),
+            "median_seconds": "",
+            "p75_seconds": "",
             "sample_size": 0,
-            "source": "ASSUMPTION: no V2 timing samples exist; this conservative end-to-end value is applied to entry and exit",
+            "source": "ASSUMPTION: no V2 timing samples exist; Part B repeats 0.5s, 1.0s, and 2.0s end-to-end latency",
         },
     ]
     write_csv(OUTPUT / "latency.csv", rows, list(rows[0]))
 
 
-def write_report(proof_rows: Sequence[dict[str, Any]], results: dict[tuple[int, str], list[dict[str, Any]]], signals: Sequence[dict[str, Any]]) -> None:
+def write_report(
+    proof_rows: Sequence[dict[str, Any]], results: dict[tuple[int, int, str], list[dict[str, Any]]], signals: Sequence[dict[str, Any]],
+) -> None:
     lines = [
         "# MT-768 Simulator V2",
         "",
@@ -430,7 +458,7 @@ def write_report(proof_rows: Sequence[dict[str, Any]], results: dict[tuple[int, 
         "",
         "## Phase 1: Latency",
         "",
-        "V2 uses the PumpPortal `subscribeNewToken` WebSocket path (`memecoin-trader-v2/src/detect/pumpportal.py`), but the checkout contains no runtime logs or persisted timing samples. Therefore neither latency is measured: both values below are explicit assumptions with sample size zero, and every downstream simulation result rests on the 1.0-second end-to-end assumption.",
+        "V2 uses the PumpPortal `subscribeNewToken` WebSocket path (`memecoin-trader-v2/src/detect/pumpportal.py`), but the checkout contains no runtime logs or persisted timing samples. Therefore latency is not measured: every downstream simulation is repeated at 0.5, 1.0, and 2.0 seconds.",
         "",
         "| measure | median seconds | p75 seconds | sample size | source |",
         "|---|---:|---:|---:|---|",
@@ -449,15 +477,16 @@ def write_report(proof_rows: Sequence[dict[str, Any]], results: dict[tuple[int, 
         "",
         "The bar series is five-second resolution, so the one-second assumption can move a decision off its original bar. Exit price changes below compare the first bar at/after the intended exit with the first bar at/after intended exit plus delay; deaths without a delayed exit fill remain null rather than receiving a fabricated gap.",
         "",
-        "| hold | fill mode | entry moved bar | median entry price change | exit moved bar | median exit price change |",
-        "|---:|---|---:|---:|---:|---:|",
+        "| latency | hold | fill mode | entry moved bar | median entry price change | exit moved bar | median exit price change |",
+        "|---:|---:|---|---:|---:|---:|---:|",
     ]
-    for hold_ms in HOLDS_MS:
-        for fill_mode in ("random", "adverse"):
-            stats = summary(results[(hold_ms, fill_mode)])
-            lines.append(
-                f"| {hold_ms // 1000} s | {fill_mode} | {stats['entry_shifted']}/{stats['taken']} | {sci(percentile(stats['entry_changes'], Decimal('0.5')))} | {stats['exit_shifted']}/{stats['exit_fills']} | {sci(percentile(stats['exit_changes'], Decimal('0.5')))} |"
-            )
+    for latency_ms in LATENCIES_MS:
+        for hold_ms in HOLDS_MS:
+            for fill_mode in ("random", "adverse"):
+                stats = summary(results[(latency_ms, hold_ms, fill_mode)])
+                lines.append(
+                    f"| {latency_ms / 1000:.1f} s | {hold_ms // 1000} s | {fill_mode} | {stats['entry_shifted']}/{stats['taken']} | {sci(percentile(stats['entry_changes'], Decimal('0.5')))} | {stats['exit_shifted']}/{stats['exit_fills']} | {sci(percentile(stats['exit_changes'], Decimal('0.5')))} |"
+                )
     lines += [
         "",
         "## Proof Tests",
@@ -469,7 +498,7 @@ def write_report(proof_rows: Sequence[dict[str, Any]], results: dict[tuple[int, 
         "| hold | still trading | died before exit |",
         "|---:|---:|---:|",
     ]
-    for row in death_curve(signals):
+    for row in death_curve(signals, 1_000):
         lines.append(f"| {row['hold_seconds']} s | {row['still_trading']} | {row['died_before_exit']} |")
     lines += [
         "",
@@ -477,20 +506,21 @@ def write_report(proof_rows: Sequence[dict[str, Any]], results: dict[tuple[int, 
         "",
         "All distributions include deaths as their actual final return. `entry-unfillable` means only that no valid delayed entry bar existed; deaths are reported separately. Price and SOL values use scientific notation; missing source values remain blank in `sanity_v2.csv` rather than zero-filled.",
         "",
-        "| hold | fill mode | taken | fill misses | slot skipped | entry unfillable | deaths (zero return; median return) | min | p25 | median | p75 | max | mean return | win rate | median impact share | peak exposure SOL | five slots full |",
-        "|---:|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|",
+        "| latency | hold | fill mode | taken | fill misses | slot skipped | entry unfillable | deaths (zero return; median return) | min | p25 | median | p75 | max | mean return | win rate | median impact share | peak exposure SOL | five slots full |",
+        "|---:|---:|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|",
     ]
     failures: list[str] = []
-    for hold_ms in HOLDS_MS:
-        for fill_mode in ("random", "adverse"):
-            stats = summary(results[(hold_ms, fill_mode)])
-            med = percentile(stats["returns"], Decimal("0.5"))
-            if stats["win_rate"] is not None and (stats["win_rate"] >= Decimal("0.5") or (med is not None and med > 1)):
-                failures.append(f"{hold_ms // 1000}s/{fill_mode}")
-            reasons = ", ".join(f"{name}={count}" for name, count in sorted(stats["entry_unfillable_reasons"].items())) or "none"
-            lines.append(
-                f"| {hold_ms // 1000} s | {fill_mode} | {stats['taken']} | {stats['fill_misses']} | {stats['slot_skipped']} | {stats['entry_unfillable']} ({reasons}) | {stats['deaths']} ({stats['death_zero_returns']}; {sci(percentile(stats['death_returns'], Decimal('0.5')))}) | {format_stats(stats['returns'])} | {sci(stats['mean_return'])} | {sci(stats['win_rate'])} | {sci(percentile(stats['impacts'], Decimal('0.5')))} | {sci(stats['peak_exposure'])} | {sci(stats['full_fraction'])} |"
-            )
+    for latency_ms in LATENCIES_MS:
+        for hold_ms in HOLDS_MS:
+            for fill_mode in ("random", "adverse"):
+                stats = summary(results[(latency_ms, hold_ms, fill_mode)])
+                med = percentile(stats["returns"], Decimal("0.5"))
+                if stats["win_rate"] is not None and (stats["win_rate"] >= Decimal("0.5") or (med is not None and med > 1)):
+                    failures.append(f"{latency_ms / 1000:.1f}s/{hold_ms // 1000}s/{fill_mode}")
+                reasons = ", ".join(f"{name}={count}" for name, count in sorted(stats["entry_unfillable_reasons"].items())) or "none"
+                lines.append(
+                    f"| {latency_ms / 1000:.1f} s | {hold_ms // 1000} s | {fill_mode} | {stats['taken']} | {stats['fill_misses']} | {stats['slot_skipped']} | {stats['entry_unfillable']} ({reasons}) | {stats['deaths']} ({stats['death_zero_returns']}; {sci(percentile(stats['death_returns'], Decimal('0.5')))}) | {format_stats(stats['returns'])} | {sci(stats['mean_return'])} | {sci(stats['win_rate'])} | {sci(percentile(stats['impacts'], Decimal('0.5')))} | {sci(stats['peak_exposure'])} | {sci(stats['full_fraction'])} |"
+                )
     lines += [
         "",
         "## Verdict",
@@ -521,10 +551,11 @@ def main() -> None:
     signals = load_signals(parquet_paths())
     if len(signals) != 1000:
         raise RuntimeError(f"expected 1,000 MT-767 sampled signals, got {len(signals)}")
-    results: dict[tuple[int, str], list[dict[str, Any]]] = {}
-    for hold_ms in HOLDS_MS:
-        for fill_mode in ("random", "adverse"):
-            results[(hold_ms, fill_mode)] = run_mode(signals, hold_ms, fill_mode)
+    results: dict[tuple[int, int, str], list[dict[str, Any]]] = {}
+    for latency_ms in LATENCIES_MS:
+        for hold_ms in HOLDS_MS:
+            for fill_mode in ("random", "adverse"):
+                results[(latency_ms, hold_ms, fill_mode)] = run_mode(signals, hold_ms, fill_mode, latency_ms)
     rows = [serializable(record) for records in results.values() for record in records]
     write_csv(OUTPUT / "sanity_v2.csv", rows, list(rows[0]))
     write_latency()
