@@ -540,9 +540,14 @@ def render_report(trade_counts: dict[str, int] | None, auc: list[dict[str, Any]]
     lines.extend(f"| {row[0]} | {row[1]:,} | {row[2]:,} | {row[3]:,} | {row[4]:,} | {row[5]:,} | {row[6]:,} | {row[7]:,} |" for row in day_rows)
     lines.extend([
         "", "## Feature Coverage", "",
-        "`feature_coverage_by_day.csv` contains per-day non-null count and percentage for every feature column, including the known-sparse `unique_wallets_total`, `top10_holder_pct`, and `creator_holdings_pct` fields. The fields are retained unchanged.",
-        "", "## Labels", "",
+        "Every feature is retained below, including the known-sparse `unique_wallets_total`, `top10_holder_pct`, and `creator_holdings_pct` fields. `feature_coverage_by_day.csv` provides the same data in machine-readable form.",
+        "", "| day | feature | rows | non-null | coverage |", "|---|---|---:|---:|---:|",
     ])
+    lines.extend(
+        f"| {day_value} | {feature} | {rows:,} | {non_null:,} | {non_null / rows * 100 if rows else 0:.2f}% |"
+        for day_value, feature, rows, non_null in coverage
+    )
+    lines.extend(["", "## Labels", ""])
     if trade_counts is None:
         lines.append("Trade-label or rug-label join did not complete; base checkpoint rows and the AUC section remain independent.")
     else:
