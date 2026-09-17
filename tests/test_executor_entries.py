@@ -68,6 +68,7 @@ def executor(
         heartbeat_path=tmp_path / "heartbeat",
         halt_path=tmp_path / "halt",
         mark_provider=mark_provider,
+        random_float=lambda: 0.99,
     )
 
 

@@ -8,6 +8,7 @@ import json
 import logging
 import math
 import os
+import random
 import sys
 import time
 from collections.abc import Awaitable, Callable
@@ -26,8 +27,9 @@ from services.adapters.paper import PaperExecutionAdapter
 from services.logging_utils import configure_service_logging
 from services.store import MemecoinStore
 from services.strategy import GateConfig, get_qualifying_candidates, load_gates
-from src.core.config import Settings, load_settings
+from src.core.config import PaperFrictionConfig, Settings, load_settings
 from src.core.models import Side, Trade
+from src.execution.paper_friction import apply_exit_friction
 from src.execution.live_daily_caps import evaluate_daily_live_caps
 from src.execution.live_guardrails import evaluate_live_guardrails
 from src.execution.price_provider import JupiterPriceProvider, PriceProvider, PriceResult
@@ -127,6 +129,8 @@ class StrategyExecutor:
         alert_manager: Any | None = None,
         entry_arming_check: Callable[[], Awaitable[tuple[str, ...]]] | None = None,
         paper_live_state_check: Callable[[], Awaitable[tuple[str, ...]]] | None = None,
+        paper_friction: PaperFrictionConfig | None = None,
+        random_float: Callable[[], float] | None = None,
     ) -> None:
         self._store = store
         self._adapter = adapter
@@ -140,6 +144,8 @@ class StrategyExecutor:
         self._alerts = alert_manager or AlertManager.from_env()
         self._entry_arming_check = entry_arming_check
         self._paper_live_state_check = paper_live_state_check
+        self._paper_friction = paper_friction or load_settings().paper_friction
+        self._random_float = random_float or random.Random().random
         self._monitor_only = False
         self._monitor_only_reasons: tuple[str, ...] = ()
         self._positions: dict[str, dict[str, Any]] = {}
@@ -164,6 +170,9 @@ class StrategyExecutor:
         self._feed_stale_since: float | None = None
         self._fallback_attempted_since_stale: set[str] = set()
         self._fallback_marked_since_stale: set[str] = set()
+        self._entry_attempts: dict[str, int] = {}
+        self._entry_failures_exhausted: set[str] = set()
+        self._paper_exit_retry_at: dict[str, float] = {}
 
     async def start(self) -> None:
         """Hydrate persisted open state before deciding whether entries are armed."""
@@ -575,6 +584,12 @@ class StrategyExecutor:
         if isinstance(opened_at, datetime):
             age_minutes = (datetime.now(UTC) - opened_at).total_seconds() / 60
             if age_minutes >= self._exits["time_stop_minutes"]:
+                delay_seconds = self._paper_friction.exit_execution_delay_seconds
+                if (
+                    self._mode == "paper"
+                    and age_minutes * 60 < self._exits["time_stop_minutes"] * 60 + delay_seconds
+                ):
+                    return None
                 return "time_stop"
         return None
 
@@ -587,6 +602,8 @@ class StrategyExecutor:
 
     async def _enter_locked(self, candidate: dict[str, Any]) -> None:
         mint = str(candidate["mint_address"])
+        if mint in self._entry_failures_exhausted:
+            return
         slippage_bps = _entry_slippage_bps(candidate.get("pool_sol"))
         if slippage_bps is None:
             log.info("entry skipped mint=%s reason=pool_below_slippage_tier", mint[:16])
@@ -618,6 +635,14 @@ class StrategyExecutor:
                         return
                     mark_timestamp = datetime.now(UTC)
                     self._adapter.set_price(mint, mark_price)
+                    attempts = self._entry_attempts.get(mint, 0) + 1
+                    self._entry_attempts[mint] = attempts
+                    if self._random_float() < self._paper_friction.entry_failure_rate:
+                        log.info("entry_failed mint=%s attempt=%d", mint, attempts)
+                        if attempts >= self._paper_friction.max_entry_attempts:
+                            self._entry_failures_exhausted.add(mint)
+                            log.info("entry_abandoned mint=%s attempts=%d", mint, attempts)
+                        return
 
                 if (
                     self._mode == "live"
@@ -625,6 +650,14 @@ class StrategyExecutor:
                     and hasattr(self._adapter, "buy_bonding_curve")
                 ):
                     trade = await self._adapter.buy_bonding_curve(mint, amount_sol, slippage_bps)
+                elif self._mode == "paper":
+                    trade = await self._adapter.execute_swap(
+                        mint,
+                        Side.BUY,
+                        amount_sol,
+                        slippage_bps,
+                        pool_sol=candidate.get("pool_sol"),
+                    )
                 else:
                     trade = await self._adapter.execute_swap(
                         mint,
@@ -647,6 +680,7 @@ class StrategyExecutor:
                     ),
                     "entry_mark_timestamp": mark_timestamp.isoformat() if mark_timestamp else None,
                     "entry_mark_diagnostic": entry_mark.reason if entry_mark else None,
+                    "entry_attempts": self._entry_attempts.get(mint, 1),
                 }
                 position = {
                     "id": str(uuid4()),
@@ -662,6 +696,16 @@ class StrategyExecutor:
                     "candidate_id": candidate.get("id"),
                     "fill_quality": "simulated" if self._mode == "paper" else "confirmed",
                     "tx_signature": trade.tx_signature,
+                    "entry_pool_sol": candidate.get("pool_sol"),
+                    "quoted_token_amount": trade.metadata.get("quoted_token_amount", trade.token_amount),
+                    "slippage_entry_pct": trade.metadata.get("slippage_entry_pct", 0.0),
+                    "dex_fee_entry_sol": trade.metadata.get("dex_fee_entry_sol", 0.0),
+                    "priority_fee_total_sol": (
+                        self._paper_friction.priority_fee_buy_sol + self._paper_friction.priority_fee_sell_sol
+                        if self._mode == "paper"
+                        else 0.0
+                    ),
+                    "entry_attempts": self._entry_attempts.get(mint, 1),
                 }
                 await entry.create_position(position, _trade_record(trade))
         except Exception as exc:
@@ -672,6 +716,7 @@ class StrategyExecutor:
 
         assert position is not None and trade is not None
         self._positions[mint] = position
+        self._entry_attempts.pop(mint, None)
         self._last_valid_mark_at[mint] = time.monotonic()
         log.info("entered mint=%s position=%s", mint[:16], position["id"])
         if self._mode == "live" and not self._live_entry_alerted:
@@ -719,10 +764,26 @@ class StrategyExecutor:
         trigger_timestamp = mark_timestamp or datetime.now(UTC)
         if self._mode == "paper":
             close_price = self._paper_exit_price(position, fallback_price_sol, reason)
+            quoted_sol = token_amount * close_price
+            pool_sol = _positive_float(position.get("entry_pool_sol"))
+            if pool_sol is not None:
+                exit_fill = apply_exit_friction(
+                    quoted_sol,
+                    float(position["amount_sol"]),
+                    pool_sol,
+                    self._paper_friction,
+                )
+                sol_out = exit_fill.sol_amount
+                slippage_exit_pct = exit_fill.slippage_pct
+                dex_fee_exit_sol = exit_fill.dex_fee_sol
+            else:
+                sol_out = quoted_sol
+                slippage_exit_pct = 0.0
+                dex_fee_exit_sol = 0.0
             trade = Trade(
                 mint_address=mint,
                 side=Side.SELL,
-                amount_sol=token_amount * close_price,
+                amount_sol=sol_out,
                 token_amount=token_amount,
                 price_sol=close_price,
                 slippage_bps=300,
@@ -754,12 +815,46 @@ class StrategyExecutor:
             "mark_diagnostic": mark_diagnostic,
         }
         amount_sol = float(position["amount_sol"])
-        entry_price = float(position["entry_price_sol"])
-        realized_pnl = (
-            amount_sol * ((close_price - entry_price) / entry_price)
-            if self._mode == "paper"
-            else float(trade.amount_sol) - amount_sol
-        )
+        if self._mode == "paper":
+            quoted_token_amount = float(position.get("quoted_token_amount") or token_amount)
+            gross_pnl = quoted_token_amount * close_price - amount_sol
+            net_pnl = float(trade.amount_sol) - amount_sol - float(
+                position.get("priority_fee_total_sol") or 0.0,
+            )
+            opened_at = position.get("opened_at")
+            planned_seconds = self._exits["time_stop_minutes"] * 60
+            exit_delay_seconds = (
+                (datetime.now(UTC) - opened_at).total_seconds() - planned_seconds
+                if isinstance(opened_at, datetime)
+                else None
+            )
+            position.update(
+                {
+                    "slippage_exit_pct": slippage_exit_pct,
+                    "dex_fee_exit_sol": dex_fee_exit_sol,
+                    "exit_delay_seconds": exit_delay_seconds,
+                    "gross_pnl_sol": gross_pnl,
+                    "net_pnl_sol": net_pnl,
+                    "friction_total_sol": gross_pnl - net_pnl,
+                }
+            )
+            trade.metadata.update(
+                {
+                    "slippage_entry_pct": position.get("slippage_entry_pct", 0.0),
+                    "slippage_exit_pct": slippage_exit_pct,
+                    "dex_fee_entry_sol": position.get("dex_fee_entry_sol", 0.0),
+                    "dex_fee_exit_sol": dex_fee_exit_sol,
+                    "priority_fee_total_sol": position.get("priority_fee_total_sol", 0.0),
+                    "entry_attempts": position.get("entry_attempts", 1),
+                    "exit_delay_seconds": exit_delay_seconds,
+                    "gross_pnl_sol": gross_pnl,
+                    "net_pnl_sol": net_pnl,
+                    "friction_total_sol": gross_pnl - net_pnl,
+                }
+            )
+            realized_pnl = net_pnl
+        else:
+            realized_pnl = float(trade.amount_sol) - amount_sol
         await self._store.close_position(
             position,
             _trade_record(trade),
@@ -785,6 +880,25 @@ class StrategyExecutor:
         """Keep an expected single-token exit failure inside the monitor loop."""
 
         if self._mode != "live":
+            mint = str(position["mint_address"])
+            now = time.monotonic()
+            retry_at = self._paper_exit_retry_at.get(mint)
+            has_friction_entry = _positive_float(position.get("entry_pool_sol")) is not None
+            if (
+                has_friction_entry
+                and retry_at is None
+                and self._random_float() < self._paper_friction.entry_failure_rate
+            ):
+                self._paper_exit_retry_at[mint] = now + self._paper_friction.exit_retry_delay_seconds
+                log.info(
+                    "exit_failed mint=%s retry_in=%.1fs",
+                    mint,
+                    self._paper_friction.exit_retry_delay_seconds,
+                )
+                return
+            if retry_at is not None and now < retry_at:
+                return
+            self._paper_exit_retry_at.pop(mint, None)
             await self._close_position(
                 position,
                 fallback_price_sol,
@@ -855,6 +969,7 @@ class StrategyExecutor:
         self._last_valid_mark_at.pop(mint, None)
         self._last_position_mark_write_at.pop(position_id, None)
         self._mark_sla_warned.discard(mint)
+        self._paper_exit_retry_at.pop(mint, None)
 
     def _lock_for(self, mint_address: str) -> asyncio.Lock:
         lock = self._mint_locks.get(mint_address)
@@ -1380,7 +1495,8 @@ async def _run() -> None:
     wallet_probe: Any | None = None
     try:
         if mode == "paper":
-            adapter: Any = PaperExecutionAdapter()
+            paper_friction = load_settings().paper_friction
+            adapter: Any = PaperExecutionAdapter(paper_friction)
             entry_arming_check = None
             try:
                 wallet_probe = build_live_adapter()
@@ -1403,6 +1519,7 @@ async def _run() -> None:
             cycle_seconds=float(os.getenv("MEMECOIN_EXECUTOR_CYCLE_SECONDS", "1")),
             entry_arming_check=entry_arming_check,
             paper_live_state_check=paper_live_state_check,
+            paper_friction=paper_friction if mode == "paper" else None,
         )
         await executor.run()
     finally:

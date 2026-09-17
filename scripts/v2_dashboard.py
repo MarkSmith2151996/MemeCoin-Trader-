@@ -41,6 +41,22 @@ SELECT
         WHERE status = 'closed'
           AND closed_at >= date_trunc('day', NOW() AT TIME ZONE 'UTC') AT TIME ZONE 'UTC'
     ), 0)::DOUBLE PRECISION AS today_pnl_sol,
+    COALESCE(SUM(COALESCE(gross_pnl_sol, realized_pnl_sol)) FILTER (
+        WHERE status = 'closed'
+          AND closed_at >= date_trunc('day', NOW() AT TIME ZONE 'UTC') AT TIME ZONE 'UTC'
+    ), 0)::DOUBLE PRECISION AS today_gross_pnl_sol,
+    COALESCE(SUM(COALESCE(net_pnl_sol, realized_pnl_sol)) FILTER (
+        WHERE status = 'closed'
+          AND closed_at >= date_trunc('day', NOW() AT TIME ZONE 'UTC') AT TIME ZONE 'UTC'
+    ), 0)::DOUBLE PRECISION AS today_net_pnl_sol,
+    COALESCE(SUM(COALESCE(gross_pnl_sol, realized_pnl_sol)) FILTER (
+        WHERE status = 'closed'
+          AND closed_at >= date_trunc('hour', NOW() AT TIME ZONE 'UTC') AT TIME ZONE 'UTC'
+    ), 0)::DOUBLE PRECISION AS hour_gross_pnl_sol,
+    COALESCE(SUM(COALESCE(net_pnl_sol, realized_pnl_sol)) FILTER (
+        WHERE status = 'closed'
+          AND closed_at >= date_trunc('hour', NOW() AT TIME ZONE 'UTC') AT TIME ZONE 'UTC'
+    ), 0)::DOUBLE PRECISION AS hour_net_pnl_sol,
     COALESCE(SUM(realized_pnl_sol) FILTER (WHERE status = 'closed'), 0)::DOUBLE PRECISION
         AS all_time_pnl_sol
 FROM memecoin.positions
@@ -53,7 +69,7 @@ ORDER BY gate_name
 """
 RECENT_TRADES_SQL = """
 SELECT t.side, t.mint_address, t.amount_sol, t.price_sol, t.mode, t.executed_at,
-       p.close_reason, p.realized_pnl_sol
+       p.close_reason, p.gross_pnl_sol, p.net_pnl_sol, p.friction_total_sol
 FROM memecoin.trades AS t
 LEFT JOIN memecoin.positions AS p ON p.id = t.position_id
 ORDER BY t.executed_at DESC
@@ -170,7 +186,10 @@ def build_dashboard(snapshot: HiveDashboardSnapshot) -> Group:
         f"executor heartbeat: {snapshot.heartbeat} | captured: {_timestamp(snapshot.captured_at)}\n"
         f"open: {summary.get('open_positions', 0)} | "
         f"exposure: {_number(summary.get('open_exposure_sol'))} SOL | "
-        f"today: {_number(summary.get('today_pnl_sol'))} SOL "
+        f"hour gross/net: {_number(summary.get('hour_gross_pnl_sol'))} / "
+        f"{_number(summary.get('hour_net_pnl_sol'))} SOL | "
+        f"today gross/net: {_number(summary.get('today_gross_pnl_sol'))} / "
+        f"{_number(summary.get('today_net_pnl_sol'))} SOL "
         f"({summary.get('today_closed_count', 0)} closed) | "
         f"all-time: {_number(summary.get('all_time_pnl_sol'))} SOL",
         style="bold cyan",
@@ -241,12 +260,15 @@ def build_dashboard(snapshot: HiveDashboardSnapshot) -> Group:
     trades.add_column("Side")
     trades.add_column("Mint")
     trades.add_column("SOL", justify="right")
-    trades.add_column("Exit/PnL")
+    trades.add_column("Exit/Gross/Net")
     if snapshot.trades:
         for trade in snapshot.trades:
             exit_detail = str(trade.get("close_reason") or "-")
-            if trade.get("realized_pnl_sol") is not None:
-                exit_detail += f" / {_number(trade['realized_pnl_sol'])}"
+            if trade.get("net_pnl_sol") is not None:
+                exit_detail += (
+                    f" / {_number(trade.get('gross_pnl_sol'))} / "
+                    f"{_number(trade.get('net_pnl_sol'))}"
+                )
             trades.add_row(
                 _timestamp(trade.get("executed_at")),
                 str(trade.get("side") or "-"),

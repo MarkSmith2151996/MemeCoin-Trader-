@@ -43,6 +43,15 @@ execution:
   tx_retry_count: 3
   tx_confirm_timeout_s: 30
 
+paper_friction:
+  priority_fee_buy_sol: 0.001
+  priority_fee_sell_sol: 0.005
+  dex_fee_pct: 0.0025
+  entry_failure_rate: 0.20
+  max_entry_attempts: 3
+  exit_execution_delay_seconds: 2
+  exit_retry_delay_seconds: 6
+
 live_guardrails:
   confirmation_phrase: I_UNDERSTAND_THIS_CAN_LOSE_REAL_SOL
   max_trade_sol: 0.02

@@ -214,9 +214,12 @@ class MemecoinStore:
                     INSERT INTO memecoin.positions (
                         id, mint_address, entry_price_sol, amount_sol, token_amount,
                         peak_price_sol, trailing_armed, status, mode, strategy, opened_at,
-                        candidate_id, fill_quality, tx_signature
+                        candidate_id, fill_quality, tx_signature, entry_pool_sol,
+                        quoted_token_amount, slippage_entry_pct, dex_fee_entry_sol,
+                        priority_fee_total_sol, entry_attempts
                     ) VALUES (
-                        $1, $2, $3, $4, $5, $6, $7, 'open', $8, $9, $10, $11, $12, $13
+                        $1, $2, $3, $4, $5, $6, $7, 'open', $8, $9, $10, $11, $12, $13,
+                        $14, $15, $16, $17, $18, $19
                     )
                     """,
                     position["id"],
@@ -232,6 +235,12 @@ class MemecoinStore:
                     position.get("candidate_id"),
                     position.get("fill_quality"),
                     position.get("tx_signature"),
+                    position.get("entry_pool_sol"),
+                    position.get("quoted_token_amount"),
+                    position.get("slippage_entry_pct"),
+                    position.get("dex_fee_entry_sol"),
+                    position.get("priority_fee_total_sol"),
+                    position.get("entry_attempts"),
                 )
                 await self._insert_trade(connection, trade, position["id"])
 
@@ -360,7 +369,10 @@ class MemecoinStore:
                         close_price_sol = $3, realized_pnl_sol = $4,
                         adjusted_pnl_sol = $4,
                         peak_price_sol = GREATEST(COALESCE(peak_price_sol, 0), $5),
-                        trailing_armed = trailing_armed OR $6
+                        trailing_armed = trailing_armed OR $6,
+                        slippage_exit_pct = $7, dex_fee_exit_sol = $8,
+                        exit_delay_seconds = $9, gross_pnl_sol = $10,
+                        net_pnl_sol = $11, friction_total_sol = $12
                     WHERE id = $1 AND status IN ('open', 'quarantined')
                     RETURNING id
                     """,
@@ -370,6 +382,12 @@ class MemecoinStore:
                     realized_pnl_sol,
                     float(position.get("peak_price_sol") or position["entry_price_sol"]),
                     bool(position.get("trailing_armed")),
+                    position.get("slippage_exit_pct"),
+                    position.get("dex_fee_exit_sol"),
+                    position.get("exit_delay_seconds"),
+                    position.get("gross_pnl_sol"),
+                    position.get("net_pnl_sol"),
+                    position.get("friction_total_sol"),
                 )
                 if closed_id is None:
                     raise RuntimeError(f"position {position['id']} is no longer open")
@@ -452,9 +470,12 @@ class EntryTransaction:
             INSERT INTO memecoin.positions (
                 id, mint_address, entry_price_sol, amount_sol, token_amount,
                 peak_price_sol, trailing_armed, status, mode, strategy, opened_at,
-                candidate_id, fill_quality, tx_signature
+                candidate_id, fill_quality, tx_signature, entry_pool_sol,
+                quoted_token_amount, slippage_entry_pct, dex_fee_entry_sol,
+                priority_fee_total_sol, entry_attempts
             ) VALUES (
-                $1, $2, $3, $4, $5, $6, $7, 'open', $8, $9, $10, $11, $12, $13
+                $1, $2, $3, $4, $5, $6, $7, 'open', $8, $9, $10, $11, $12, $13,
+                $14, $15, $16, $17, $18, $19
             )
             """,
             position["id"],
@@ -470,5 +491,11 @@ class EntryTransaction:
             position.get("candidate_id"),
             position.get("fill_quality"),
             position.get("tx_signature"),
+            position.get("entry_pool_sol"),
+            position.get("quoted_token_amount"),
+            position.get("slippage_entry_pct"),
+            position.get("dex_fee_entry_sol"),
+            position.get("priority_fee_total_sol"),
+            position.get("entry_attempts"),
         )
         await self._store._insert_trade(self._connection, trade, str(position["id"]))

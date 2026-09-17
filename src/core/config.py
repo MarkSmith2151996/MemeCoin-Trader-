@@ -65,6 +65,19 @@ class ExecutionConfig(BaseModel):
     tx_confirm_timeout_s: int = 30
 
 
+class PaperFrictionConfig(BaseModel):
+    """Execution costs and failures applied only by the V2 paper executor."""
+
+    model_config = ConfigDict(extra="forbid")
+    priority_fee_buy_sol: float = Field(default=0.001, ge=0)
+    priority_fee_sell_sol: float = Field(default=0.005, ge=0)
+    dex_fee_pct: float = Field(default=0.0025, ge=0, lt=1)
+    entry_failure_rate: float = Field(default=0.20, ge=0, le=1)
+    max_entry_attempts: int = Field(default=3, ge=1)
+    exit_execution_delay_seconds: float = Field(default=2.0, ge=0)
+    exit_retry_delay_seconds: float = Field(default=6.0, ge=0)
+
+
 class LiveGuardrailsConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
     confirmation_phrase: str = "I_UNDERSTAND_THIS_CAN_LOSE_REAL_SOL"
@@ -86,6 +99,7 @@ class Settings(BaseModel):
     position: PositionConfig = Field(default_factory=PositionConfig)
     exits: ExitConfig = Field(default_factory=ExitConfig)
     execution: ExecutionConfig = Field(default_factory=ExecutionConfig)
+    paper_friction: PaperFrictionConfig = Field(default_factory=PaperFrictionConfig)
     live_guardrails: LiveGuardrailsConfig = Field(default_factory=LiveGuardrailsConfig)
     monitoring: MonitoringConfig = Field(default_factory=MonitoringConfig)
 
